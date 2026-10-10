@@ -4,14 +4,14 @@ import arc/interp/safepoint
 import arc/interp/state.{type State, SavedFrame, State}
 import arc/rt/async as rt_async
 import arc/rt/bytecode.{
-  type FuncTemplate, FuncTemplate, ParkedOp, SuspendedFrame,
+  type FuncTemplate, FnFlags, FuncTemplate, ParkedOp, SuspendedFrame,
 }
 import arc/rt/gc as rt_gc
 import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, Agent, BirthSettled, BytecodeFn, FnFlags,
+  type Agent, type Handle, type JsVal, Agent, BirthSettled, BytecodeFn,
   GenSuspendedYield, HostJob, KHandle, ResumeFrame, SGenerator, Store, classify,
   mk_object, mk_undefined, plain_object,
 }

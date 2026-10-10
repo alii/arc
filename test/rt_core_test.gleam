@@ -2,7 +2,7 @@ import arc/bytecode/key
 import arc/internal/unsafe
 import arc/interp/kernel
 import arc/rt/builtins as rt_builtins
-import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
+import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, FnFlags}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/lang as rt_lang
@@ -10,10 +10,10 @@ import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, BirthSettled, BytecodeFn, FnFlags, FrameInfo,
-  JFloat, JInt, JNegInf, JPosInf, JsOps, KBool, KHandle, KNum, KStr, Store,
-  StringKey, classify, mk_int, mk_null, mk_number, mk_object, mk_string,
-  mk_undefined, plain_object,
+  type Agent, type JsVal, Agent, BirthSettled, BytecodeFn, FrameInfo, JFloat,
+  JInt, JNegInf, JPosInf, JsOps, KBool, KHandle, KNum, KStr, Store, StringKey,
+  classify, mk_int, mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/dict

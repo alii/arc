@@ -137,7 +137,7 @@ pub fn drain(st: Agent) -> Agent {
       }
     Some(#(job, rest)) -> {
       let st = Agent(..st, store: Store(..store, microtasks: rest))
-      let st = execute_job(st, job)
+      let st = run_job(st, job)
       let st = rt_gc.maybe_collect(st)
       drain(st)
     }
@@ -226,6 +226,7 @@ fn enqueue_resolve_ok(st: Agent, w: AsyncWaiter) -> Agent {
       arg: wait_result_js(Woken),
       resolve: mk_object(w.promise),
       reject: mk_object(w.promise),
+      snapshot: async_context(st),
     ),
   )
 }
@@ -344,9 +345,40 @@ fn describe_thrown(st: Agent, thrown: JsVal) -> String {
   rt_inspect.format_error(st, thrown)
 }
 
+pub fn async_context(st: Agent) -> JsVal {
+  st.store.meta.async_context_mapping
+}
+
+pub fn set_async_context(st: Agent, mapping: JsVal) -> Agent {
+  let store = st.store
+  Agent(
+    ..st,
+    store: Store(
+      ..store,
+      meta: StoreMeta(..store.meta, async_context_mapping: mapping),
+    ),
+  )
+}
+
+// a job runs under the mapping current when it was made
+fn run_job(st: Agent, job: Job) -> Agent {
+  let outer = async_context(st)
+  let snapshot = case job {
+    ReactionJob(snapshot:, ..) | ResolveThenableJob(snapshot:, ..) -> snapshot
+    HostJob(..) -> outer
+  }
+  case snapshot == outer {
+    True -> execute_job(st, job)
+    False ->
+      set_async_context(st, snapshot)
+      |> execute_job(job)
+      |> set_async_context(outer)
+  }
+}
+
 fn execute_job(st: Agent, job: Job) -> Agent {
   case job {
-    ReactionJob(handler:, arg:, resolve:, reject:) ->
+    ReactionJob(handler:, arg:, resolve:, reject:, snapshot: _) ->
       case handler {
         IdentityPassThrough -> settle(st, resolve, Fulfil, arg)
         ThrowerPassThrough -> settle(st, reject, Reject, arg)
@@ -356,7 +388,7 @@ fn execute_job(st: Agent, job: Job) -> Agent {
             #(ThrowCompletion(e), st) -> settle(st, reject, Reject, e)
           }
       }
-    ResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
+    ResolveThenableJob(thenable:, then_fn:, resolve:, reject:, snapshot: _) ->
       case try_call(st, then_fn, thenable, [resolve, reject]) {
         #(NormalCompletion(_), st) -> st
         #(ThrowCompletion(e), st) -> call_settle(st, reject, [e])
@@ -713,6 +745,7 @@ fn enqueue_reactions(
         arg:,
         resolve: r.child_resolve,
         reject: r.child_reject,
+        snapshot: r.snapshot,
       ),
     )
   })
@@ -770,6 +803,7 @@ fn resolve_with_handle(
                   then_fn: then_val,
                   resolve: mk_object(resolve_h),
                   reject: mk_object(reject_h),
+                  snapshot: async_context(st),
                 ),
               )
             }
@@ -848,6 +882,7 @@ fn perform_then_handlers(
   resolve: JsVal,
   reject: JsVal,
 ) -> Agent {
+  let snapshot = async_context(st)
   case promise_data(st, promise_h) {
     PromiseRecord(data:, state: PromisePending(reactions), ..) ->
       rt_store.cell_set(
@@ -860,6 +895,7 @@ fn perform_then_handlers(
               on_reject: reject_handler,
               child_resolve: resolve,
               child_reject: reject,
+              snapshot:,
             ),
             ..reactions
           ]),
@@ -871,7 +907,13 @@ fn perform_then_handlers(
         rt_store.cell_set(st, data, SPromiseData(state, is_handled: True))
       enqueue_job(
         st,
-        ReactionJob(handler: fulfill_handler, arg: value, resolve:, reject:),
+        ReactionJob(
+          handler: fulfill_handler,
+          arg: value,
+          resolve:,
+          reject:,
+          snapshot:,
+        ),
       )
     }
     PromiseRecord(data:, state: PromiseRejected(reason) as state, is_handled:) -> {
@@ -883,7 +925,13 @@ fn perform_then_handlers(
       }
       enqueue_job(
         st,
-        ReactionJob(handler: reject_handler, arg: reason, resolve:, reject:),
+        ReactionJob(
+          handler: reject_handler,
+          arg: reason,
+          resolve:,
+          reject:,
+          snapshot:,
+        ),
       )
     }
   }

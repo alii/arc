@@ -1,16 +1,17 @@
 import arc/bytecode/key.{type PropertyKey, Named}
 import arc/internal/tree_array
 import arc/internal/unsafe
+import arc/rt/bytecode.{type FnFlags, FnFlags}
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledCode, type DirectEntry, type FnFlags, type Handle,
-  type JsVal, type NativeToken, type ObjKind, type Property, type Realm, Agent,
-  ArrayObj, BirthPending, BirthSettled, BoundFn, BytecodeFn, CompiledFn,
-  DataProperty, Dense, FnFlags, JInt, JPosInf, KHandle, KNull, KNum, KStr, KTdz,
-  KUndef, NativeFn, NoElements, ProxyObj, SObject, StringKey, classify, mk_int,
-  mk_number, mk_object, mk_tdz, mk_undefined,
+  type Agent, type CompiledCode, type DirectEntry, type Handle, type JsVal,
+  type NativeToken, type ObjKind, type Property, type Realm, Agent, ArrayObj,
+  BirthPending, BirthSettled, BoundFn, BytecodeFn, CompiledFn, DataProperty,
+  Dense, JInt, JPosInf, KHandle, KNull, KNum, KStr, KTdz, KUndef, NativeFn,
+  NoElements, ProxyObj, SObject, StringKey, classify, mk_int, mk_number,
+  mk_object, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool

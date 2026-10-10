@@ -40,6 +40,7 @@ pub fn new() -> Store {
       major_live: 0,
       minors_since_major: 0,
       plain_index_protos: dict.new(),
+      async_context_mapping: types.mk_undefined(),
     ),
   )
 }

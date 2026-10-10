@@ -185,7 +185,7 @@ fn run_call(
   template: FuncTemplate,
   env: bytecode.EnvTuple,
   home_object: Option(Handle),
-  flags: types.FnFlags,
+  flags: bytecode.FnFlags,
   unit_id: Int,
   this: JsVal,
   args: List(JsVal),

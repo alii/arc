@@ -1,0 +1,11 @@
+name = "spark_cli"
+version = "0.1.0"
+target = "erlang"
+
+[dependencies]
+arc = { path = "../.." }
+spark = { path = ".." }
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+argv = ">= 1.0.0 and < 2.0.0"
+gleam_erlang = ">= 1.0.0 and < 2.0.0"
+simplifile = ">= 2.0.0 and < 3.0.0"

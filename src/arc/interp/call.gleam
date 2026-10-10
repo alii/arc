@@ -13,7 +13,7 @@ import arc/interp/state.{
 }
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins as rt_builtins
-import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
+import arc/rt/bytecode.{type EnvTuple, type FnFlags, type FuncTemplate}
 import arc/rt/call as rt_call
 import arc/rt/elements
 import arc/rt/inspect as rt_inspect
@@ -21,8 +21,8 @@ import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Cell, type FnFlags, type Handle, type JsVal, type NativeToken,
-  Agent, ArgumentsObj, ArrayObj, BoundFn, BytecodeFn, CompiledFn, FunctionApply,
+  type Agent, type Cell, type Handle, type JsVal, type NativeToken, Agent,
+  ArgumentsObj, ArrayObj, BoundFn, BytecodeFn, CompiledFn, FunctionApply,
   FunctionCall, FunctionN, KHandle, KNull, KTdz, KUndef, NativeFn, ProxyObj,
   ReflectApply, ReflectN, SBox, SObject, classify, mk_object, mk_tdz,
   mk_undefined,

@@ -32,7 +32,7 @@
 -define(STORE_META, 15).
 -define(STORE_SIZE, 15).
 -define(STOREMETA_PLAIN_INDEX_PROTOS, 12).
--define(STOREMETA_SIZE, 12).
+-define(STOREMETA_SIZE, 13).
 %% arena marker for a freed cell id
 -define(STORE_FREE_CELL, js_free).
 
@@ -52,7 +52,7 @@
 -define(REALM_SET_ITER_PROTO, 40).
 -define(REALM_GLOBAL_OBJECT, 51).
 -define(REALM_ID, 53).
--define(REALM_SIZE, 55).
+-define(REALM_SIZE, 56).
 -define(BUILTINPAIR_TAG, builtin_pair).
 -define(BUILTINPAIR_PROTOTYPE, 2).
 -define(BUILTINPAIR_CONSTRUCTOR, 3).

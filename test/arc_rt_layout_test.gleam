@@ -8,17 +8,17 @@ import arc/internal/tree_array
 import arc/internal/unsafe
 import arc/interp/kernel
 import arc/rt/arena
-import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
+import arc/rt/bytecode.{type EnvTuple, type FnFlags, type FuncTemplate, FnFlags}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledCode, type FnFlags, type JsVal, type ShapeSlots,
-  AccessorProperty, ArgumentsObj, ArrayObj, BirthPending, BirthSettled, BoundFn,
-  BytecodeFn, CompiledFn, DataProperty, Dense, DirectEntry, FnFlags, GlobalObj,
-  Handle, IteratorRecord, KHandle, MapObj, ModuleNamespace, NativeFn, NoElements,
+  type Agent, type CompiledCode, type JsVal, type ShapeSlots, AccessorProperty,
+  ArgumentsObj, ArrayObj, BirthPending, BirthSettled, BoundFn, BytecodeFn,
+  CompiledFn, DataProperty, Dense, DirectEntry, GlobalObj, Handle,
+  IteratorRecord, KHandle, MapObj, ModuleNamespace, NativeFn, NoElements,
   Ordinary, ProxyObj, ResumeCompiled, ResumeFrame, ReturnThis, SBox, SObject,
   SShapedObject, SetObj, ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow,
   StepYield, Store, StringKey, StringObj, SymbolKey, TypedArrayObj, mk_int,

@@ -168,6 +168,8 @@ pub type Op {
 
   MakeClosure(func_index: Int)
   BoxLocal(index: Int)
+  // slots ascending; an uninit box holds tdz, else the slot's value
+  BoxLocals(slots: List(Int), uninit: Bool)
   GetBoxed(index: Int)
   PutBoxed(index: Int)
   // bindthisvalue for boxed this
@@ -452,6 +454,7 @@ pub fn pinned_slots(op: Op) -> List(Int) {
     | GetBoxed(i)
     | PutBoxed(i)
     | PutBoxedCheckInit(i) -> [i]
+    BoxLocals(slots:, ..) -> slots
     _ -> []
   }
 }

@@ -260,6 +260,11 @@ fn init_realm(st: Agent) -> #(Realm, Agent) {
       id:,
       lexical_globals: dict.new(),
       suppressed_error: errors.suppressed_error,
+      fn_shared: types.FnShared(
+        proto: Some(function.prototype),
+        async_proto: Some(async_fn.prototype),
+        constructor_birth: types.BirthPending(Some(object.prototype)),
+      ),
     )
   let st = list.fold(realm_handles(realm), st, rt_store.pin_root)
   let st = Agent(..st, realm:, realms: dict.insert(st.realms, id, realm))

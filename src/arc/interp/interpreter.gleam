@@ -5,9 +5,9 @@ import arc/bytecode/opcode.{
   type Op, ApplyArguments, ArrayFrom, ArrayFromWithHoles, ArrayPush,
   ArrayPushHole, ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await,
   BinOp, BinOpConst, BinOpConstPut, BinOpLocal, BinOpLocalConst, BinOpLocalField,
-  BinOpLocalLocal, BinOpLocalLocalPut, BinOpLocalPut, BinOpPut, BoxLocal, Call,
-  CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
-  CallMethodApply, CallNew, CmpConstJump, CmpJump, CmpLocalConstJump,
+  BinOpLocalLocal, BinOpLocalLocalPut, BinOpLocalPut, BinOpPut, BoxLocal,
+  BoxLocals, Call, CallApply, CallConstructor, CallConstructorApply, CallEval,
+  CallMethod, CallMethodApply, CallNew, CmpConstJump, CmpJump, CmpLocalConstJump,
   CmpLocalLocalJump, CreateArguments, CreateRestArray, DecLocal, DeclareEvalVar,
   DeclareGlobalFn, DeclareGlobalLex, DeclareGlobalVar, DefineAccessor,
   DefineAccessorComputed, DefineField, DefineFieldComputed, DefineMethod,
@@ -3968,6 +3968,20 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       Ok(State(..state, agent:, locals:, pc: state.pc + 1))
     }
 
+    BoxLocals(slots, uninit) -> {
+      let #(items, agent) =
+        box_slots(
+          tuple_array.to_list(state.locals),
+          0,
+          slots,
+          uninit,
+          state.agent,
+          [],
+        )
+      let locals = tuple_array.from_list(items)
+      Ok(State(..state, agent:, locals:, pc: state.pc + 1))
+    }
+
     GetBoxed(index) ->
       case read_box(state, tuple_array.get_unchecked(index, state.locals)) {
         Some(value) ->
@@ -6101,6 +6115,30 @@ fn tdz_reference_error(state: State) -> Result(State, StepExit) {
     state,
     "Cannot access variable before initialization (TDZ)",
   )
+}
+
+fn box_slots(
+  items: List(JsVal),
+  index: Int,
+  slots: List(Int),
+  uninit: Bool,
+  agent: Agent,
+  done: List(JsVal),
+) -> #(List(JsVal), Agent) {
+  case slots, items {
+    [], _ -> #(list.append(list.reverse(done), items), agent)
+    [slot, ..later], [item, ..rest] if slot == index -> {
+      let held = case uninit {
+        True -> mk_tdz()
+        False -> item
+      }
+      let #(box, agent) = rt_store.cell_new(agent, SBox(held))
+      box_slots(rest, index + 1, later, uninit, agent, [mk_object(box), ..done])
+    }
+    [_, ..], [item, ..rest] ->
+      box_slots(rest, index + 1, slots, uninit, agent, [item, ..done])
+    [_, ..], [] -> panic as "BoxLocals: slot outside the frame"
+  }
 }
 
 fn read_box(state: State, local: JsVal) -> Option(JsVal) {

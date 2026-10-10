@@ -17,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 17
+pub const abi_version = 18
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(handle: Handle)
@@ -109,6 +109,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       major_live: _,
       minors_since_major: _,
       plain_index_protos: _,
+      async_context_mapping: _,
     ),
   ) = store
   let microtasks = types.job_queue_to_list(microtasks)

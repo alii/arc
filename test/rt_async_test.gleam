@@ -2,14 +2,15 @@ import arc/bytecode/key.{Named}
 import arc/host_hooks.{HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
+import arc/rt/bytecode.{FnFlags}
 import arc/rt/call as rt_call
 import arc/rt/class as rt_class
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type JsVal, FnFlags, HostJob, JInt, KBool, KHandle, KNum, KStr,
-  StringKey, classify, mk_int, mk_object, mk_string, mk_undefined,
+  type Agent, type JsVal, HostJob, JInt, KBool, KHandle, KNum, KStr, StringKey,
+  classify, mk_int, mk_object, mk_string, mk_undefined,
 }
 import gleam/option.{Some}
 import rt_helpers

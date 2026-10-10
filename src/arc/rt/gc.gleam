@@ -75,9 +75,10 @@ pub fn agent_roots(st: Agent) -> List(Int) {
       major_live: _,
       minors_since_major: _,
       plain_index_protos: _,
+      async_context_mapping:,
     ),
   ) = st.store
-  let acc = set.to_list(pinned_roots)
+  let acc = push_refs(async_context_mapping, set.to_list(pinned_roots))
   let acc = list.append(unhandled_rejections, acc)
   let acc = push_refs(job_queue_to_list(microtasks), acc)
   let acc = push_refs(dict.values(st.host_fns), acc)
@@ -308,11 +309,16 @@ fn push_promise_state_refs(state: PromiseState, acc: List(Int)) -> List(Int) {
 }
 
 fn push_reaction_refs(acc: List(Int), r: PromiseReaction) -> List(Int) {
-  let PromiseReaction(on_fulfill:, on_reject:, child_resolve:, child_reject:) =
-    r
+  let PromiseReaction(
+    on_fulfill:,
+    on_reject:,
+    child_resolve:,
+    child_reject:,
+    snapshot:,
+  ) = r
   let acc = push_reaction_handler_refs(on_fulfill, acc)
   let acc = push_reaction_handler_refs(on_reject, acc)
-  push_refs(child_reject, push_refs(child_resolve, acc))
+  push_refs(snapshot, push_refs(child_reject, push_refs(child_resolve, acc)))
 }
 
 fn push_reaction_handler_refs(h: ReactionHandler, acc: List(Int)) -> List(Int) {

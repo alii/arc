@@ -8,7 +8,9 @@ import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/internal/ordered_entries.{type OrderedEntries}
 import arc/internal/tree_array.{type TreeArray}
 import arc/rt/arena.{type Arena}
-import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, type SuspendedFrame}
+import arc/rt/bytecode.{
+  type EnvTuple, type FnFlags, type FuncTemplate, type SuspendedFrame,
+}
 import arc/rt/intl_data.{
   type BoundGetterService, type ConstructibleService, type IntlData,
   type IntlService,
@@ -358,18 +360,6 @@ pub type JsElements {
 pub type FnBirth {
   BirthPending(prototype_parent: Option(Handle))
   BirthSettled
-}
-
-pub type FnFlags {
-  FnFlags(
-    is_constructor: Bool,
-    is_class_constructor: Bool,
-    is_derived_constructor: Bool,
-    is_arrow: Bool,
-    is_generator: Bool,
-    is_async: Bool,
-    is_strict: Bool,
-  )
 }
 
 pub type MapKey {
@@ -1881,6 +1871,8 @@ pub type PromiseReaction {
     on_reject: ReactionHandler,
     child_resolve: JsVal,
     child_reject: JsVal,
+    // async context mapping when the reaction was made
+    snapshot: JsVal,
   )
 }
 
@@ -1896,12 +1888,14 @@ pub type Job {
     arg: JsVal,
     resolve: JsVal,
     reject: JsVal,
+    snapshot: JsVal,
   )
   ResolveThenableJob(
     thenable: JsVal,
     then_fn: JsVal,
     resolve: JsVal,
     reject: JsVal,
+    snapshot: JsVal,
   )
   HostJob(run: fn(Agent) -> Agent)
 }
@@ -2051,6 +2045,16 @@ pub type Realm {
     id: Int,
     lexical_globals: Dict(String, LexicalGlobal),
     suppressed_error: BuiltinPair,
+    fn_shared: FnShared,
+  )
+}
+
+// built once per realm, every new plain function points at these
+pub type FnShared {
+  FnShared(
+    proto: Option(Handle),
+    async_proto: Option(Handle),
+    constructor_birth: FnBirth,
   )
 }
 
@@ -2112,6 +2116,11 @@ pub fn unset_realm() -> Realm {
     id: -1,
     lexical_globals: dict.new(),
     suppressed_error: p,
+    fn_shared: FnShared(
+      proto: option.None,
+      async_proto: option.None,
+      constructor_birth: BirthPending(option.None),
+    ),
   )
 }
 
@@ -2179,6 +2188,8 @@ pub type StoreMeta {
     minors_since_major: Int,
     // proto id to whether its chain takes plain index writes
     plain_index_protos: Dict(Int, Nil),
+    // embedder value carried across promise jobs, undefined until a host sets it
+    async_context_mapping: JsVal,
   )
 }
 

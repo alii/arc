@@ -4,18 +4,23 @@ import arc/bytecode/error_kind.{type ErrorKind, RangeError, TypeError}
 import arc/bytecode/key
 import arc/internal/unsafe
 import arc/rt/async as rt_async
+import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/builtins/realm_ops
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
+import arc/rt/typed_array_bytes
 import arc/rt/types.{
   type Agent, type Handle, type HostTerm, type JsVal, type Property, Agent,
-  HostFnEntry, HostJob, HostObj, JFloat, JInt, KBool, KNum, KStr, NoElements,
-  PromiseObj, SObject, StringKey, classify, mk_object, mk_undefined,
+  ArrayBufferObj, Bytes, DataViewObj, HostFnEntry, HostJob, HostObj, JFloat,
+  JInt, KBool, KNum, KStr, NoElements, PromiseObj, SObject, StringKey,
+  TypedArrayObj, classify, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
+import gleam/bit_array
 import gleam/bool
 import gleam/dict
 import gleam/int
@@ -309,6 +314,23 @@ fn is_promise(st: Agent, h: Handle) -> Bool {
   }
 }
 
+/// the value carried across promise jobs and awaits, undefined until set
+///
+/// a then or await made now runs its continuation with this value current
+pub fn async_context(ctx: Context(host)) -> JsVal {
+  rt_async.async_context(ctx.agent)
+}
+
+/// returns the value it replaced, to put back when the scope ends
+pub fn swap_async_context(
+  ctx: Context(host),
+  mapping: JsVal,
+) -> #(JsVal, Context(host)) {
+  let previous = rt_async.async_context(ctx.agent)
+  let st = rt_async.set_async_context(ctx.agent, mapping)
+  #(previous, Context(..ctx, agent: st))
+}
+
 pub fn array(
   ctx: Context(host),
   values: List(JsVal),
@@ -365,6 +387,57 @@ fn host_cell(
     elements: NoElements,
     extensible:,
   )
+}
+
+/// a new ArrayBuffer holding these bytes
+pub fn array_buffer(
+  ctx: Context(host),
+  bytes: BitArray,
+) -> #(JsVal, Context(host)) {
+  let st = ctx.agent
+  let #(h, st) =
+    realm_ops.alloc_object(
+      st,
+      ArrayBufferObj(storage: Bytes(bytes:, max_byte_length: None)),
+      st.realm.array_buffer.prototype,
+    )
+  #(mk_object(h), Context(..ctx, agent: st))
+}
+
+/// the bytes an ArrayBuffer, typed array or DataView covers right now
+///
+/// none for any other value, and for a detached or out of bounds one
+pub fn bytes(ctx: Context(host), val: JsVal) -> Option(BitArray) {
+  let st = ctx.agent
+  use h <- option.then(rt_val.handle_of(val))
+  case rt_store.cell_get(st, h) {
+    SObject(kind: ArrayBufferObj(..), ..) -> rt_buffer.bytes(st, h)
+    SObject(kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:), ..) -> {
+      use data <- option.then(rt_buffer.bytes(st, buffer))
+      let view =
+        rt_buffer.view_bounds(
+          bit_array.byte_size(data),
+          elem_kind,
+          byte_offset,
+          length,
+        )
+      let size =
+        rt_buffer.view_len(view) * typed_array_bytes.elem_size(elem_kind)
+      byte_range(data, byte_offset, size)
+    }
+    SObject(kind: DataViewObj(buffer:, byte_offset:, byte_length:), ..) -> {
+      use data <- option.then(rt_buffer.bytes(st, buffer))
+      let size =
+        option.unwrap(byte_length, bit_array.byte_size(data) - byte_offset)
+      byte_range(data, byte_offset, size)
+    }
+    _ -> None
+  }
+}
+
+fn byte_range(data: BitArray, offset: Int, size: Int) -> Option(BitArray) {
+  use <- bool.guard(size < 0, None)
+  option.from_result(bit_array.slice(data, offset, size))
 }
 
 /// opaque embedder object; handles inside value are gc-traced

@@ -1000,16 +1000,73 @@ fn bindings_in_slot_order(s: scope.Scope) -> List(#(String, scope.Binding)) {
   |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
 }
 
+// a scope boxing this many slots makes them with BoxLocals
+const batch_boxing_min = 64
+
 // var -> undef, let/const -> uninit, param/catch -> box only, capture -> nothing
 fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
   let bindings = bindings_in_slot_order(scope.get(e.scope_tree, scope_id))
   let at_module_root = scope_id == root_scope_id && e.fn_scope == root_scope_id
   // the frame already pads root-scope vars with undefined
   let is_function_root = scope_id == e.fn_scope
-  use e, #(name, b) <- list.fold(bindings, e)
-  let seeded =
-    at_module_root && set.contains(e.scope_tree.linker_seeded_exports, name)
-  use <- bool.guard(seeded, e)
+  let bindings = case at_module_root {
+    True ->
+      list.filter(bindings, fn(entry) {
+        !set.contains(e.scope_tree.linker_seeded_exports, entry.0)
+      })
+    False -> bindings
+  }
+  let boxed =
+    list.map(bindings, fn(entry) { entry.1 })
+    |> list.filter(fn(b) { b.boxed && b.kind != CaptureBinding })
+  case list.length(boxed) >= batch_boxing_min {
+    True -> emit_batched_prologue(e, bindings, boxed, is_function_root)
+    False -> emit_slotwise_prologue(e, bindings, is_function_root)
+  }
+}
+
+// like the slotwise one, but a boxed let or const is born holding tdz
+fn emit_batched_prologue(
+  e: Emitter,
+  bindings: List(#(String, scope.Binding)),
+  boxed: List(scope.Binding),
+  is_function_root: Bool,
+) -> Emitter {
+  let e = {
+    use e, #(_name, b) <- list.fold(bindings, e)
+    case b.kind, b.boxed {
+      VarBinding, _ if is_function_root -> e
+      VarBinding, _ -> emit_store_const(e, b.slot, mk_undefined())
+      LetBinding, False | ConstBinding, False | FnNameBinding, False ->
+        emit_store_const(e, b.slot, mk_tdz())
+      _, _ -> e
+    }
+  }
+  let #(uninit, holding) =
+    list.partition(boxed, fn(b) {
+      case b.kind {
+        LetBinding | ConstBinding | FnNameBinding -> True
+        VarBinding | ParamBinding | CaptureBinding -> False
+      }
+    })
+  e
+  |> emit_boxes(list.map(holding, fn(b) { b.slot }), False)
+  |> emit_boxes(list.map(uninit, fn(b) { b.slot }), True)
+}
+
+fn emit_boxes(e: Emitter, slots: List(Int), uninit: Bool) -> Emitter {
+  case slots {
+    [] -> e
+    [_, ..] -> emit_op(e, opcode.BoxLocals(slots, uninit))
+  }
+}
+
+fn emit_slotwise_prologue(
+  e: Emitter,
+  bindings: List(#(String, scope.Binding)),
+  is_function_root: Bool,
+) -> Emitter {
+  use e, #(_name, b) <- list.fold(bindings, e)
   let e = case b.kind {
     VarBinding if is_function_root -> e
     VarBinding -> emit_store_const(e, b.slot, mk_undefined())

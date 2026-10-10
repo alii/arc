@@ -17,6 +17,226 @@ pub type EnvCapture {
   CaptureLocal(parent_index: Int)
 }
 
+pub type FnFlags {
+  FnFlags(
+    is_constructor: Bool,
+    is_class_constructor: Bool,
+    is_derived_constructor: Bool,
+    is_arrow: Bool,
+    is_generator: Bool,
+    is_async: Bool,
+    is_strict: Bool,
+  )
+}
+
+pub const function_sloppy = FnFlags(
+  is_constructor: True,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: False,
+  is_async: False,
+  is_strict: False,
+)
+
+pub const function_strict = FnFlags(
+  is_constructor: True,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: False,
+  is_async: False,
+  is_strict: True,
+)
+
+pub const method_sloppy = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: False,
+  is_async: False,
+  is_strict: False,
+)
+
+pub const method_strict = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: False,
+  is_async: False,
+  is_strict: True,
+)
+
+pub const arrow_sloppy = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: True,
+  is_generator: False,
+  is_async: False,
+  is_strict: False,
+)
+
+pub const arrow_strict = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: True,
+  is_generator: False,
+  is_async: False,
+  is_strict: True,
+)
+
+pub const async_arrow_sloppy = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: True,
+  is_generator: False,
+  is_async: True,
+  is_strict: False,
+)
+
+pub const async_arrow_strict = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: True,
+  is_generator: False,
+  is_async: True,
+  is_strict: True,
+)
+
+pub const async_function_sloppy = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: False,
+  is_async: True,
+  is_strict: False,
+)
+
+pub const async_function_strict = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: False,
+  is_async: True,
+  is_strict: True,
+)
+
+pub const generator_sloppy = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: True,
+  is_async: False,
+  is_strict: False,
+)
+
+pub const generator_strict = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: True,
+  is_async: False,
+  is_strict: True,
+)
+
+pub const async_generator_sloppy = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: True,
+  is_async: True,
+  is_strict: False,
+)
+
+pub const async_generator_strict = FnFlags(
+  is_constructor: False,
+  is_class_constructor: False,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: True,
+  is_async: True,
+  is_strict: True,
+)
+
+pub const class_constructor = FnFlags(
+  is_constructor: True,
+  is_class_constructor: True,
+  is_derived_constructor: False,
+  is_arrow: False,
+  is_generator: False,
+  is_async: False,
+  is_strict: True,
+)
+
+pub const derived_class_constructor = FnFlags(
+  is_constructor: True,
+  is_class_constructor: True,
+  is_derived_constructor: True,
+  is_arrow: False,
+  is_generator: False,
+  is_async: False,
+  is_strict: True,
+)
+
+// the shared constant for these flags
+pub fn flags(
+  is_constructor is_constructor: Bool,
+  is_class_constructor is_class_constructor: Bool,
+  is_derived_constructor is_derived_constructor: Bool,
+  is_arrow is_arrow: Bool,
+  is_generator is_generator: Bool,
+  is_async is_async: Bool,
+  is_strict is_strict: Bool,
+) -> FnFlags {
+  case
+    is_constructor,
+    is_class_constructor,
+    is_derived_constructor,
+    is_arrow,
+    is_generator,
+    is_async,
+    is_strict
+  {
+    True, False, False, False, False, False, False -> function_sloppy
+    True, False, False, False, False, False, True -> function_strict
+    False, False, False, False, False, False, False -> method_sloppy
+    False, False, False, False, False, False, True -> method_strict
+    False, False, False, True, False, False, False -> arrow_sloppy
+    False, False, False, True, False, False, True -> arrow_strict
+    False, False, False, True, False, True, False -> async_arrow_sloppy
+    False, False, False, True, False, True, True -> async_arrow_strict
+    False, False, False, False, False, True, False -> async_function_sloppy
+    False, False, False, False, False, True, True -> async_function_strict
+    False, False, False, False, True, False, False -> generator_sloppy
+    False, False, False, False, True, False, True -> generator_strict
+    False, False, False, False, True, True, False -> async_generator_sloppy
+    False, False, False, False, True, True, True -> async_generator_strict
+    True, True, False, False, False, False, True -> class_constructor
+    True, True, True, False, False, False, True -> derived_class_constructor
+    _, _, _, _, _, _, _ ->
+      FnFlags(
+        is_constructor:,
+        is_class_constructor:,
+        is_derived_constructor:,
+        is_arrow:,
+        is_generator:,
+        is_async:,
+        is_strict:,
+      )
+  }
+}
+
 pub fn line_at(template: FuncTemplate, pc: Int) -> Int {
   tuple_array.element(pc + 1, template.lines)
 }

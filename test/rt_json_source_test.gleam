@@ -1,9 +1,10 @@
 import arc/bytecode/key
+import arc/rt/bytecode.{FnFlags}
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, DataProperty, FnFlags, JFloat, JInt, KBool, KHandle,
-  KNum, KStr, StringKey, classify, mk_int, mk_string,
+  type Agent, type JsVal, DataProperty, JFloat, JInt, KBool, KHandle, KNum, KStr,
+  StringKey, classify, mk_int, mk_string,
 }
 import gleam/int
 import gleam/list

@@ -219,6 +219,15 @@ pub fn eval_with(
   settle(engine, completion, st, drain)
 }
 
+/// a drain that hands the engine to an embedder loop, which must itself run
+/// the microtasks
+pub fn drain_with(
+  engine: Engine(host),
+  loop: fn(Engine(host)) -> Engine(host),
+) -> Drain {
+  fn(st) { loop(Engine(..engine, agent: st)).agent }
+}
+
 /// a top-level throw is Ok(ModuleThrew), not Error
 pub fn eval_module(
   engine: Engine(host),
