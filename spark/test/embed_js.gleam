@@ -18,6 +18,7 @@ const names = [
   "global",
   "domexception",
   "dom_events",
+  "buffer",
 ]
 
 const target = "src/spark/js.gleam"

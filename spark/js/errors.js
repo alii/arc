@@ -218,6 +218,78 @@ function systemError(code, syscall, path) {
   return error;
 }
 
+function addNumericalSeparator(val) {
+  let res = "";
+  let i = val.length;
+  const start = val[0] === "-" ? 1 : 0;
+  for (; i >= start + 4; i -= 3) {
+    res = `_${val.slice(i - 3, i)}${res}`;
+  }
+  return `${val.slice(0, i)}${res}`;
+}
+
+function outOfRange(name, range, input, replaceDefaultBoolean = false) {
+  let msg = replaceDefaultBoolean
+    ? name
+    : `The value of "${name}" is out of range.`;
+  let received;
+  if (Number.isInteger(input) && Math.abs(input) > 2 ** 32) {
+    received = addNumericalSeparator(String(input));
+  } else if (typeof input === "bigint") {
+    received = String(input);
+    const limit = BigInt(2) ** BigInt(32);
+    if (input > limit || input < -limit) {
+      received = addNumericalSeparator(received);
+    }
+    received += "n";
+  } else {
+    received = inspect(input);
+  }
+  msg += ` It must be ${range}. Received ${received}`;
+  return rangeError("ERR_OUT_OF_RANGE", msg);
+}
+
+function validateInteger(
+  value,
+  name,
+  min = Number.MIN_SAFE_INTEGER,
+  max = Number.MAX_SAFE_INTEGER,
+) {
+  if (typeof value !== "number") throw invalidArgType(name, "number", value);
+  if (!Number.isInteger(value)) throw outOfRange(name, "an integer", value);
+  if (value < min || value > max) {
+    throw outOfRange(name, `>= ${min} && <= ${max}`, value);
+  }
+}
+
+function validateNumber(value, name, min = undefined, max) {
+  if (typeof value !== "number") throw invalidArgType(name, "number", value);
+  if (
+    (min != null && value < min) ||
+    (max != null && value > max) ||
+    ((min != null || max != null) && Number.isNaN(value))
+  ) {
+    throw outOfRange(
+      name,
+      `${min != null ? `>= ${min}` : ""}${min != null && max != null ? " && " : ""}${max != null ? `<= ${max}` : ""}`,
+      value,
+    );
+  }
+}
+
+function validateArray(value, name, minLength = 0) {
+  if (!Array.isArray(value)) throw invalidArgType(name, "Array", value);
+  if (value.length < minLength) {
+    throw invalidArgValue(name, value, `must be longer than ${minLength}`);
+  }
+}
+
+function validateBuffer(buffer, name = "buffer") {
+  if (!ArrayBuffer.isView(buffer)) {
+    throw invalidArgType(name, ["Buffer", "TypedArray", "DataView"], buffer);
+  }
+}
+
 function validateFunction(value, name) {
   if (typeof value !== "function") {
     throw invalidArgType(name, "Function", value);
@@ -242,7 +314,12 @@ module.exports = {
   rangeError,
   invalidArgType,
   invalidArgValue,
+  outOfRange,
   systemError,
+  validateArray,
+  validateBuffer,
+  validateInteger,
+  validateNumber,
   validateFunction,
   validateObject,
   validateString,

@@ -11,6 +11,7 @@ import spark.{
   type Runtime, DuplicateBuiltin, Finished, MissingDependency, WakeIn,
 }
 import spark/async_hooks
+import spark/buffer
 import spark/builtin.{type Builtin, Builtin}
 import spark/dom_events
 import spark/domexception
@@ -54,6 +55,7 @@ fn builtins() -> List(Builtin(Nil)) {
     perf_hooks.builtin(),
     domexception.builtin(),
     dom_events.builtin(),
+    buffer.builtin(),
   ]
 }
 
@@ -1335,4 +1337,568 @@ pub fn a_mark_detail_needs_structured_clone_test() {
       "Error [ERR_METHOD_NOT_IMPLEMENTED]: The structuredClone method is not implemented code",
       "{\"n\":1,\"copied\":true}",
     ]
+}
+
+const buffer_api_script = "
+const buffer = require(\"buffer\");
+const show = (v) => {
+  if (v instanceof Uint8Array) return \"<\" + v.constructor.name + \" \" + Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString(\"hex\") + \">\";
+  if (typeof v === \"string\") return JSON.stringify(v);
+  if (typeof v === \"object\" && v !== null) return JSON.stringify(v);
+  return String(v);
+};
+const t = (label, f) => {
+  try { out.push(label + \" -> \" + show(f())); }
+  catch (e) { out.push(label + \" threw \" + e.name + \" \" + e.code + \" \" + JSON.stringify(e.message)); }
+};
+t(\"from string\", () => Buffer.from(\"abc\"));
+t(\"from empty\", () => Buffer.from(\"\"));
+t(\"from array\", () => Buffer.from([1, 2, 256, -1, 3.7, \"9\", \"x\"]));
+t(\"from buffer copies\", () => { const a = Buffer.from(\"ab\"); const b = Buffer.from(a); b[0] = 0x7a; return a.toString() + b.toString(); });
+t(\"from arraybuffer shares\", () => { const ab = new ArrayBuffer(4); const b = Buffer.from(ab, 1, 2); b[0] = 9; return new Uint8Array(ab); });
+t(\"from arraybuffer oob offset\", () => Buffer.from(new ArrayBuffer(4), 5));
+t(\"from arraybuffer oob length\", () => Buffer.from(new ArrayBuffer(4), 1, 9));
+t(\"from json form\", () => Buffer.from({ type: \"Buffer\", data: [1, 2, 3] }));
+t(\"from arraylike\", () => Buffer.from({ length: 2, 0: 7, 1: 8 }));
+t(\"from valueOf\", () => Buffer.from(new String(\"hey\")));
+t(\"from toPrimitive\", () => Buffer.from({ [Symbol.toPrimitive]() { return \"prim\"; } }));
+t(\"from number\", () => Buffer.from(5));
+t(\"from null\", () => Buffer.from(null));
+t(\"from undefined\", () => Buffer.from(undefined));
+t(\"from object\", () => Buffer.from({}));
+t(\"from symbol\", () => Buffer.from(Symbol(\"s\")));
+t(\"from bad encoding\", () => Buffer.from(\"a\", \"nope\"));
+t(\"from odd encoding type\", () => Buffer.from(\"a\", 5));
+t(\"from uint16array\", () => Buffer.from(new Uint16Array([1, 258])));
+t(\"from big array\", () => Buffer.from(Array.from({ length: 5000 }, (_, i) => i)).subarray(4990).toString(\"hex\"));
+t(\"Buffer(3, enc)\", () => Buffer(3, \"utf8\"));
+t(\"alloc\", () => Buffer.alloc(3));
+t(\"alloc fill\", () => Buffer.alloc(5, \"ab\"));
+t(\"alloc fill enc\", () => Buffer.alloc(4, \"YQ==\", \"base64\"));
+t(\"alloc fill number\", () => Buffer.alloc(3, 257));
+t(\"alloc -1\", () => Buffer.alloc(-1));
+t(\"alloc NaN\", () => Buffer.alloc(NaN));
+t(\"alloc string\", () => Buffer.alloc(\"3\"));
+t(\"alloc huge\", () => Buffer.alloc(2 ** 60));
+t(\"alloc 1.5\", () => Buffer.alloc(1.5).length);
+t(\"allocUnsafe\", () => Buffer.allocUnsafe(4).length);
+t(\"allocUnsafe alignment 3\", () => Buffer.allocUnsafe(4, 3));
+t(\"allocUnsafe alignment 16\", () => Buffer.allocUnsafe(4, 16).length);
+t(\"allocUnsafeSlow\", () => Buffer.allocUnsafeSlow(4).length);
+t(\"of\", () => Buffer.of(1, 2, 300));
+t(\"copyBytesFrom\", () => Buffer.copyBytesFrom(new Uint16Array([1, 2, 3]), 1, 1));
+t(\"copyBytesFrom bad\", () => Buffer.copyBytesFrom([1]));
+t(\"copyBytesFrom neg\", () => Buffer.copyBytesFrom(new Uint8Array(2), -1));
+t(\"byteLength\", () => [Buffer.byteLength(\"a€\"), Buffer.byteLength(\"aGk=\", \"base64\"), Buffer.byteLength(\"abc\", \"hex\"), Buffer.byteLength(\"abc\", \"ucs2\"), Buffer.byteLength(new ArrayBuffer(7)), Buffer.byteLength(Buffer.alloc(3)), Buffer.byteLength(\"ab\", \"nope\")].join());
+t(\"byteLength bad\", () => Buffer.byteLength(5));
+t(\"stringLength\", () => [Buffer.stringLength(Buffer.from(\"a€😀\")), Buffer.stringLength(Buffer.alloc(5), \"hex\"), Buffer.stringLength(Buffer.alloc(5), \"base64\"), Buffer.stringLength(Buffer.alloc(5), \"base64url\"), Buffer.stringLength(Buffer.alloc(5), \"ucs2\"), Buffer.stringLength(Buffer.alloc(5), \"latin1\")].join());
+t(\"stringLength bad\", () => Buffer.stringLength(\"x\"));
+t(\"isBuffer\", () => [Buffer.isBuffer(Buffer.alloc(1)), Buffer.isBuffer(new Uint8Array(1)), Buffer.isBuffer(null)].join());
+t(\"isEncoding\", () => [\"utf8\", \"UTF-8\", \"ucs2\", \"UCS-2\", \"utf16le\", \"UTF-16LE\", \"latin1\", \"binary\", \"BASE64\", \"base64url\", \"hex\", \"ascii\", \"\", \"nope\", 5, null, undefined].map((e) => Buffer.isEncoding(e)).join());
+t(\"compare\", () => [Buffer.compare(Buffer.from(\"a\"), Buffer.from(\"b\")), Buffer.compare(Buffer.from(\"b\"), Buffer.from(\"a\")), Buffer.compare(Buffer.from(\"a\"), Buffer.from(\"a\")), Buffer.compare(Buffer.from(\"a\"), new Uint8Array([97, 0]))].join());
+t(\"compare bad\", () => Buffer.compare(\"a\", Buffer.alloc(1)));
+t(\"compare bad 2\", () => Buffer.compare(Buffer.alloc(1), \"a\"));
+t(\"concat\", () => Buffer.concat([Buffer.from(\"ab\"), new Uint8Array([99]), Buffer.from(\"d\")]));
+t(\"concat length short\", () => Buffer.concat([Buffer.from(\"abc\"), Buffer.from(\"def\")], 4));
+t(\"concat length long\", () => Buffer.concat([Buffer.from(\"ab\")], 5));
+t(\"concat empty\", () => Buffer.concat([]));
+t(\"concat bad list\", () => Buffer.concat(\"ab\"));
+t(\"concat bad item\", () => Buffer.concat([Buffer.alloc(1), \"x\"]));
+t(\"concat bad length\", () => Buffer.concat([Buffer.alloc(1)], -1));
+t(\"toString args\", () => { const b = Buffer.from(\"hello world\"); return [b.toString(undefined, 6), b.toString(\"utf8\", -3, 5), b.toString(\"utf8\", 3, 99), b.toString(\"utf8\", 5, 2), b.toString(\"hex\", 0, 2), b.toString(\"utf8\", \"1\", \"3\"), b.toString(\"utf8\", 99)].join(\"|\"); });
+t(\"toString bad encoding\", () => Buffer.from(\"a\").toString(\"nope\"));
+t(\"toString non-string encoding\", () => Buffer.from(\"a\").toString(5));
+t(\"toLocaleString\", () => Buffer.from(\"a\").toLocaleString === Buffer.prototype.toString);
+t(\"toJSON\", () => Buffer.from(\"ab\").toJSON());
+t(\"JSON.stringify\", () => JSON.stringify({ b: Buffer.from([1, 2]) }));
+t(\"equals\", () => [Buffer.from(\"a\").equals(Buffer.from(\"a\")), Buffer.from(\"a\").equals(new Uint8Array([97])), Buffer.from(\"a\").equals(Buffer.from(\"b\")), Buffer.alloc(0).equals(Buffer.alloc(0))].join());
+t(\"equals bad\", () => Buffer.from(\"a\").equals(\"a\"));
+t(\"compare method bad\", () => Buffer.from(\"a\").compare(\"a\"));
+t(\"compare range bad\", () => Buffer.from(\"abc\").compare(Buffer.from(\"abc\"), 0, 9));
+t(\"compare range neg\", () => Buffer.from(\"abc\").compare(Buffer.from(\"abc\"), -1));
+t(\"compare range float\", () => Buffer.from(\"abc\").compare(Buffer.from(\"abc\"), 0.5));
+t(\"indexOf kinds\", () => { const b = Buffer.from(\"this is a buffer\"); return [b.indexOf(\"is\"), b.indexOf(\"is\", 3), b.indexOf(Buffer.from(\"a buffer\")), b.indexOf(97), b.indexOf(Buffer.from(\"a buffer example\")), b.indexOf(\"is\", -5), b.lastIndexOf(\"is\"), b.lastIndexOf(\"buffer\", 5), b.lastIndexOf(\"\"), b.indexOf(\"\", 99), b.includes(\"this\"), b.includes(\"that\"), b.indexOf(\"6973\", \"hex\"), b.indexOf(\"aXM=\", \"base64\"), b.indexOf(\"is\", undefined, \"utf8\"), b.indexOf(\"is\", null), b.indexOf(\"is\", \"2\"), b.indexOf(256 + 97), b.indexOf(\"b\", 2 ** 40), b.lastIndexOf(\"b\", -(2 ** 40))].join(); });
+t(\"indexOf bad value\", () => Buffer.from(\"a\").indexOf({}));
+t(\"indexOf bad encoding\", () => Buffer.from(\"a\").indexOf(\"a\", 0, \"nope\"));
+t(\"indexOf on uint8array\", () => Buffer.prototype.indexOf.call(new Uint8Array([1, 2, 3]), 2));
+t(\"indexOf on non-view\", () => Buffer.prototype.indexOf.call({}, 2));
+t(\"fill kinds\", () => [Buffer.alloc(5).fill(\"a\").toString(), Buffer.alloc(5).fill(\"ab\", 1).toString(\"hex\"), Buffer.alloc(5).fill(\"€\").toString(\"hex\"), Buffer.alloc(6).fill(\"ab\", \"ucs2\").toString(\"hex\"), Buffer.alloc(4).fill(Buffer.from(\"xy\")).toString(), Buffer.alloc(3).fill(true).toString(\"hex\"), Buffer.alloc(3).fill(null).toString(\"hex\"), Buffer.alloc(3).fill(1.9).toString(\"hex\"), Buffer.alloc(3).fill(-1).toString(\"hex\"), Buffer.alloc(4).fill(\"abc\", \"hex\").toString(\"hex\"), Buffer.alloc(3).fill(\"é\", \"latin1\").toString(\"hex\")].join(\"|\"));
+t(\"fill bad hex\", () => Buffer.alloc(4).fill(\"zz\", \"hex\"));
+t(\"fill bad encoding\", () => Buffer.alloc(4).fill(\"a\", \"nope\"));
+t(\"fill bad encoding type\", () => Buffer.alloc(4).fill(\"a\", 0, 4, 5));
+t(\"fill offset neg\", () => Buffer.alloc(4).fill(\"a\", -1));
+t(\"fill end big\", () => Buffer.alloc(4).fill(\"a\", 0, 9));
+t(\"fill offset float\", () => Buffer.alloc(4).fill(\"a\", 1.5));
+t(\"fill number big end\", () => Buffer.alloc(4).fill(1, 0, 9));
+t(\"write forms\", () => { const b = Buffer.alloc(8, 0x2e); return [b.write(\"ab\"), b.write(\"cd\", 2), b.write(\"efgh\", 4, 2), b.write(\"6869\", \"hex\"), b.write(\"xy\", 6, \"latin1\"), b.write(\"z\", 7, 1, \"ascii\"), b.toString()].join(); });
+t(\"write non-string\", () => Buffer.alloc(4).write(5));
+t(\"write non-string enc\", () => Buffer.alloc(4).write(5, \"hex\"));
+t(\"write offset oob\", () => Buffer.alloc(4).write(\"a\", 5));
+t(\"write offset neg\", () => Buffer.alloc(4).write(\"a\", -1));
+t(\"write length neg\", () => Buffer.alloc(4).write(\"a\", 0, -1));
+t(\"write length big\", () => Buffer.alloc(4).write(\"abcdef\", 1, 99));
+t(\"write bad encoding\", () => Buffer.alloc(4).write(\"a\", 0, 1, \"nope\"));
+t(\"write offset string number\", () => Buffer.alloc(4).write(\"a\", \"1\"));
+t(\"slices\", () => { const b = Buffer.from(\"héllo\"); return [b.utf8Slice(), b.utf8Slice(1), b.utf8Slice(1, 3), b.latin1Slice(0, 3), b.asciiSlice(0, 3), b.hexSlice(1, 3), b.base64Slice(), b.base64urlSlice(0, 2), b.ucs2Slice(0, 4), b.utf8Slice(5, 2), b.utf8Slice(\"1\", \"3\"), b.utf8Slice(1.9, 3.9), b.utf8Slice(NaN, 2)].join(\"|\"); });
+t(\"slice neg\", () => Buffer.from(\"hello\").utf8Slice(-1));
+t(\"slice end big\", () => Buffer.from(\"hello\").hexSlice(0, 99));
+t(\"slice start big\", () => Buffer.from(\"hello\").latin1Slice(9));
+t(\"writes\", () => { const b = Buffer.alloc(8, 0x2e); return [b.utf8Write(\"ab\"), b.latin1Write(\"c\", 2), b.asciiWrite(\"d\", 3, 1), b.hexWrite(\"6566\", 4), b.base64Write(\"Zw==\", 6), b.ucs2Write(\"h\", 6), b.base64urlWrite(\"_w\", 0), b.toString(\"latin1\")].join(); });
+t(\"utf8Write oob\", () => Buffer.alloc(2).utf8Write(\"a\", 3));
+t(\"utf8Write length oob\", () => Buffer.alloc(2).utf8Write(\"a\", 0, 3));
+t(\"hexWrite oob\", () => Buffer.alloc(2).hexWrite(\"61\", 3));
+t(\"hexWrite neg\", () => Buffer.alloc(2).hexWrite(\"61\", -1));
+t(\"hexWrite non-string\", () => Buffer.alloc(2).hexWrite(5));
+t(\"utf8Write non-string\", () => Buffer.alloc(2).utf8Write(5));
+t(\"subarray\", () => { const b = Buffer.from(\"abcdef\"); const s = b.subarray(1, 4); s[0] = 0x7a; return [s.toString(), b.toString(), b.subarray(-2).toString(), b.subarray(4, 2).length, b.subarray(NaN, \"3\").toString(), b.slice(2).toString(), Buffer.isBuffer(s), b.subarray(9).length].join(); });
+t(\"typed array methods keep Buffer\", () => { const b = Buffer.from([3, 1, 2]); return [Buffer.isBuffer(b.map((x) => x * 2)), Buffer.isBuffer(b.filter(() => true)), b.map((x) => x * 2).toString(\"hex\"), Buffer.isBuffer(Uint8Array.prototype.slice.call(b, 1))].join(); });
+t(\"copy\", () => { const a = Buffer.from(\"abcdef\"), b = Buffer.alloc(4, 0x2e); return [a.copy(b), b.toString(), a.copy(b, 2, 4), b.toString(), a.copy(a, 2, 0, 4), a.toString(), a.copy(b, 9), a.copy(b, 0, 3, 1), a.copy(new Uint16Array(2), 1.7, \"1\")].join(); });
+t(\"copy bad target\", () => Buffer.from(\"a\").copy(\"x\"));
+t(\"copy neg target\", () => Buffer.from(\"a\").copy(Buffer.alloc(1), -1));
+t(\"copy source oob\", () => Buffer.from(\"a\").copy(Buffer.alloc(1), 0, 5));
+t(\"copy neg end\", () => Buffer.from(\"a\").copy(Buffer.alloc(1), 0, 0, -1));
+t(\"swap\", () => [Buffer.from([1, 2, 3, 4]).swap16().toString(\"hex\"), Buffer.from([1, 2, 3, 4]).swap32().toString(\"hex\"), Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]).swap64().toString(\"hex\")].join());
+t(\"swap16 odd\", () => Buffer.alloc(3).swap16());
+t(\"swap32 odd\", () => Buffer.alloc(6).swap32());
+t(\"swap64 odd\", () => Buffer.alloc(12).swap64());
+t(\"parent and offset\", () => { const ab = new ArrayBuffer(8); const b = Buffer.from(ab, 2, 4); return [b.parent === ab, b.offset, Object.getOwnPropertyDescriptor(Buffer.prototype, \"parent\").enumerable, Buffer.prototype.parent, Buffer.prototype.offset].join(); });
+t(\"inspect\", () => [Buffer.from(\"hi\").inspect(), Buffer.alloc(0).inspect(), Buffer.alloc(60, 1).inspect().length, Buffer.from(\"hi\")[Symbol.for(\"nodejs.util.inspect.custom\")] === Buffer.prototype.inspect].join(\"|\"));
+t(\"INSPECT_MAX_BYTES\", () => { const old = buffer.INSPECT_MAX_BYTES; buffer.INSPECT_MAX_BYTES = 2; const r = Buffer.from(\"hello\").inspect(); buffer.INSPECT_MAX_BYTES = old; return r; });
+t(\"INSPECT_MAX_BYTES bad\", () => { buffer.INSPECT_MAX_BYTES = -1; });
+t(\"INSPECT_MAX_BYTES bad type\", () => { buffer.INSPECT_MAX_BYTES = \"x\"; });
+t(\"constants\", () => [buffer.kMaxLength, buffer.kStringMaxLength, JSON.stringify(buffer.constants), buffer.constants.MAX_LENGTH === buffer.kMaxLength, Object.getOwnPropertyDescriptor(buffer.constants, \"MAX_LENGTH\").writable, Buffer.poolSize].join());
+t(\"class shape\", () => [Buffer.name, Buffer.length, Object.getPrototypeOf(Buffer) === Uint8Array, Object.getPrototypeOf(Buffer.prototype) === Uint8Array.prototype, Buffer.prototype.constructor === Buffer, Buffer.from(\"a\").constructor === Buffer, Buffer[Symbol.species] !== Buffer, new (Buffer[Symbol.species])(2) instanceof Buffer, Object.prototype.toString.call(Buffer.alloc(1)), typeof Buffer.prototype.readUInt8].join());
+t(\"btoa\", () => [btoa(\"hello\"), btoa(\"\"), btoa(\"ÿ\\u0000\"), btoa(5), btoa(null), btoa(undefined)].join());
+t(\"btoa bad\", () => btoa(\"€\"));
+t(\"btoa none\", () => btoa());
+t(\"atob\", () => [atob(\"aGVsbG8=\"), atob(\"aGVsbG8\"), atob(\" aGVs\\nbG8= \"), atob(\"\"), atob(\"YQ==\"), atob(\"YQ\"), JSON.stringify(atob(\"/wA=\")), atob(null).length, atob(\"abcd\").length].join(\"|\"));
+t(\"atob len 1\", () => atob(\"a\"));
+t(\"atob len 5\", () => atob(\"abcde\"));
+t(\"atob bad char\", () => atob(\"a$bc\"));
+t(\"atob pad middle\", () => atob(\"YQ==YQ==\"));
+t(\"atob pad wrong\", () => atob(\"YQ=\"));
+t(\"atob three pads\", () => atob(\"Y===\"));
+t(\"atob url alphabet\", () => atob(\"_-8=\"));
+t(\"atob none\", () => atob());
+t(\"atob is global one\", () => atob === buffer.atob && btoa === buffer.btoa && Buffer === buffer.Buffer);
+t(\"isUtf8\", () => [buffer.isUtf8(Buffer.from(\"hé\")), buffer.isUtf8(Buffer.from([0xc3])), buffer.isUtf8(new Uint8Array([0xed, 0xa0, 0x80])), buffer.isUtf8(new ArrayBuffer(2)), buffer.isAscii(Buffer.from(\"abc\")), buffer.isAscii(Buffer.from(\"é\")), buffer.isAscii(new Uint16Array([65, 300])), buffer.isLatin1(\"hé\"), buffer.isLatin1(\"€\")].join());
+t(\"isUtf8 bad\", () => buffer.isUtf8(\"a\"));
+t(\"isAscii bad\", () => buffer.isAscii([1]));
+t(\"isLatin1 bad\", () => buffer.isLatin1(5));
+t(\"static keys\", () => Object.getOwnPropertyNames(Buffer).sort().join(\" \"));
+t(\"proto keys\", () => Object.getOwnPropertyNames(Buffer.prototype).filter((k) => !/^(read|write)[A-Z]/.test(k) || /^write$/.test(k)).sort().join(\" \"));
+t(\"require forms\", () => require(\"node:buffer\") === buffer && require(\"buffer\").Buffer === Buffer);
+"
+
+// every expected line is what node 26.11.1 prints for the same script
+pub fn buffer_matches_node_test() {
+  let rt = run_commonjs(node_runtime(), buffer_api_script)
+  assert out_lines(rt)
+    == [
+      "from string -> <Buffer 616263>",
+      "from empty -> <Buffer >",
+      "from array -> <Buffer 010200ff030900>",
+      "from buffer copies -> \"abzb\"",
+      "from arraybuffer shares -> <Uint8Array 00090000>",
+      "from arraybuffer oob offset threw RangeError ERR_BUFFER_OUT_OF_BOUNDS \"\\\"offset\\\" is outside of buffer bounds\"",
+      "from arraybuffer oob length threw RangeError ERR_BUFFER_OUT_OF_BOUNDS \"\\\"length\\\" is outside of buffer bounds\"",
+      "from json form -> <Buffer 010203>",
+      "from arraylike -> <Buffer 0708>",
+      "from valueOf -> <Buffer 686579>",
+      "from toPrimitive -> <Buffer 7072696d>",
+      "from number threw TypeError ERR_INVALID_ARG_TYPE \"The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received type number (5)\"",
+      "from null threw TypeError ERR_INVALID_ARG_TYPE \"The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received null\"",
+      "from undefined threw TypeError ERR_INVALID_ARG_TYPE \"The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received undefined\"",
+      "from object threw TypeError ERR_INVALID_ARG_TYPE \"The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received an instance of Object\"",
+      "from symbol threw TypeError ERR_INVALID_ARG_TYPE \"The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received type symbol (Symbol(s))\"",
+      "from bad encoding threw TypeError ERR_UNKNOWN_ENCODING \"Unknown encoding: nope\"",
+      "from odd encoding type -> <Buffer 61>",
+      "from uint16array -> <Buffer 0102>",
+      "from big array -> \"7e7f8081828384858687\"",
+      "Buffer(3, enc) threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"string\\\" argument must be of type string. Received type number (3)\"",
+      "alloc -> <Buffer 000000>",
+      "alloc fill -> <Buffer 6162616261>",
+      "alloc fill enc -> <Buffer 61616161>",
+      "alloc fill number -> <Buffer 010101>",
+      "alloc -1 threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"size\\\" is out of range. It must be >= 0 && <= 9007199254740991. Received -1\"",
+      "alloc NaN threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"size\\\" is out of range. It must be >= 0 && <= 9007199254740991. Received NaN\"",
+      "alloc string threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"size\\\" argument must be of type number. Received type string ('3')\"",
+      "alloc huge threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"size\\\" is out of range. It must be >= 0 && <= 9007199254740991. Received 1_152_921_504_606_847_000\"",
+      "alloc 1.5 -> 1",
+      "allocUnsafe -> 4",
+      "allocUnsafe alignment 3 threw TypeError ERR_INVALID_ARG_VALUE \"The argument 'alignment' must be a power of two. Received 3\"",
+      "allocUnsafe alignment 16 -> 4",
+      "allocUnsafeSlow -> 4",
+      "of -> <Buffer 01022c>",
+      "copyBytesFrom -> <Buffer 0200>",
+      "copyBytesFrom bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"view\\\" argument must be an instance of TypedArray. Received an instance of Array\"",
+      "copyBytesFrom neg threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"offset\\\" is out of range. It must be >= 0 && <= 9007199254740991. Received -1\"",
+      "byteLength -> \"4,2,1,6,7,3,2\"",
+      "byteLength bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"string\\\" argument must be of type string or an instance of Buffer or ArrayBuffer. Received type number (5)\"",
+      "stringLength -> \"4,10,8,7,2,5\"",
+      "stringLength bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"input\\\" argument must be an instance of ArrayBuffer, Buffer, or TypedArray. Received type string ('x')\"",
+      "isBuffer -> \"true,false,false\"",
+      "isEncoding -> \"true,true,true,true,true,true,true,true,true,true,true,true,false,false,false,false,false\"",
+      "compare -> \"-1,1,0,-1\"",
+      "compare bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"buf1\\\" argument must be an instance of Buffer or Uint8Array. Received type string ('a')\"",
+      "compare bad 2 threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"buf2\\\" argument must be an instance of Buffer or Uint8Array. Received type string ('a')\"",
+      "concat -> <Buffer 61626364>",
+      "concat length short -> <Buffer 61626364>",
+      "concat length long -> <Buffer 6162000000>",
+      "concat empty -> <Buffer >",
+      "concat bad list threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"list\\\" argument must be an instance of Array. Received type string ('ab')\"",
+      "concat bad item threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"list[1]\\\" argument must be an instance of Buffer or Uint8Array. Received type string ('x')\"",
+      "concat bad length threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"length\\\" is out of range. It must be >= 0 && <= 9007199254740991. Received -1\"",
+      "toString args -> \"world|hello|lo world||6865|el|\"",
+      "toString bad encoding threw TypeError ERR_UNKNOWN_ENCODING \"Unknown encoding: nope\"",
+      "toString non-string encoding threw TypeError ERR_UNKNOWN_ENCODING \"Unknown encoding: 5\"",
+      "toLocaleString -> true",
+      "toJSON -> {\"type\":\"Buffer\",\"data\":[97,98]}",
+      "JSON.stringify -> \"{\\\"b\\\":{\\\"type\\\":\\\"Buffer\\\",\\\"data\\\":[1,2]}}\"",
+      "equals -> \"true,true,false,true\"",
+      "equals bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"otherBuffer\\\" argument must be an instance of Buffer or Uint8Array. Received type string ('a')\"",
+      "compare method bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"target\\\" argument must be an instance of Buffer or Uint8Array. Received type string ('a')\"",
+      "compare range bad threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"targetEnd\\\" is out of range. It must be >= 0 && <= 3. Received 9\"",
+      "compare range neg threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"targetStart\\\" is out of range. It must be >= 0 && <= 9007199254740991. Received -1\"",
+      "compare range float threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"targetStart\\\" is out of range. It must be an integer. Received 0.5\"",
+      "indexOf kinds threw TypeError ERR_UNKNOWN_ENCODING \"Unknown encoding: 2\"",
+      "indexOf bad value threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"value\\\" argument must be one of type number or string or an instance of Buffer or Uint8Array. Received an instance of Object\"",
+      "indexOf bad encoding threw TypeError ERR_UNKNOWN_ENCODING \"Unknown encoding: nope\"",
+      "indexOf on uint8array -> 1",
+      "indexOf on non-view threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"buffer\\\" argument must be an instance of Buffer, TypedArray, or DataView. Received an instance of Object\"",
+      "fill kinds -> \"aaaaa|0061626162|e282ace282|610062006100|xyxy|010101|000000|010101|ffffff|abababab|e9e9e9\"",
+      "fill bad hex threw TypeError ERR_INVALID_ARG_VALUE \"The argument 'value' is invalid. Received 'zz'\"",
+      "fill bad encoding threw TypeError ERR_UNKNOWN_ENCODING \"Unknown encoding: nope\"",
+      "fill bad encoding type threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"encoding\\\" argument must be of type string. Received type number (5)\"",
+      "fill offset neg threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"offset\\\" is out of range. It must be >= 0 && <= 9007199254740991. Received -1\"",
+      "fill end big threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"end\\\" is out of range. It must be >= 0 && <= 4. Received 9\"",
+      "fill offset float threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"offset\\\" is out of range. It must be an integer. Received 1.5\"",
+      "fill number big end threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"end\\\" is out of range. It must be >= 0 && <= 4. Received 9\"",
+      "write forms -> \"2,2,2,2,2,1,hicdefxz\"",
+      "write non-string threw TypeError ERR_INVALID_ARG_TYPE \"argument must be a string\"",
+      "write non-string enc threw TypeError ERR_INVALID_ARG_TYPE \"argument must be a string\"",
+      "write offset oob threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"offset\\\" is out of range. It must be >= 0 && <= 4. Received 5\"",
+      "write offset neg threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"offset\\\" is out of range. It must be >= 0 && <= 4. Received -1\"",
+      "write length neg threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"length\\\" is out of range. It must be >= 0 && <= 4. Received -1\"",
+      "write length big threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"length\\\" is out of range. It must be >= 0 && <= 4. Received 99\"",
+      "write bad encoding threw TypeError ERR_UNKNOWN_ENCODING \"Unknown encoding: nope\"",
+      "write offset string number threw TypeError ERR_UNKNOWN_ENCODING \"Unknown encoding: 1\"",
+      "slices -> \"héllo|éllo|é|hÃ©|hC)|c3a9|aMOpbGxv|aMM|써沩||é|é|h�\"",
+      "slice neg threw RangeError ERR_OUT_OF_RANGE \"Index out of range\"",
+      "slice end big threw RangeError ERR_OUT_OF_RANGE \"Index out of range\"",
+      "slice start big -> \"\"",
+      "writes -> \"2,1,1,2,1,2,1,ÿbcdefh\\u0000\"",
+      "utf8Write oob threw RangeError ERR_BUFFER_OUT_OF_BOUNDS \"\\\"offset\\\" is outside of buffer bounds\"",
+      "utf8Write length oob threw RangeError ERR_BUFFER_OUT_OF_BOUNDS \"\\\"length\\\" is outside of buffer bounds\"",
+      "hexWrite oob threw RangeError ERR_BUFFER_OUT_OF_BOUNDS \"\\\"offset\\\" is outside of buffer bounds\"",
+      "hexWrite neg threw RangeError ERR_OUT_OF_RANGE \"Index out of range\"",
+      "hexWrite non-string threw TypeError ERR_INVALID_ARG_TYPE \"argument must be a string\"",
+      "utf8Write non-string threw TypeError ERR_INVALID_ARG_TYPE \"argument must be a string\"",
+      "subarray -> \"zcd,azcdef,ef,0,azc,cdef,true,0\"",
+      "typed array methods keep Buffer -> \"true,true,060204,true\"",
+      "copy -> \"4,abcd,2,abef,4,ababcd,0,0,3\"",
+      "copy bad target threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"target\\\" argument must be an instance of Buffer or Uint8Array. Received type string ('x')\"",
+      "copy neg target threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"targetStart\\\" is out of range. It must be >= 0. Received -1\"",
+      "copy source oob threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"sourceStart\\\" is out of range. It must be >= 0 && <= 1. Received 5\"",
+      "copy neg end threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"sourceEnd\\\" is out of range. It must be >= 0. Received -1\"",
+      "swap -> \"02010403,04030201,0807060504030201\"",
+      "swap16 odd threw RangeError ERR_INVALID_BUFFER_SIZE \"Buffer size must be a multiple of 16-bits\"",
+      "swap32 odd threw RangeError ERR_INVALID_BUFFER_SIZE \"Buffer size must be a multiple of 32-bits\"",
+      "swap64 odd threw RangeError ERR_INVALID_BUFFER_SIZE \"Buffer size must be a multiple of 64-bits\"",
+      "parent and offset -> \"true,2,true,,\"",
+      "inspect -> \"<Buffer 68 69>|<Buffer >|176|true\"",
+      "INSPECT_MAX_BYTES -> \"<Buffer 68 65 ... 3 more bytes>\"",
+      "INSPECT_MAX_BYTES bad threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"INSPECT_MAX_BYTES\\\" is out of range. It must be >= 0. Received -1\"",
+      "INSPECT_MAX_BYTES bad type threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"INSPECT_MAX_BYTES\\\" argument must be of type number. Received type string ('x')\"",
+      "constants -> \"9007199254740991,536870888,{\\\"MAX_LENGTH\\\":9007199254740991,\\\"MAX_STRING_LENGTH\\\":536870888},true,false,65536\"",
+      "class shape -> \"Buffer,3,true,true,true,true,true,true,[object Uint8Array],function\"",
+      "btoa -> \"aGVsbG8=,,/wA=,NQ==,bnVsbA==,dW5kZWZpbmVk\"",
+      "btoa bad threw InvalidCharacterError 5 \"Invalid character\"",
+      "btoa none threw TypeError ERR_MISSING_ARGS \"The \\\"input\\\" argument must be specified\"",
+      "atob -> \"hello|hello|hello||a|a|\\\"ÿ\\\\u0000\\\"|3|3\"",
+      "atob len 1 threw InvalidCharacterError 5 \"The string to be decoded is not correctly encoded.\"",
+      "atob len 5 threw InvalidCharacterError 5 \"The string to be decoded is not correctly encoded.\"",
+      "atob bad char threw InvalidCharacterError 5 \"Invalid character\"",
+      "atob pad middle threw InvalidCharacterError 5 \"Invalid character\"",
+      "atob pad wrong threw InvalidCharacterError 5 \"Invalid character\"",
+      "atob three pads threw InvalidCharacterError 5 \"Invalid character\"",
+      "atob url alphabet threw InvalidCharacterError 5 \"Invalid character\"",
+      "atob none threw TypeError ERR_MISSING_ARGS \"The \\\"input\\\" argument must be specified\"",
+      "atob is global one -> true",
+      "isUtf8 -> \"true,false,false,true,true,false,true,true,false\"",
+      "isUtf8 bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"input\\\" argument must be an instance of ArrayBuffer, Buffer, or TypedArray. Received type string ('a')\"",
+      "isAscii bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"input\\\" argument must be an instance of ArrayBuffer, Buffer, or TypedArray. Received an instance of Array\"",
+      "isLatin1 bad threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"input\\\" argument must be of type string. Received type number (5)\"",
+      "static keys -> \"alloc allocUnsafe allocUnsafeSlow byteLength compare concat copyBytesFrom from isBuffer isEncoding length name of poolSize prototype stringLength\"",
+      "proto keys -> \"asciiSlice asciiWrite base64Slice base64Write base64urlSlice base64urlWrite compare constructor copy equals fill hexSlice hexWrite includes indexOf inspect lastIndexOf latin1Slice latin1Write offset parent slice subarray swap16 swap32 swap64 toJSON toLocaleString toString ucs2Slice ucs2Write utf8Slice utf8Write write\"",
+      "require forms -> true",
+    ]
+}
+
+const buffer_generated_script = "
+// generated inputs through every encoding, both ways
+let seed = 12345;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const encodings = [\"utf8\", \"hex\", \"base64\", \"base64url\", \"latin1\", \"ascii\", \"ucs2\", \"binary\", \"utf16le\", \"utf-8\"];
+const lines = [];
+// bytes -> string
+for (let i = 0; i < 700; i++) {
+  const n = rnd(24);
+  const bytes = [];
+  for (let k = 0; k < n; k++) bytes.push(rnd(4) === 0 ? 128 + rnd(128) : rnd(128));
+  const b = Buffer.from(bytes);
+  const enc = encodings[rnd(encodings.length)];
+  const s = rnd(3) === 0 ? rnd(n + 1) : 0;
+  const e = rnd(3) === 0 ? rnd(n + 1) : n;
+  lines.push(\"D \" + enc + \" \" + b.toString(\"hex\") + \" \" + s + \" \" + e + \" \" + JSON.stringify(b.toString(enc, s, e)));
+}
+// string -> bytes
+const alphabets = [
+  \"abcdefXYZ 0123456789\",
+  \"héllo wörld € 中文 😀 ÿĀ\",
+  \"0123456789abcdefABCDEFg \",
+  \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_= \\n*\",
+];
+for (let i = 0; i < 900; i++) {
+  const alphabet = Array.from(alphabets[rnd(alphabets.length)]);
+  const n = rnd(20);
+  let s = \"\";
+  for (let k = 0; k < n; k++) s += alphabet[rnd(alphabet.length)];
+  const enc = encodings[rnd(encodings.length)];
+  const b = Buffer.from(s, enc);
+  lines.push(\"E \" + enc + \" \" + JSON.stringify(s) + \" \" + b.toString(\"hex\") + \" \" + (Array.from(s).some((c) => c.length > 1) ? \"-\" : Buffer.byteLength(s, enc)));
+  // write into a tight buffer at an offset
+  const t = Buffer.alloc(8, 0x2e);
+  const off = rnd(8), len = rnd(9);
+  let w;
+  try { w = t.write(s, off, len, enc); } catch (err) { w = err.code; }
+  lines.push(\"W \" + enc + \" \" + off + \" \" + len + \" \" + w + \" \" + t.toString(\"hex\"));
+}
+// searching
+for (let i = 0; i < 700; i++) {
+  const hay = Buffer.from(Array.from({ length: rnd(14) }, () => 97 + rnd(3)));
+  const needleLen = rnd(4);
+  const needle = Array.from({ length: needleLen }, () => 97 + rnd(3));
+  const offs = [undefined, rnd(16), -rnd(16), 100, -100];
+  const off = offs[rnd(offs.length)];
+  const kind = rnd(4);
+  const val = kind === 0 ? Buffer.from(needle) : kind === 1 ? String.fromCharCode(...needle) : kind === 2 ? needle[0] ?? 97 : new Uint8Array(needle);
+  const end = rnd(4) === 0 ? rnd(16) : undefined;
+  const show = (v) => (typeof v === \"number\" ? v : typeof v === \"string\" ? JSON.stringify(v) : Buffer.from(v).toString(\"hex\"));
+  lines.push(\"S \" + hay.toString() + \" \" + show(val) + \" \" + off + \" \" + end + \" \" + (end === undefined ? hay.indexOf(val, off) + \" \" + hay.lastIndexOf(val, off) + \" \" + hay.includes(val, off) : hay.indexOf(val, off, end) + \" \" + hay.lastIndexOf(val, off, end)));
+}
+// utf-16 search and compare
+for (let i = 0; i < 300; i++) {
+  const text = Array.from({ length: rnd(8) }, () => \"ab€\"[rnd(3)]).join(\"\");
+  const hay = Buffer.from(text, \"ucs2\");
+  const needle = Array.from({ length: 1 + rnd(2) }, () => \"ab€\"[rnd(3)]).join(\"\");
+  const off = [undefined, rnd(12), -rnd(12)][rnd(3)];
+  lines.push(\"U \" + JSON.stringify(text) + \" \" + JSON.stringify(needle) + \" \" + off + \" \" + hay.indexOf(needle, off, \"ucs2\") + \" \" + hay.lastIndexOf(needle, off, \"utf16le\"));
+  const a = Buffer.from(Array.from({ length: rnd(6) }, () => rnd(4)));
+  const c = Buffer.from(Array.from({ length: rnd(6) }, () => rnd(4)));
+  let ranged;
+  const args = [rnd(7), rnd(7), rnd(7), rnd(7)];
+  try { ranged = a.compare(c, ...args); } catch (err) { ranged = err.code + \":\" + err.message; }
+  lines.push(\"C \" + a.toString(\"hex\") + \" \" + c.toString(\"hex\") + \" \" + Buffer.compare(a, c) + \" \" + a.equals(c) + \" \" + args.join(\",\") + \" \" + ranged);
+}
+// fill, copy, swap
+for (let i = 0; i < 400; i++) {
+  const t = Buffer.alloc(rnd(40), 0x2e);
+  const values = [\"ab\", \"€\", \"\", \"6162\", \"YWJj\", 7, 300, Buffer.from(\"xyz\"), new Uint8Array([1, 2]), \"q\"];
+  const value = values[rnd(values.length)];
+  const enc = [\"utf8\", \"hex\", \"base64\", \"latin1\", \"ucs2\", undefined][rnd(6)];
+  const a = rnd(3) === 0 ? undefined : rnd(40), b = rnd(3) === 0 ? undefined : rnd(40);
+  let r;
+  try { r = (typeof value === \"string\" ? t.fill(value, a, b, enc) : t.fill(value, a, b)).toString(\"hex\"); } catch (err) { r = err.code; }
+  lines.push(\"F \" + t.length + \" \" + (typeof value === \"string\" ? JSON.stringify(value) : value.length ?? value) + \" \" + a + \" \" + b + \" \" + enc + \" \" + r);
+  const src = Buffer.from(Array.from({ length: rnd(12) }, (_, k) => k + 1));
+  const dst = Buffer.alloc(rnd(12), 0xee);
+  const cargs = [rnd(14), rnd(14), rnd(14)].slice(0, rnd(4));
+  let copied;
+  try { copied = src.copy(dst, ...cargs); } catch (err) { copied = err.code; }
+  lines.push(\"Y \" + src.length + \" \" + cargs.join(\",\") + \" \" + copied + \" \" + dst.toString(\"hex\"));
+  const sw = Buffer.from(Array.from({ length: 8 * rnd(9) }, (_, k) => k));
+  lines.push(\"X \" + Buffer.from(sw).swap16().toString(\"hex\") + \" \" + Buffer.from(sw).swap32().toString(\"hex\") + \" \" + Buffer.from(sw).swap64().toString(\"hex\"));
+}
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.slice(0, line.search(/[ (]/));
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+"
+
+// 5,000 generated cases; each line is a kind of case, how many there were and
+// a hash of what they printed, all taken from node 26.11.1
+pub fn buffer_generated_cases_match_node_test() {
+  let rt = run_commonjs(node_runtime(), buffer_generated_script)
+  assert out_lines(rt)
+    == [
+      "D 700 762278617",
+      "E 900 1057510171",
+      "W 900 2899727388",
+      "S 700 4125716781",
+      "U 300 3461003392",
+      "C 300 3150946296",
+      "F 400 1880786403",
+      "Y 400 1402141324",
+      "X 400 432202951",
+    ]
+}
+
+const buffer_numbers_script = "
+let seed = 777;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const lines = [];
+const call = (f) => { try { const v = f(); return typeof v === \"bigint\" ? v + \"n\" : Object.is(v, -0) ? \"-0\" : String(v); } catch (e) { return e.name + \" \" + e.code + \" \" + e.message; } };
+const proto = Buffer.prototype;
+const names = Object.getOwnPropertyNames(proto).filter((k) => /^(read|write)[A-Z]/.test(k)).sort();
+lines.push(\"names \" + names.join(\" \"));
+lines.push(\"aliases \" + names.filter((k) => /Uint/.test(k)).every((k) => proto[k] === proto[k.replace(\"Uint\", \"UInt\")]));
+const reads = names.filter((k) => k.startsWith(\"read\"));
+const writes = names.filter((k) => k.startsWith(\"write\"));
+const base = Array.from({ length: 16 }, () => rnd(256));
+const offsets = [undefined, 0, 1, 3, 8, 9, 12, 15, 16, -1, 1.5, \"1\", NaN, null];
+for (const name of reads) {
+  for (let i = 0; i < 14; i++) {
+    const b = Buffer.from(base);
+    const off = offsets[rnd(offsets.length)];
+    const variable = /^read(U?)Int(LE|BE)$/i.test(name);
+    const len = [1, 2, 3, 4, 5, 6, 0, 7, undefined, 2.5][rnd(10)];
+    lines.push(name + \"(\" + String(off) + (variable ? \",\" + String(len) : \"\") + \") \" + call(() => (variable ? b[name](off, len) : b[name](off))));
+  }
+}
+const numbers = [0, 1, -1, 127, 128, 255, 256, -128, -129, 32767, 32768, 65535, 65536, -32768, 2 ** 31 - 1, 2 ** 31, -(2 ** 31), 2 ** 32 - 1, 2 ** 32, 2 ** 40, 2 ** 47, 2 ** 48 - 1, -(2 ** 47), 1.5, -0, 0.1, 3.4e38, 1e39, Infinity, -Infinity, NaN, \"5\", null, undefined, true];
+const bigs = [0n, 1n, -1n, 2n ** 63n - 1n, 2n ** 63n, -(2n ** 63n), 2n ** 64n - 1n, 2n ** 64n, 123456789012345678n, 5];
+for (const name of writes) {
+  for (let i = 0; i < 16; i++) {
+    const b = Buffer.alloc(12, 0xee);
+    const off = offsets[rnd(offsets.length)];
+    const big = /Big/.test(name);
+    const value = big ? bigs[rnd(bigs.length)] : numbers[rnd(numbers.length)];
+    const variable = /^write(U?)Int(LE|BE)$/i.test(name);
+    const len = [1, 2, 3, 4, 5, 6, 0, 7, undefined][rnd(9)];
+    const r = call(() => (variable ? b[name](value, off, len) : b[name](value, off)));
+    lines.push(name + \"(\" + (typeof value === \"bigint\" ? value + \"n\" : Object.is(value, -0) ? \"-0\" : String(value)) + \",\" + String(off) + (variable ? \",\" + String(len) : \"\") + \") \" + r + \" \" + b.toString(\"hex\"));
+  }
+}
+// round trips of floats
+for (const v of [0, -0, 1, -1, 0.1, Math.PI, 1e-45, 3.4028234663852886e38, 5e-324, 1.7976931348623157e308, Infinity, -Infinity, NaN]) {
+  const b = Buffer.alloc(8);
+  b.writeFloatLE(v); const f1 = b.readFloatLE(); const h1 = b.toString(\"hex\", 0, 4);
+  b.writeFloatBE(v); const h2 = b.toString(\"hex\", 0, 4);
+  b.writeDoubleLE(v); const d1 = b.readDoubleLE(); const h3 = b.toString(\"hex\");
+  b.writeDoubleBE(v); const h4 = b.toString(\"hex\");
+  lines.push(\"float \" + (Object.is(v, -0) ? \"-0\" : v) + \" \" + (Object.is(f1, -0) ? \"-0\" : f1) + \" \" + h1 + \" \" + h2 + \" \" + (Object.is(d1, -0) ? \"-0\" : d1) + \" \" + h3 + \" \" + h4);
+}
+lines.push(\"on plain Uint8Array \" + call(() => proto.readUInt16LE.call(new Uint8Array([1, 2]), 0)) + \" \" + call(() => proto.writeInt8.call(new Uint8Array(1), -1, 0)));
+lines.push(\"returns next offset \" + [Buffer.alloc(8).writeUInt8(1, 3), Buffer.alloc(8).writeUInt32BE(1, 2), Buffer.alloc(8).writeBigInt64LE(1n), Buffer.alloc(8).writeDoubleBE(1), Buffer.alloc(8).writeIntLE(1, 1, 6)].join());
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.slice(0, line.search(/[ (]/));
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+"
+
+pub fn buffer_number_methods_match_node_test() {
+  let rt = run_commonjs(node_runtime(), buffer_numbers_script)
+  assert out_lines(rt)
+    == [
+      "names 1 3589208262",
+      "aliases 1 2676032365",
+      "readBigInt64BE 14 1026299662",
+      "readBigInt64LE 14 2995580848",
+      "readBigUInt64BE 14 2661660975",
+      "readBigUInt64LE 14 3578371961",
+      "readBigUint64BE 14 3325634309",
+      "readBigUint64LE 14 3919078691",
+      "readDoubleBE 14 1859229908",
+      "readDoubleLE 14 3447878452",
+      "readFloatBE 14 2203342164",
+      "readFloatLE 14 1136496261",
+      "readInt16BE 14 2075525357",
+      "readInt16LE 14 364116503",
+      "readInt32BE 14 273834886",
+      "readInt32LE 14 3270718426",
+      "readInt8 14 4089921925",
+      "readIntBE 14 3220062340",
+      "readIntLE 14 392044368",
+      "readUInt16BE 14 357289859",
+      "readUInt16LE 14 1364100875",
+      "readUInt32BE 14 1364923125",
+      "readUInt32LE 14 3375769484",
+      "readUInt8 14 4121902412",
+      "readUIntBE 14 3218339420",
+      "readUIntLE 14 3601795281",
+      "readUint16BE 14 906719722",
+      "readUint16LE 14 1663974370",
+      "readUint32BE 14 2063083261",
+      "readUint32LE 14 3655896",
+      "readUint8 14 1952638483",
+      "readUintBE 14 2344493059",
+      "readUintLE 14 3495808406",
+      "writeBigInt64BE 16 2057460254",
+      "writeBigInt64LE 16 4219988261",
+      "writeBigUInt64BE 16 355670359",
+      "writeBigUInt64LE 16 884066179",
+      "writeBigUint64BE 16 1191965515",
+      "writeBigUint64LE 16 2502347949",
+      "writeDoubleBE 16 1078761128",
+      "writeDoubleLE 16 2958939927",
+      "writeFloatBE 16 1451430094",
+      "writeFloatLE 16 1919113661",
+      "writeInt16BE 16 363423253",
+      "writeInt16LE 16 1647608670",
+      "writeInt32BE 16 1602110576",
+      "writeInt32LE 16 388398687",
+      "writeInt8 16 4269404071",
+      "writeIntBE 16 4047553915",
+      "writeIntLE 16 3446259883",
+      "writeUInt16BE 16 2804628922",
+      "writeUInt16LE 16 943311439",
+      "writeUInt32BE 16 3434246836",
+      "writeUInt32LE 16 3612413106",
+      "writeUInt8 16 2311072293",
+      "writeUIntBE 16 415137647",
+      "writeUIntLE 16 904749522",
+      "writeUint16BE 16 2364314431",
+      "writeUint16LE 16 3567116990",
+      "writeUint32BE 16 2879658155",
+      "writeUint32LE 16 1585777643",
+      "writeUint8 16 2426213593",
+      "writeUintBE 16 2497832611",
+      "writeUintLE 16 1228589692",
+      "float 13 236869030",
+      "on 1 759922857",
+      "returns 1 25121539",
+    ]
+}
+
+pub fn buffer_module_exports_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "out.push(Object.keys(require('buffer')).sort().join(' '))",
+    )
+  assert out_lines(rt)
+    == [
+      "Buffer INSPECT_MAX_BYTES atob btoa constants isAscii isLatin1 isUtf8 kMaxLength kStringMaxLength",
+    ]
+}
+
+pub fn buffer_globals_exist_only_when_asked_for_test() {
+  assert run(
+      start_on(engine.new(), []),
+      "[typeof Buffer, typeof atob, typeof btoa].join()",
+    ).0
+    == "'undefined,undefined,undefined'"
 }

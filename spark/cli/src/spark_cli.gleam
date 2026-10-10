@@ -9,6 +9,7 @@ import gleam/string
 import simplifile
 import spark.{type Runtime, Finished, WakeIn}
 import spark/async_hooks
+import spark/buffer
 import spark/builtin.{type Builtin}
 import spark/dom_events
 import spark/domexception
@@ -65,6 +66,7 @@ fn builtins(
     perf_hooks.builtin(),
     domexception.builtin(),
     dom_events.builtin(),
+    buffer.builtin(),
   ]
 }
 
