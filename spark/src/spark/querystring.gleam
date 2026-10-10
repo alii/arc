@@ -8,6 +8,7 @@ pub fn builtin() -> Builtin(host) {
     source: js.querystring,
     natives: fn(_io: Io) { [] },
     dependencies: ["node:buffer", "spark:querystring"],
+    optional: [],
     exports: [
       "decode", "encode", "escape", "parse", "stringify", "unescape",
       "unescapeBuffer",
@@ -23,6 +24,7 @@ pub fn internal_builtin() -> Builtin(host) {
     source: js.querystring_internal,
     natives: fn(_io: Io) { [] },
     dependencies: ["spark:errors"],
+    optional: [],
     exports: ["encodeStr", "hexTable", "isHexTable"],
     globals: [],
   )

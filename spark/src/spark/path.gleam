@@ -16,6 +16,7 @@ pub fn builtin() -> Builtin(host) {
     source: js.path,
     natives: fn(_io: Io) { [] },
     dependencies: ["spark:errors", "node:process"],
+    optional: [],
     exports:,
     globals: [],
   )
@@ -27,6 +28,7 @@ pub fn posix_builtin() -> Builtin(host) {
     source: js.path_posix,
     natives: fn(_io: Io) { [] },
     dependencies: ["node:path"],
+    optional: [],
     exports:,
     globals: [],
   )
@@ -38,6 +40,7 @@ pub fn win32_builtin() -> Builtin(host) {
     source: js.path_win32,
     natives: fn(_io: Io) { [] },
     dependencies: ["node:path"],
+    optional: [],
     exports:,
     globals: [],
   )

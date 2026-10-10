@@ -26,6 +26,8 @@ const names = [
   "querystring_internal",
   "querystring",
   "url",
+  "events",
+  "string_decoder",
 ]
 
 const target = "src/spark/js.gleam"

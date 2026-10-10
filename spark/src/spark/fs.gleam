@@ -40,6 +40,7 @@ pub fn builtin() -> Builtin(host) {
       ]
     },
     dependencies: ["spark:errors"],
+    optional: [],
     exports: [
       "access", "accessSync", "exists", "existsSync", "realpath", "realpathSync",
       "constants", "promises", "F_OK", "R_OK", "W_OK", "X_OK",
@@ -55,6 +56,7 @@ pub fn promises_builtin() -> Builtin(host) {
     source: js.fs_promises,
     natives: fn(_io: Io) { [] },
     dependencies: ["node:fs"],
+    optional: [],
     exports: ["access", "realpath", "constants"],
     globals: [],
   )

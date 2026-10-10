@@ -8,6 +8,7 @@ pub fn builtin() -> Builtin(host) {
     source: js.async_hooks,
     natives: fn(_io) { context_natives() },
     dependencies: ["spark:errors"],
+    optional: [],
     exports: [
       "AsyncLocalStorage", "AsyncResource", "createHook", "executionAsyncId",
       "triggerAsyncId", "executionAsyncResource", "asyncWrapProviders",

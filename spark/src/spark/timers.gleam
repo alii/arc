@@ -24,6 +24,7 @@ pub fn builtin() -> Builtin(host) {
       ]
     },
     dependencies: ["spark:loop", "spark:errors"],
+    optional: [],
     exports: names,
     globals: names,
   )

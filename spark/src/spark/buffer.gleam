@@ -201,6 +201,7 @@ pub fn builtin() -> Builtin(host) {
       ]
     },
     dependencies: ["spark:errors", "spark:domexception"],
+    optional: [],
     exports: [
       "Buffer", "INSPECT_MAX_BYTES", "atob", "btoa", "constants", "isAscii",
       "isLatin1", "isUtf8", "kMaxLength", "kStringMaxLength",

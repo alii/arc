@@ -49,6 +49,7 @@ pub fn builtin() -> Builtin(host) {
       ]
     },
     dependencies: ["spark:errors"],
+    optional: [],
     exports: ["TextEncoder", "TextDecoder"],
     globals: ["TextEncoder", "TextDecoder"],
   )

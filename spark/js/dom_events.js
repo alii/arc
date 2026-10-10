@@ -1039,3 +1039,15 @@ module.exports = {
   AbortController,
   AbortSignal,
 };
+
+// for the events module; not an export
+Object.defineProperty(module.exports, "internals", {
+  value: {
+    isEventTarget,
+    kEvents,
+    kIsBeingDispatched,
+    kResistStopPropagation,
+    kTarget,
+    kTrustEvent,
+  },
+});

@@ -9,6 +9,7 @@ pub fn builtin() -> Builtin(host) {
     source: js.domexception,
     natives: fn(_io) { [] },
     dependencies: [],
+    optional: [],
     exports: ["DOMException", "QuotaExceededError"],
     globals: ["DOMException", "QuotaExceededError"],
   )

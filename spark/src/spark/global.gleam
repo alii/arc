@@ -8,6 +8,7 @@ pub fn builtin() -> Builtin(host) {
     source: js.global,
     natives: fn(_io) { [] },
     dependencies: [],
+    optional: [],
     exports: ["global"],
     globals: ["global"],
   )

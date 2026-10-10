@@ -64,6 +64,7 @@ pub fn builtin(process: Process) -> Builtin(host) {
       ]
     },
     dependencies: ["spark:errors", "spark:loop"],
+    optional: [],
     exports: [
       "env", "argv", "platform", "arch", "pid", "version", "versions", "cwd",
       "uptime", "nextTick", "stdout", "stderr",

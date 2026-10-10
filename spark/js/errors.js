@@ -296,6 +296,68 @@ function validateBuffer(buffer, name = "buffer") {
   }
 }
 
+function validateBoolean(value, name) {
+  if (typeof value !== "boolean") throw invalidArgType(name, "boolean", value);
+}
+
+function validateAbortSignal(signal, name) {
+  if (
+    signal !== undefined &&
+    (signal === null || typeof signal !== "object" || !("aborted" in signal))
+  ) {
+    throw invalidArgType(name, "AbortSignal", signal);
+  }
+}
+
+class AbortError extends Error {
+  constructor(message = "The operation was aborted", options = undefined) {
+    if (options !== undefined && typeof options !== "object") {
+      throw invalidArgType("options", "Object", options);
+    }
+    super(message, options);
+    this.code = "ABORT_ERR";
+    this.name = "AbortError";
+  }
+}
+
+function genericNodeError(message, errorProperties) {
+  const err = new Error(message);
+  Object.assign(err, errorProperties);
+  return err;
+}
+
+const kEnhanceStackBeforeInspector = Symbol("kEnhanceStackBeforeInspector");
+
+// node's error classes by code, for code ported from node that says
+// `new ERR_X(...)`; each returns the error, which `new` then hands back
+const codes = {
+  ERR_INVALID_ARG_TYPE: function (name, expected, actual) {
+    return invalidArgType(name, expected, actual);
+  },
+  ERR_INVALID_ARG_VALUE: function (name, value, reason) {
+    return invalidArgValue(name, value, reason);
+  },
+  ERR_OUT_OF_RANGE: function (name, range, input, replaceDefaultBoolean) {
+    return outOfRange(name, range, input, replaceDefaultBoolean);
+  },
+  ERR_INVALID_THIS: function (type) {
+    return typeError(
+      "ERR_INVALID_THIS",
+      `Value of "this" must be of type ${type}`,
+    );
+  },
+  ERR_UNKNOWN_ENCODING: function (encoding) {
+    return typeError("ERR_UNKNOWN_ENCODING", `Unknown encoding: ${encoding}`);
+  },
+  ERR_UNHANDLED_ERROR: function (err = undefined) {
+    const msg = "Unhandled error.";
+    return error(
+      "ERR_UNHANDLED_ERROR",
+      err === undefined ? msg : `${msg} (${err})`,
+    );
+  },
+};
+
 function validateFunction(value, name) {
   if (typeof value !== "function") {
     throw invalidArgType(name, "Function", value);
@@ -320,6 +382,12 @@ module.exports = {
   rangeError,
   uriError,
   inspect,
+  codes,
+  AbortError,
+  genericNodeError,
+  kEnhanceStackBeforeInspector,
+  validateAbortSignal,
+  validateBoolean,
   invalidArgType,
   invalidArgValue,
   outOfRange,

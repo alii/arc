@@ -14,6 +14,7 @@ import spark/builtin.{type Builtin}
 import spark/dom_events
 import spark/domexception
 import spark/encoding
+import spark/events
 import spark/fs
 import spark/global
 import spark/io.{
@@ -27,6 +28,7 @@ import spark/perf_hooks
 import spark/platform.{type Platform}
 import spark/process.{type Process, Process}
 import spark/querystring
+import spark/string_decoder
 import spark/timers
 import spark/url
 
@@ -78,6 +80,8 @@ fn builtins(
     querystring.internal_builtin(),
     querystring.builtin(),
     url.builtin(),
+    events.builtin(),
+    string_decoder.builtin(),
   ]
 }
 

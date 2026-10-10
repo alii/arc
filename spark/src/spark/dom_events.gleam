@@ -19,6 +19,7 @@ pub fn builtin() -> Builtin(host) {
     dependencies: [
       "spark:errors", "spark:loop", "spark:domexception", "node:timers",
     ],
+    optional: [],
     exports: [
       "Event", "CustomEvent", "EventTarget", "AbortController", "AbortSignal",
     ],

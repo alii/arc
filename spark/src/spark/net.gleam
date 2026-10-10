@@ -10,6 +10,7 @@ pub fn builtin() -> Builtin(host) {
     source: js.net,
     natives: fn(_io: Io) { [] },
     dependencies: ["spark:errors"],
+    optional: [],
     exports: ["BlockList", "SocketAddress", "isIP", "isIPv4", "isIPv6"],
     globals: [],
   )

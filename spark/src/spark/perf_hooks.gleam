@@ -20,6 +20,7 @@ pub fn builtin() -> Builtin(host) {
       ]
     },
     dependencies: ["spark:errors", "spark:domexception"],
+    optional: [],
     exports: [
       "performance", "PerformanceEntry", "PerformanceMark", "PerformanceMeasure",
     ],

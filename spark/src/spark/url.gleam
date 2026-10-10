@@ -157,6 +157,7 @@ pub fn builtin() -> Builtin(host) {
       "spark:errors", "node:path", "node:buffer", "node:querystring",
       "spark:querystring", "node:process",
     ],
+    optional: [],
     exports: [
       "URL", "URLSearchParams", "Url", "domainToASCII", "domainToUnicode",
       "fileURLToPath", "fileURLToPathBuffer", "format", "parse", "pathToFileURL",

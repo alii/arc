@@ -15,6 +15,9 @@ pub type Builtin(host) {
     /// full specifiers of the only modules this one's require can reach;
     /// each must be passed to start too, nothing is pulled in for it
     dependencies: List(String),
+    /// modules its require can also reach when the embedder passed them; a
+    /// require of one that was not passed throws
+    optional: List(String),
     /// every name the module exports, for `import { name }`
     exports: List(String),
     /// exports also defined on globalThis; any here loads the module at start

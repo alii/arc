@@ -61,6 +61,7 @@ pub fn builtin(os: Os) -> Builtin(host) {
       ]
     },
     dependencies: [],
+    optional: [],
     exports: [
       "arch", "availableParallelism", "endianness", "homedir", "hostname",
       "platform", "release", "tmpdir", "type", "version", "machine", "constants",

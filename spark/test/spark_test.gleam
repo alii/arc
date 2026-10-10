@@ -16,6 +16,7 @@ import spark/builtin.{type Builtin, Builtin}
 import spark/dom_events
 import spark/domexception
 import spark/encoding
+import spark/events
 import spark/fs
 import spark/global
 import spark/io.{
@@ -29,6 +30,7 @@ import spark/perf_hooks
 import spark/platform.{type Platform, Darwin, Linux}
 import spark/process.{Process}
 import spark/querystring
+import spark/string_decoder
 import spark/timers
 import spark/url
 
@@ -67,6 +69,8 @@ fn builtins() -> List(Builtin(Nil)) {
     querystring.internal_builtin(),
     querystring.builtin(),
     url.builtin(),
+    events.builtin(),
+    string_decoder.builtin(),
   ]
 }
 
@@ -416,6 +420,7 @@ fn script_builtin(
     source:,
     natives: fn(_io) { [] },
     dependencies:,
+    optional: [],
     exports: [],
     globals: [],
   )
@@ -2426,4 +2431,268 @@ pub fn url_globals_exist_only_when_asked_for_test() {
       "[typeof URL, typeof URLSearchParams].join()",
     ).0
     == "'undefined,undefined'"
+}
+
+const events_script = "
+const events = require(\"events\");
+const { EventEmitter } = events;
+let seed = 5150;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const show = (v) => { try { return typeof v === \"function\" ? \"fn:\" + (v.tag ?? v.name) : typeof v === \"symbol\" ? v.toString() : JSON.stringify(v, (k, x) => (typeof x === \"function\" ? \"fn:\" + (x.tag ?? x.name) : typeof x === \"symbol\" ? x.toString() : typeof x === \"bigint\" ? x + \"n\" : x)); } catch (e) { return String(v); } };
+const call = (f) => { try { const v = f(); return v === undefined ? \"undefined\" : show(v); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+// ---- generated sequences of listener operations
+const names = [\"a\", \"b\", Symbol.for(\"s\"), \"error\", \"newListener\", \"removeListener\"];
+for (let round = 0; round < 250; round++) {
+  const e = new EventEmitter();
+  const log = [];
+  const fns = Array.from({ length: 4 }, (_, i) => { const f = function (...args) { log.push(\"f\" + i + \"(\" + args.map((a) => (typeof a === \"function\" ? \"fn:\" + a.tag : String(a))).join(\",\") + \")\"); if (i === 3 && args[0] === \"again\") e.removeListener(\"a\", fns[0]); }; f.tag = \"f\" + i; return f; });
+  const steps = [];
+  for (let k = 0; k < 3 + rnd(9); k++) {
+    const name = pick(names), fn = pick(fns);
+    const op = rnd(13);
+    const r = call(() => {
+      switch (op) {
+        case 0: e.on(name, fn); return \"on\";
+        case 1: e.once(name, fn); return \"once\";
+        case 2: e.prependListener(name, fn); return \"prepend\";
+        case 3: e.prependOnceListener(name, fn); return \"prependOnce\";
+        case 4: e.off(name, fn); return \"off\";
+        case 5: e.removeAllListeners(rnd(3) ? name : undefined); return \"removeAll\";
+        case 6: return \"emit=\" + e.emit(name, pick([\"again\", 1, undefined]), 2);
+        case 7: return \"count=\" + e.listenerCount(name) + \"/\" + e.listenerCount(name, fn);
+        case 8: return \"listeners=\" + show(e.listeners(name));
+        case 9: return \"raw=\" + show(e.rawListeners(name).map((l) => l.listener ? \"wrap:\" + l.listener.tag : l.tag));
+        case 10: return \"names=\" + show(e.eventNames());
+        case 11: e.setMaxListeners(rnd(4)); return \"max=\" + e.getMaxListeners();
+        default: return \"emit0=\" + e.emit(name);
+      }
+    });
+    steps.push((typeof name === \"symbol\" ? \"sym\" : name) + \":\" + r);
+  }
+  lines.push(\"G \" + round + \" \" + steps.join(\" \") + \" => \" + log.join(\" \") + \" | \" + show(e.eventNames()) + \" \" + e._eventsCount);
+}
+// ---- api
+t(\"shape\", () => [typeof events, events === EventEmitter, events.EventEmitter === EventEmitter, events.defaultMaxListeners, events.usingDomains, String(events.errorMonitor), String(events.captureRejectionSymbol), events.captureRejections, EventEmitter.name, EventEmitter.length]);
+t(\"static keys\", () => Object.getOwnPropertyNames(events).filter((k) => ![\"length\", \"name\", \"prototype\", \"arguments\", \"caller\"].includes(k)).sort());
+t(\"proto keys\", () => Object.getOwnPropertyNames(EventEmitter.prototype).sort());
+t(\"instance\", () => { const e = new EventEmitter(); return [Object.keys(e), e._eventsCount, e._maxListeners === undefined, Object.getPrototypeOf(e._events)]; });
+t(\"init without new\", () => { const o = {}; EventEmitter.call(o); return Object.keys(o); });
+t(\"subclass\", () => { class A extends EventEmitter { constructor() { super({ captureRejections: true }); } } const a = new A(); let got; a.on(\"x\", (v) => (got = v)); a.emit(\"x\", 7); return [got, a instanceof EventEmitter]; });
+t(\"util.inherits style\", () => { function Old() { EventEmitter.call(this); } Object.setPrototypeOf(Old.prototype, EventEmitter.prototype); const o = new Old(); let n = 0; o.on(\"x\", () => n++); o.emit(\"x\"); return n; });
+t(\"this in listener\", () => { const e = new EventEmitter(); let same; e.on(\"x\", function () { same = this === e; }); e.emit(\"x\"); return same; });
+t(\"returns this\", () => { const e = new EventEmitter(); const f = () => {}; return [e.on(\"x\", f) === e, e.once(\"x\", f) === e, e.off(\"x\", f) === e, e.removeAllListeners() === e, e.setMaxListeners(1) === e, e.addListener(\"y\", f) === e]; });
+t(\"bad listener\", () => new EventEmitter().on(\"x\", 5));
+t(\"bad listener once\", () => new EventEmitter().once(\"x\", \"f\"));
+t(\"bad listener off\", () => new EventEmitter().off(\"x\", null));
+t(\"bad max\", () => new EventEmitter().setMaxListeners(-1));
+t(\"bad max type\", () => new EventEmitter().setMaxListeners(\"3\"));
+t(\"bad default max\", () => { events.defaultMaxListeners = -1; });
+t(\"bad captureRejections\", () => new EventEmitter({ captureRejections: \"yes\" }));
+t(\"bad captureRejections static\", () => { events.captureRejections = 1; });
+t(\"error with no listener\", () => new EventEmitter().emit(\"error\", new Error(\"boom\")));
+t(\"error not an error\", () => new EventEmitter().emit(\"error\", { a: 1 }));
+t(\"error string\", () => new EventEmitter().emit(\"error\", \"bad\"));
+t(\"error undefined\", () => new EventEmitter().emit(\"error\"));
+t(\"error context\", () => { try { new EventEmitter().emit(\"error\", \"bad\"); } catch (e) { return [e.context, Object.keys(e)]; } });
+t(\"errorMonitor\", () => { const e = new EventEmitter(); const seen = []; e.on(events.errorMonitor, (err) => seen.push(\"monitor \" + err.message)); e.on(\"error\", (err) => seen.push(\"handler \" + err.message)); e.emit(\"error\", new Error(\"x\")); return seen; });
+t(\"errorMonitor alone still throws\", () => { const e = new EventEmitter(); e.on(events.errorMonitor, () => {}); e.emit(\"error\", new Error(\"y\")); });
+t(\"newListener order\", () => { const e = new EventEmitter(); const seen = []; e.on(\"newListener\", (name, fn) => seen.push(\"new \" + String(name) + \" \" + e.listenerCount(name))); e.on(\"removeListener\", (name) => seen.push(\"removed \" + name)); const f = () => {}; e.on(\"x\", f); e.once(\"y\", f); e.off(\"x\", f); e.emit(\"y\"); e.removeAllListeners(\"removeListener\"); return seen; });
+t(\"once wrapper\", () => { const e = new EventEmitter(); const f = () => {}; e.once(\"x\", f); return [e.listeners(\"x\")[0] === f, e.rawListeners(\"x\")[0] === f, e.rawListeners(\"x\")[0].listener === f]; });
+t(\"remove during emit\", () => { const e = new EventEmitter(); const seen = []; const b = () => seen.push(\"b\"); e.on(\"x\", () => { seen.push(\"a\"); e.off(\"x\", b); }); e.on(\"x\", b); e.emit(\"x\"); e.emit(\"x\"); return seen; });
+t(\"max listeners\", () => { const e = new EventEmitter(); return [e.getMaxListeners(), events.getMaxListeners(e), (events.setMaxListeners(3, e), e.getMaxListeners()), (e.setMaxListeners(0), e.getMaxListeners()), e.setMaxListeners(Infinity).getMaxListeners()]; });
+t(\"leak warning flag\", () => { const e = new EventEmitter(); e.setMaxListeners(1); e.on(\"x\", () => {}); e.on(\"x\", () => {}); return [e._events.x.warned, e.listenerCount(\"x\")]; });
+t(\"getEventListeners\", () => { const e = new EventEmitter(); const f = () => {}; e.on(\"x\", f); e.once(\"x\", f); return [events.getEventListeners(e, \"x\").length, events.getEventListeners(e, \"y\"), events.listenerCount(e, \"x\")]; });
+t(\"getEventListeners bad\", () => events.getEventListeners({}, \"x\"));
+t(\"getMaxListeners bad\", () => events.getMaxListeners({}));
+t(\"setMaxListeners static bad target\", () => events.setMaxListeners(1, {}));
+t(\"setMaxListeners static default\", () => { const old = events.defaultMaxListeners; events.setMaxListeners(4); const now = [events.defaultMaxListeners, new EventEmitter().getMaxListeners()]; events.setMaxListeners(old); return now; });
+t(\"listenerCount static deprecated form\", () => { const e = new EventEmitter(); e.on(\"x\", () => {}); return EventEmitter.listenerCount(e, \"x\"); });
+t(\"symbol events\", () => { const e = new EventEmitter(); const s = Symbol(\"k\"); let n = 0; e.on(s, () => n++); e.emit(s); return [n, e.eventNames().length, typeof e.eventNames()[0]]; });
+t(\"many args\", () => { const e = new EventEmitter(); let got; e.on(\"x\", (...a) => (got = a)); e.emit(\"x\", 1, 2, 3, 4, 5, 6); return got; });
+t(\"emit returns\", () => { const e = new EventEmitter(); return [e.emit(\"x\"), (e.on(\"x\", () => {}), e.emit(\"x\"))]; });
+t(\"off unknown\", () => { const e = new EventEmitter(); e.off(\"x\", () => {}); e.removeAllListeners(\"y\"); return e.eventNames(); });
+t(\"listener throws\", () => { const e = new EventEmitter(); const seen = []; e.on(\"x\", () => { throw new RangeError(\"inside\"); }); e.on(\"x\", () => seen.push(\"second\")); try { e.emit(\"x\"); } catch (err) { seen.push(err.name); } return seen; });
+// ---- event targets and abort signals, when present
+t(\"with EventTarget\", () => { const target = new EventTarget(); const f = () => {}; target.addEventListener(\"x\", f); target.addEventListener(\"x\", () => {}, { once: true }); events.setMaxListeners(5, target); return [events.getEventListeners(target, \"x\").length, events.getEventListeners(target, \"x\")[0] === f, events.listenerCount(target, \"x\"), events.getMaxListeners(target), events.getEventListeners(target, \"none\")]; });
+t(\"addAbortListener\", () => { const c = new AbortController(); const seen = []; const d = events.addAbortListener(c.signal, (ev) => seen.push(ev.type)); const d2 = events.addAbortListener(c.signal, () => seen.push(\"never\")); d2[Symbol.dispose](); c.abort(); return [seen, typeof d[Symbol.dispose], Object.getPrototypeOf(d)]; });
+t(\"addAbortListener stopped\", () => { const c = new AbortController(); const seen = []; c.signal.addEventListener(\"abort\", (ev) => ev.stopImmediatePropagation()); events.addAbortListener(c.signal, () => seen.push(\"still told\")); c.abort(); return seen; });
+t(\"addAbortListener bad\", () => events.addAbortListener(undefined, () => {}));
+t(\"addAbortListener bad 2\", () => events.addAbortListener({}, () => {}));
+t(\"addAbortListener bad 3\", () => events.addAbortListener(new AbortController().signal, 5));
+// ---- the async helpers; results arrive later, printed in a fixed order
+const later = [];
+const settle = (label, promise) => later.push(promise.then((v) => label + \" resolved \" + show(v), (e) => label + \" rejected \" + e.name + \" \" + e.code + \" \" + e.message));
+{ const e = new EventEmitter(); settle(\"once\", events.once(e, \"go\")); e.emit(\"go\", 1, \"two\"); }
+{ const e = new EventEmitter(); settle(\"once error\", events.once(e, \"go\")); e.emit(\"error\", new Error(\"failed first\")); }
+{ const e = new EventEmitter(); settle(\"once for error event\", events.once(e, \"error\")); e.emit(\"error\", new Error(\"wanted\")); }
+{ const c = new AbortController(); const e = new EventEmitter(); settle(\"once aborted\", events.once(e, \"go\", { signal: c.signal })); c.abort(); settle(\"once aborted cleans up\", Promise.resolve().then(() => e.listenerCount(\"go\") + \",\" + e.listenerCount(\"error\"))); }
+{ const e = new EventEmitter(); settle(\"once already aborted\", events.once(e, \"go\", { signal: AbortSignal.abort() })); }
+{ settle(\"once bad signal\", (async () => events.once(new EventEmitter(), \"go\", { signal: 5 }))()); }
+{ const target = new EventTarget(); settle(\"once on EventTarget\", events.once(target, \"ping\").then(([ev]) => ev.type)); target.dispatchEvent(new Event(\"ping\")); }
+{ settle(\"once bad emitter\", (async () => events.once({}, \"x\"))()); }
+{ const e = new EventEmitter(); settle(\"on iterates\", (async () => { const got = []; const it = events.on(e, \"tick\"); queueTicks(e); for await (const args of it) { got.push(args[0]); if (got.length === 3) break; } return [got, e.listenerCount(\"tick\"), e.listenerCount(\"error\")]; })()); }
+function queueTicks(e) { Promise.resolve().then(() => { e.emit(\"tick\", 1); e.emit(\"tick\", 2); e.emit(\"tick\", 3); e.emit(\"tick\", 4); }); }
+{ const e = new EventEmitter(); settle(\"on error\", (async () => { const it = events.on(e, \"tick\"); Promise.resolve().then(() => e.emit(\"error\", new Error(\"mid stream\"))); for await (const _ of it) { /* none */ } })()); }
+{ const c = new AbortController(); const e = new EventEmitter(); settle(\"on aborted\", (async () => { const it = events.on(e, \"tick\", { signal: c.signal }); Promise.resolve().then(() => c.abort()); for await (const _ of it) { /* none */ } })()); }
+{ const e = new EventEmitter(); settle(\"on close option\", (async () => { const got = []; const it = events.on(e, \"tick\", { close: [\"end\"] }); Promise.resolve().then(() => { e.emit(\"tick\", \"a\"); e.emit(\"end\"); }); for await (const args of it) got.push(args[0]); return got; })()); }
+{ const e = new EventEmitter(); const it = events.on(e, \"tick\"); settle(\"on iterator shape\", (async () => [typeof it.next, typeof it.return, typeof it.throw, it[Symbol.asyncIterator]() === it, show(await it.return()), show(await it.next())])()); }
+{ const e = new EventEmitter({ captureRejections: true }); settle(\"captureRejections\", new Promise((resolve) => { e.on(\"error\", (err) => resolve(\"routed \" + err.message)); e.on(\"x\", async () => { throw new Error(\"async boom\"); }); e.emit(\"x\"); })); }
+{ const e = new EventEmitter({ captureRejections: true }); settle(\"captureRejections custom\", new Promise((resolve) => { e[events.captureRejectionSymbol] = (err, name, ...args) => resolve([err.message, name, args]); e.on(\"y\", async () => { throw new Error(\"custom\"); }); e.emit(\"y\", 1, 2); })); }
+Promise.all(later).then((settled) => {
+for (const l of settled) lines.push(l);
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"G \") ? \"generated\" : line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+});
+
+"
+
+// 250 generated runs of listener operations, the events api, and its async
+// helpers with abort signals and event targets. Each line is a kind of case,
+// how many, and a hash of what they printed in node 26.11.1
+pub fn events_match_node_test() {
+  let rt = run_to_end(run_commonjs(node_runtime(), events_script))
+  assert out_lines(rt)
+    == [
+      "generated 250 1053567025",
+      "shape 1 682840665",
+      "static 1 2073246721",
+      "proto 1 4181908381",
+      "instance 1 2264329778",
+      "init 1 2011871542",
+      "subclass 1 2881172964",
+      "util.inherits 1 2571703791",
+      "this 1 1251994592",
+      "returns 1 2767923914",
+      "bad 8 1433812664",
+      "error 5 3107457037",
+      "errorMonitor 2 1561212194",
+      "newListener 1 436061221",
+      "once 10 1270283493",
+      "remove 1 802097553",
+      "max 1 1957045456",
+      "leak 1 3927728986",
+      "getEventListeners 2 1200610165",
+      "getMaxListeners 1 2314459384",
+      "setMaxListeners 2 1370778731",
+      "listenerCount 1 3400937000",
+      "symbol 1 2238438402",
+      "many 1 4167356386",
+      "emit 1 1495309656",
+      "off 1 1367172824",
+      "listener 1 2928696599",
+      "with 1 3671023169",
+      "addAbortListener 5 3295607963",
+      "on 5 747387987",
+      "captureRejections 2 2905010035",
+    ]
+}
+
+pub fn events_work_without_the_modules_they_can_use_test() {
+  let rt =
+    run_to_end(run_commonjs(
+      start_on(engine.new(), [events.builtin()]),
+      "const events = require('events');
+      const e = new events.EventEmitter();
+      e.setMaxListeners(1);
+      e.on('x', () => out.push('one'));
+      e.on('x', () => out.push('two'));
+      e.emit('x');
+      out.push(String(events.getMaxListeners(e)));
+      try { events.getEventListeners({}, 'x'); } catch (error) { out.push(error.code); }
+      try { events.EventEmitterAsyncResource; } catch (error) { out.push('no async_hooks'); }
+      events.once(e, 'later').then((args) => out.push('later ' + args[0]));
+      e.emit('later', 5);",
+    ))
+  assert out_lines(rt)
+    == ["one", "two", "1", "ERR_INVALID_ARG_TYPE", "no async_hooks", "later 5"]
+}
+
+const string_decoder_script = "
+const { StringDecoder } = require(\"string_decoder\");
+let seed = 808;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const hexOf = (s) => Buffer.from(s, \"utf8\").toString(\"hex\");
+const texts = [\"hello\", \"h\\u00e9llo w\\u00f6rld\", \"\\u20ac\\u20ac\", \"\\u4e2d\\u6587\\u5b57\", \"\\ud83d\\ude00\\ud83d\\ude80\", \"a\\ud83d\\ude00b\", \"\", \"x\"];
+const encodings = [\"utf8\", \"utf-8\", \"utf16le\", \"ucs2\", \"base64\", \"base64url\", \"latin1\", \"binary\", \"hex\", \"ascii\", undefined, \"UTF8\"];
+for (let i = 0; i < 500; i++) {
+  const enc = pick(encodings);
+  let bytes;
+  if (rnd(3) === 0) bytes = Buffer.from(Array.from({ length: rnd(14) }, () => (rnd(3) ? 128 + rnd(128) : rnd(128))));
+  else bytes = Buffer.from(pick(texts) + pick(texts), rnd(2) && (enc === \"utf16le\" || enc === \"ucs2\") ? \"utf16le\" : \"utf8\");
+  const d = new StringDecoder(enc);
+  const parts = [];
+  let at = 0;
+  while (at < bytes.length) {
+    const n = 1 + rnd(4);
+    const chunk = bytes.subarray(at, at + n);
+    const piece = rnd(6) === 0 ? new Uint8Array(chunk) : chunk;
+    parts.push(hexOf(d.write(piece)) + \"~\" + d.lastNeed + \"/\" + d.lastTotal);
+    at += n;
+  }
+  const tail = rnd(4) === 0 ? d.end(Buffer.from([rnd(256)])) : d.end();
+  lines.push(\"D \" + String(enc) + \" \" + bytes.toString(\"hex\") + \" \" + parts.join(\" \") + \" end=\" + hexOf(tail) + \" after=\" + d.lastNeed + \"/\" + d.lastTotal + \" again=\" + hexOf(d.write(Buffer.from(\"ok\"))));
+}
+const call = (f) => { try { const v = f(); return typeof v === \"string\" ? JSON.stringify(v) : JSON.stringify(v) ?? String(v); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+t(\"default encoding\", () => new StringDecoder().encoding);
+t(\"normalised\", () => [\"UTF-8\", \"ucs-2\", \"UTF16LE\", \"binary\", \"BASE64\", \"base64url\", \"HEX\", \"ascii\", null, \"\"].map((e) => new StringDecoder(e).encoding));
+t(\"bad encoding\", () => new StringDecoder(\"nope\"));
+t(\"bad encoding type\", () => new StringDecoder(5));
+t(\"write string passes through\", () => new StringDecoder().write(\"already text\"));
+t(\"write bad\", () => new StringDecoder().write(5));
+t(\"write bad 2\", () => new StringDecoder().write([1, 2]));
+t(\"write DataView\", () => new StringDecoder().write(new DataView(new Uint8Array([104, 105]).buffer)));
+t(\"write Uint16Array\", () => new StringDecoder(\"hex\").write(new Uint16Array([0x4142])));
+t(\"wrong this\", () => StringDecoder.prototype.write.call({}, Buffer.from(\"a\")));
+t(\"lastChar\", () => { const d = new StringDecoder(); d.write(Buffer.from([0xe2, 0x82])); return [Buffer.isBuffer(d.lastChar), d.lastChar.length, d.lastChar.toString(\"hex\").slice(0, 4), d.lastNeed, d.lastTotal]; });
+t(\"text\", () => { const d = new StringDecoder(); d.write(Buffer.from([0xe2])); return [d.text(Buffer.from(\"xhello\"), 1), d.lastNeed]; });
+t(\"end with input\", () => new StringDecoder(\"utf16le\").end(Buffer.from([0x61, 0x00, 0x62])));
+t(\"shape\", () => [Object.keys(require(\"string_decoder\")), StringDecoder.name, StringDecoder.length, Object.getOwnPropertyNames(StringDecoder.prototype).sort(), Object.keys(new StringDecoder())]);
+t(\"without new\", () => { try { return typeof StringDecoder(\"utf8\"); } catch (e) { return e.name; } });
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"D \") ? \"decode \" + line.split(\" \")[1] : line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+"
+
+// 500 generated inputs fed in chunks of one to four bytes, in every
+// encoding, checking each piece and how much the decoder holds back
+pub fn string_decoder_matches_node_test() {
+  let rt = run_commonjs(node_runtime(), string_decoder_script)
+  assert out_lines(rt)
+    == [
+      "decode utf-8 1 2277041550",
+      "decode hex 161 151346911",
+      "decode base64 162 3083645261",
+      "decode utf8 176 3024526057",
+      "default 1 4120655540",
+      "normalised 1 2809180446",
+      "bad 2 170096432",
+      "write 5 4154319144",
+      "wrong 1 1287805370",
+      "lastChar 1 4115062536",
+      "text 1 1940916560",
+      "end 1 1899718399",
+      "shape 1 3147696307",
+      "without 1 1479083447",
+    ]
 }

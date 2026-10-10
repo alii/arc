@@ -103,6 +103,8 @@ const shipped_sources = [
   js.querystring_internal,
   js.querystring,
   js.url,
+  js.events,
+  js.string_decoder,
 ]
 
 /// compiles the js of every builtin spark ships; installs and runs nothing
@@ -193,6 +195,7 @@ fn errors_builtin() -> Builtin(host) {
       ]
     },
     dependencies: [],
+    optional: [],
     exports: [],
     globals: [],
   )
@@ -293,7 +296,13 @@ fn register(
         })
       let #(natives, ctx) = host.object(ctx, list.reverse(natives))
       let #(dependencies, ctx) =
-        host.array(ctx, list.map(builtin.dependencies, mk_string))
+        host.array(
+          ctx,
+          list.map(
+            list.append(builtin.dependencies, builtin.optional),
+            mk_string,
+          ),
+        )
       #(
         [
           mk_string(builtin.specifier),
