@@ -10,6 +10,8 @@ import simplifile
 import spark.{type Runtime, Finished, WakeIn}
 import spark/async_hooks
 import spark/builtin.{type Builtin}
+import spark/dom_events
+import spark/domexception
 import spark/encoding
 import spark/fs
 import spark/global
@@ -61,6 +63,8 @@ fn builtins(
     global.builtin(),
     encoding.builtin(),
     perf_hooks.builtin(),
+    domexception.builtin(),
+    dom_events.builtin(),
   ]
 }
 
@@ -137,8 +141,8 @@ fn this_process(
     platform:,
     arch: arch(),
     pid: pid(),
-    version: "v24.0.0",
-    versions: [#("node", "24.0.0"), #("spark", "0.1.0")],
+    version: "v26.11.1",
+    versions: [#("node", "26.11.1"), #("spark", "0.1.0")],
     stdout_is_tty: is_tty(Stdout),
     stderr_is_tty: is_tty(Stderr),
   )

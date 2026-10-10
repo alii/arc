@@ -3,8 +3,8 @@ import arc/rt/types.{mk_int}
 import spark/builtin.{type Builtin, Builtin}
 import spark/js
 
-/// node:perf_hooks and the `performance` global, so far only now,
-/// timeOrigin and toJSON, read from the engine's clock hooks
+/// node:perf_hooks and the `performance` global: now, timeOrigin, marks
+/// and measures, on the engine's clock hooks
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:perf_hooks",
@@ -19,8 +19,10 @@ pub fn builtin() -> Builtin(host) {
         }),
       ]
     },
-    dependencies: ["spark:errors"],
-    exports: ["performance"],
+    dependencies: ["spark:errors", "spark:domexception"],
+    exports: [
+      "performance", "PerformanceEntry", "PerformanceMark", "PerformanceMeasure",
+    ],
     globals: ["performance"],
   )
 }

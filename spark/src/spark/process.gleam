@@ -17,7 +17,7 @@ pub type Process {
     platform: Platform,
     arch: String,
     pid: Int,
-    /// what `process.version` reports, such as "v24.0.0"
+    /// what `process.version` reports, such as "v26.11.1"
     version: String,
     versions: List(#(String, String)),
     stdout_is_tty: Bool,

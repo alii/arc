@@ -482,7 +482,6 @@ pub type NativeToken {
   GlobalN(GlobalNative)
   HostFn(id: Int)
   Test262N(Test262Native)
-  DomExceptionN(DomExceptionNative)
   IntlN(IntlNative)
   TemporalN(TemporalNative)
   DisposableStackN(DisposableStackNative)
@@ -541,11 +540,6 @@ pub type DisposeResource {
 pub type DisposableState {
   Pending(capability: Handle)
   Disposed
-}
-
-pub type DomExceptionNative {
-  DomExceptionConstructor(proto: Handle)
-  DomExceptionGetCode
 }
 
 pub type Test262Native {

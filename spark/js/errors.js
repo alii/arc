@@ -53,8 +53,13 @@ function nodeErrorClass(Base) {
   };
 }
 
+const NodeError = nodeErrorClass(Error);
 const NodeTypeError = nodeErrorClass(TypeError);
 const NodeRangeError = nodeErrorClass(RangeError);
+
+function error(code, message) {
+  return new NodeError(code, message);
+}
 
 function typeError(code, message) {
   return new NodeTypeError(code, message);
@@ -232,6 +237,7 @@ function validateString(value, name) {
 }
 
 module.exports = {
+  error,
   typeError,
   rangeError,
   invalidArgType,

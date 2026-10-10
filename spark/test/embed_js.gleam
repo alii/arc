@@ -16,6 +16,8 @@ const names = [
   "perf_hooks",
   "fs_promises",
   "global",
+  "domexception",
+  "dom_events",
 ]
 
 const target = "src/spark/js.gleam"

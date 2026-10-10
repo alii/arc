@@ -12,6 +12,8 @@ import spark.{
 }
 import spark/async_hooks
 import spark/builtin.{type Builtin, Builtin}
+import spark/dom_events
+import spark/domexception
 import spark/encoding
 import spark/fs
 import spark/global
@@ -50,6 +52,8 @@ fn builtins() -> List(Builtin(Nil)) {
     os.builtin(made_up_os(Linux)),
     encoding.builtin(),
     perf_hooks.builtin(),
+    domexception.builtin(),
+    dom_events.builtin(),
   ]
 }
 
@@ -849,7 +853,7 @@ pub fn text_encoder_gives_utf8_bytes_test() {
       "61 e2 82 ac 0", "8", "61 e2 82 ac f0 9f 98 80 0 0",
       "TypeError [ERR_INVALID_ARG_TYPE]: The \"dest\" argument must be an instance of Uint8Array. Received an instance of Array code",
       "TypeError [ERR_INVALID_ARG_TYPE]: The \"src\" argument must be of type string. Received type number (5) code",
-      "TypeError [ERR_INVALID_THIS]: Value of \"this\" must be of type TextEncoder code",
+      "TypeError: Cannot read private member #encode from an object whose class did not declare it ",
     ]
 }
 
@@ -1014,4 +1018,321 @@ pub fn a_builtin_with_its_own_source_works_from_compiled_js_test() {
       "const greeting = require('test:greeting'); out.push(greeting.hello, greeting.timer);",
     )
   assert out_lines(rt) == ["hi", "function"]
+}
+
+// the three scripts below were also run by node 26.11.1 itself, and every
+// expected line is what node printed
+
+const dom_exception_script = "
+const show = (label, run) => { try { out.push(label + \": \" + run()); } catch (error) { out.push(label + \" threw \" + error.name + \" \" + error.code + \" \" + JSON.stringify(error.message) + \" | \" + String(error)); } };
+const e = new DOMException(\"boom\", \"AbortError\");
+show(\"basics\", () => [e.name, e.message, e.code, e instanceof Error, e instanceof DOMException, Object.prototype.toString.call(e), String(e), typeof e.stack].join(\" | \"));
+show(\"constants\", () => [DOMException.ABORT_ERR, e.ABORT_ERR, DOMException.DATA_CLONE_ERR, DOMException.INDEX_SIZE_ERR, Object.keys(DOMException).length, Object.keys(DOMException.prototype).join()].join(\" | \"));
+show(\"defaults\", () => { const d = new DOMException(); return [JSON.stringify(d.name), JSON.stringify(d.message), d.code].join(\" | \"); });
+show(\"options object\", () => { const d = new DOMException(\"m\", { name: \"TimeoutError\", cause: 5 }); return [d.name, d.code, d.cause, Object.getOwnPropertyDescriptor(d, \"cause\").enumerable].join(\" | \"); });
+show(\"no cause key\", () => \"cause\" in new DOMException(\"m\", { name: \"X\" }));
+show(\"codes\", () => [\"ValidationError\", \"Nope\", \"SyntaxError\", \"DataCloneError\", \"DOMStringSizeError\", \"QuotaExceededError\"].map((n) => new DOMException(\"x\", n).code).join());
+show(\"coercion\", () => { const d = new DOMException(12, 34); return [d.message, d.name, typeof d.message].join(\" | \"); });
+show(\"name getter on wrong this\", () => Object.getOwnPropertyDescriptor(DOMException.prototype, \"name\").get.call({}));
+show(\"code getter on wrong this\", () => Object.getOwnPropertyDescriptor(DOMException.prototype, \"code\").get.call(new Error(\"x\")));
+show(\"descriptors\", () => [\"name\", \"message\", \"code\"].map((k) => { const d = Object.getOwnPropertyDescriptor(DOMException.prototype, k); return k + \":\" + d.enumerable + d.configurable + typeof d.get + typeof d.set; }).join());
+show(\"constant is frozen\", () => { \"use strict\"; const d = Object.getOwnPropertyDescriptor(DOMException, \"ABORT_ERR\"); return [d.writable, d.enumerable, d.configurable].join(); });
+show(\"subclass\", () => { class Mine extends DOMException { constructor() { super(\"mine\", \"NotFoundError\"); } } const m = new Mine(); return [m instanceof Mine, m instanceof DOMException, m.name, m.code, m.constructor === Mine].join(); });
+show(\"proto chain\", () => Object.getPrototypeOf(DOMException.prototype) === Error.prototype);
+show(\"length and name\", () => [DOMException.length, DOMException.name].join());
+show(\"call without new\", () => DOMException(\"x\"));
+show(\"quota basics\", () => { const q = new QuotaExceededError(\"full\", { quota: 5, requested: 10 }); return [typeof QuotaExceededError, q.name, q.message, q.code, q.quota, q.requested, q instanceof DOMException, q instanceof Error, Object.prototype.toString.call(q), String(q)].join(\" | \"); });
+show(\"quota defaults\", () => { const q = new QuotaExceededError(); return [JSON.stringify(q.message), q.quota, q.requested, new QuotaExceededError(\"m\", null).quota, new QuotaExceededError(\"m\", { quota: \"7\" }).quota].join(\" | \"); });
+show(\"quota not a number\", () => new QuotaExceededError(\"m\", { quota: \"x\" }));
+show(\"quota infinite\", () => new QuotaExceededError(\"m\", { requested: Infinity }));
+show(\"quota negative\", () => new QuotaExceededError(\"m\", { quota: -1 }));
+show(\"requested negative\", () => new QuotaExceededError(\"m\", { requested: -1 }));
+show(\"requested under quota\", () => new QuotaExceededError(\"m\", { quota: 5, requested: 2 }));
+show(\"quota getter on wrong this\", () => Object.getOwnPropertyDescriptor(QuotaExceededError.prototype, \"quota\").get.call(new DOMException(\"x\")));
+show(\"quota keys\", () => { const keys = []; for (const key in new QuotaExceededError()) keys.push(key); return keys.filter((k) => !/_ERR$/.test(k)).sort().join(); });
+show(\"quota length\", () => [QuotaExceededError.length, QuotaExceededError.name, Object.getPrototypeOf(QuotaExceededError) === DOMException].join());
+"
+
+pub fn dom_exception_matches_node_test() {
+  let rt = run_commonjs(node_runtime(), dom_exception_script)
+  assert out_lines(rt)
+    == [
+      "basics: AbortError | boom | 20 | true | true | [object DOMException] | AbortError: boom | string",
+      "constants: 20 | 20 | 25 | 1 | 25 | name,message,code,INDEX_SIZE_ERR,DOMSTRING_SIZE_ERR,HIERARCHY_REQUEST_ERR,WRONG_DOCUMENT_ERR,INVALID_CHARACTER_ERR,NO_DATA_ALLOWED_ERR,NO_MODIFICATION_ALLOWED_ERR,NOT_FOUND_ERR,NOT_SUPPORTED_ERR,INUSE_ATTRIBUTE_ERR,INVALID_STATE_ERR,SYNTAX_ERR,INVALID_MODIFICATION_ERR,NAMESPACE_ERR,INVALID_ACCESS_ERR,VALIDATION_ERR,TYPE_MISMATCH_ERR,SECURITY_ERR,NETWORK_ERR,ABORT_ERR,URL_MISMATCH_ERR,QUOTA_EXCEEDED_ERR,TIMEOUT_ERR,INVALID_NODE_TYPE_ERR,DATA_CLONE_ERR",
+      "defaults: \"Error\" | \"\" | 0",
+      "options object: TimeoutError | 23 | 5 | false",
+      "no cause key: false",
+      "codes: 0,0,12,25,0,22",
+      "coercion: 12 | 34 | string",
+      "name getter on wrong this threw TypeError ERR_INVALID_THIS \"Value of \\\"this\\\" must be of DOMException\" | TypeError [ERR_INVALID_THIS]: Value of \"this\" must be of DOMException",
+      "code getter on wrong this threw TypeError ERR_INVALID_THIS \"Value of \\\"this\\\" must be of DOMException\" | TypeError [ERR_INVALID_THIS]: Value of \"this\" must be of DOMException",
+      "descriptors: name:truetruefunctionundefined,message:truetruefunctionundefined,code:truetruefunctionundefined",
+      "constant is frozen: false,true,false",
+      "subclass: true,true,NotFoundError,8,true",
+      "proto chain: true",
+      "length and name: 0,DOMException",
+      "call without new threw TypeError undefined \"Class constructor DOMException cannot be invoked without 'new'\" | TypeError: Class constructor DOMException cannot be invoked without 'new'",
+      "quota basics: function | QuotaExceededError | full | 22 | 5 | 10 | true | true | [object QuotaExceededError] | QuotaExceededError: full",
+      "quota defaults: \"\" |  |  |  | 7",
+      "quota not a number threw TypeError undefined \"Cannot convert options.quota to a double: the value is NaN\" | TypeError: Cannot convert options.quota to a double: the value is NaN",
+      "quota infinite threw TypeError undefined \"Cannot convert options.requested to a double: the value is Infinity\" | TypeError: Cannot convert options.requested to a double: the value is Infinity",
+      "quota negative threw RangeError undefined \"options.quota must not be negative\" | RangeError: options.quota must not be negative",
+      "requested negative threw RangeError undefined \"options.requested must not be negative\" | RangeError: options.requested must not be negative",
+      "requested under quota threw RangeError undefined \"options.requested must not be less than options.quota\" | RangeError: options.requested must not be less than options.quota",
+      "quota getter on wrong this threw TypeError ERR_INVALID_THIS \"Value of \\\"this\\\" must be of QuotaExceededError\" | TypeError [ERR_INVALID_THIS]: Value of \"this\" must be of QuotaExceededError",
+      "quota keys: code,message,name,quota,requested",
+      "quota length: 0,QuotaExceededError,true",
+    ]
+}
+
+const dom_events_script = "
+const show = (label, run) => { try { out.push(label + \": \" + run()); } catch (error) { out.push(label + \" threw \" + error.name + \" \" + error.code + \" \" + JSON.stringify(error.message)); } };
+
+// ---- Event
+show(\"event basics\", () => { const e = new Event(\"ping\", { cancelable: true, bubbles: true }); return [e.type, e.bubbles, e.cancelable, e.composed, e.defaultPrevented, e.target, e.currentTarget, e.eventPhase, e.isTrusted, typeof e.timeStamp, e.returnValue, e.cancelBubble, JSON.stringify(e.composedPath())].join(\" | \"); });
+show(\"event tags\", () => [Object.prototype.toString.call(new Event(\"x\")), Event.NONE, Event.AT_TARGET, Event.BUBBLING_PHASE, Object.keys(Event).join(), new Event(5).type].join(\" | \"));
+show(\"event keys\", () => { const keys = []; for (const key in new Event(\"x\")) keys.push(key); return keys.sort().join(); });
+show(\"preventDefault\", () => { const a = new Event(\"x\"); a.preventDefault(); const b = new Event(\"x\", { cancelable: true }); b.preventDefault(); return [a.defaultPrevented, b.defaultPrevented, b.returnValue].join(); });
+show(\"no type\", () => new Event());
+show(\"bad options\", () => new Event(\"x\", 5));
+show(\"getter on wrong this\", () => Object.getOwnPropertyDescriptor(Event.prototype, \"type\").get.call({}));
+show(\"custom event\", () => { const c = new CustomEvent(\"c\", { detail: { n: 1 } }); return [c.type, c.detail.n, new CustomEvent(\"d\").detail, c instanceof Event, Object.prototype.toString.call(c)].join(\" | \"); });
+
+// ---- EventTarget
+show(\"dispatch order and this\", () => {
+  const target = new EventTarget(); const log = [];
+  target.addEventListener(\"go\", function (e) { log.push(\"a:\" + (this === target) + \":\" + (e.target === target) + \":\" + (e.currentTarget === target) + \":\" + e.eventPhase); });
+  target.addEventListener(\"go\", { handleEvent(e) { log.push(\"b:\" + (this !== target)); } });
+  const e = new Event(\"go\"); const result = target.dispatchEvent(e);
+  return [log.join(\",\"), result, e.target === target, e.currentTarget, e.eventPhase].join(\" | \");
+});
+show(\"once, duplicate, remove\", () => {
+  const target = new EventTarget(); let n = 0; const inc = () => n++;
+  target.addEventListener(\"x\", inc); target.addEventListener(\"x\", inc); target.addEventListener(\"x\", inc, { once: true });
+  target.addEventListener(\"x\", inc, true); target.addEventListener(\"x\", () => n += 10, { once: true });
+  target.dispatchEvent(new Event(\"x\")); const first = n;
+  target.dispatchEvent(new Event(\"x\")); const second = n;
+  target.removeEventListener(\"x\", inc); target.dispatchEvent(new Event(\"x\")); const third = n;
+  target.removeEventListener(\"x\", inc, { capture: true }); target.dispatchEvent(new Event(\"x\"));
+  return [first, second, third, n].join();
+});
+show(\"stopImmediatePropagation\", () => { const t = new EventTarget(); const log = []; t.addEventListener(\"x\", (e) => { log.push(1); e.stopImmediatePropagation(); }); t.addEventListener(\"x\", () => log.push(2)); t.dispatchEvent(new Event(\"x\")); return log.join(); });
+show(\"cancel result\", () => { const t = new EventTarget(); t.addEventListener(\"x\", (e) => e.preventDefault()); return [t.dispatchEvent(new Event(\"x\", { cancelable: true })), t.dispatchEvent(new Event(\"x\"))].join(); });
+show(\"passive ignores preventDefault\", () => { const t = new EventTarget(); t.addEventListener(\"x\", (e) => e.preventDefault(), { passive: true }); return t.dispatchEvent(new Event(\"x\", { cancelable: true })); });
+show(\"null listener\", () => { const t = new EventTarget(); t.addEventListener(\"x\", null); t.removeEventListener(\"x\", null); return t.dispatchEvent(new Event(\"x\")); });
+show(\"bad listener\", () => new EventTarget().addEventListener(\"x\", 5));
+show(\"missing listener\", () => new EventTarget().addEventListener(\"x\"));
+show(\"dispatch non-event\", () => new EventTarget().dispatchEvent({ type: \"x\" }));
+show(\"dispatch nothing\", () => new EventTarget().dispatchEvent());
+show(\"redispatch during dispatch\", () => { const t = new EventTarget(); let seen; t.addEventListener(\"x\", (e) => { try { t.dispatchEvent(e); } catch (error) { seen = error.name + \" \" + error.code + \" \" + error.message; } }); t.dispatchEvent(new Event(\"x\")); return seen; });
+show(\"wrong this\", () => EventTarget.prototype.addEventListener.call({}, \"x\", () => {}));
+show(\"target tags\", () => [Object.prototype.toString.call(new EventTarget()), Object.keys(EventTarget.prototype).join()].join(\" | \"));
+show(\"listener added during dispatch runs\", () => { const t = new EventTarget(); const log = []; t.addEventListener(\"x\", () => { log.push(1); t.addEventListener(\"x\", () => log.push(2)); }); t.dispatchEvent(new Event(\"x\")); return log.join(); });
+show(\"signal option\", () => { const t = new EventTarget(); const c = new AbortController(); let n = 0; t.addEventListener(\"x\", () => n++, { signal: c.signal }); t.dispatchEvent(new Event(\"x\")); c.abort(); t.dispatchEvent(new Event(\"x\")); const d = new AbortController(); d.abort(); t.addEventListener(\"x\", () => n += 100, { signal: d.signal }); t.dispatchEvent(new Event(\"x\")); return n; });
+show(\"bad signal option\", () => new EventTarget().addEventListener(\"x\", () => {}, { signal: 5 }));
+show(\"subclass\", () => { class Bus extends EventTarget {} const b = new Bus(); let got; b.addEventListener(\"m\", (e) => got = e.detail); b.dispatchEvent(new CustomEvent(\"m\", { detail: 7 })); return got; });
+
+// ---- AbortController / AbortSignal
+show(\"controller basics\", () => { const c = new AbortController(); const s = c.signal; const before = [s.aborted, s.reason, s === c.signal].join(); const log = []; s.addEventListener(\"abort\", (e) => log.push(\"listener:\" + e.type + \":\" + e.isTrusted + \":\" + (e.target === s))); s.onabort = (e) => log.push(\"onabort:\" + (e.target === s)); c.abort(); c.abort(); return [before, s.aborted, s.reason.name, s.reason.message, s.reason.code, s.reason instanceof DOMException, log.join(\",\")].join(\" | \"); });
+show(\"custom reason\", () => { const c = new AbortController(); c.abort(\"why\"); let thrown; try { c.signal.throwIfAborted(); } catch (e) { thrown = e; } return [c.signal.reason, thrown].join(); });
+show(\"throwIfAborted when fine\", () => new AbortController().signal.throwIfAborted());
+show(\"onabort slot\", () => { const s = new AbortController().signal; const before = s.onabort; const f = () => {}; s.onabort = f; const same = s.onabort === f; s.onabort = null; return [before, same, s.onabort].join(); });
+show(\"signal constructor\", () => new AbortSignal());
+show(\"AbortSignal.abort\", () => { const s = AbortSignal.abort(); const t = AbortSignal.abort(42); return [s.aborted, s.reason.name, t.reason].join(); });
+show(\"tags\", () => [Object.prototype.toString.call(new AbortController()), Object.prototype.toString.call(AbortSignal.abort()), AbortSignal.abort() instanceof EventTarget].join(\" | \"));
+show(\"timeout bad delay\", () => AbortSignal.timeout(-1));
+show(\"timeout not a number\", () => AbortSignal.timeout(\"5\"));
+show(\"timeout not an integer\", () => AbortSignal.timeout(1.5));
+show(\"any of nothing\", () => AbortSignal.any([]).aborted);
+show(\"any already aborted\", () => { const s = AbortSignal.any([new AbortController().signal, AbortSignal.abort(\"first\")]); return [s.aborted, s.reason].join(); });
+show(\"any follows\", () => { const a = new AbortController(); const b = new AbortController(); const s = AbortSignal.any([a.signal, b.signal]); const log = []; s.addEventListener(\"abort\", () => log.push(\"fired:\" + s.reason)); b.abort(\"b\"); a.abort(\"a\"); return [s.aborted, s.reason, log.join()].join(\" | \"); });
+show(\"any read without listener\", () => { const a = new AbortController(); const s = AbortSignal.any([a.signal]); a.abort(\"late\"); return [s.aborted, s.reason].join(); });
+show(\"any of any\", () => { const a = new AbortController(); const inner = AbortSignal.any([a.signal]); const outer = AbortSignal.any([inner]); let fired = 0; outer.addEventListener(\"abort\", () => fired++); a.abort(\"deep\"); return [outer.aborted, outer.reason, fired].join(); });
+show(\"any bad input\", () => AbortSignal.any(5));
+show(\"any bad member\", () => AbortSignal.any([5]));
+show(\"remove with a boolean capture\", () => { const t = new EventTarget(); let n = 0; const f = () => n++; t.addEventListener(\"x\", f, true); t.removeEventListener(\"x\", f, true); t.dispatchEvent(new Event(\"x\")); t.addEventListener(\"x\", f, { capture: true }); t.removeEventListener(\"x\", f, false); t.dispatchEvent(new Event(\"x\")); return n; });
+show(\"onabort takes only functions and objects\", () => { const s = new AbortController().signal; s.onabort = 5; const a = s.onabort; s.onabort = \"x\"; const b = s.onabort; const o = {}; s.onabort = o; const c = s.onabort === o; s.onabort = undefined; return [a, b, c, s.onabort].join(); });
+show(\"any wants real signals\", () => AbortSignal.any([Object.create(AbortSignal.prototype)]));
+show(\"any of an already aborted any\", () => { const a = new AbortController(); const inner = AbortSignal.any([a.signal]); a.abort(\"gone\"); const outer = AbortSignal.any([inner]); return [outer.aborted, outer.reason].join(); });
+show(\"any keeps the first reason\", () => { const a = new AbortController(); const b = new AbortController(); const s = AbortSignal.any([a.signal, b.signal]); a.abort(\"a first\"); b.abort(\"b second\"); return s.reason; });
+show(\"aborted getter on wrong this\", () => Object.getOwnPropertyDescriptor(AbortSignal.prototype, \"aborted\").get.call({}));
+show(\"listener error does not stop others\", () => { const t = new EventTarget(); const log = []; t.addEventListener(\"x\", () => log.push(1)); t.addEventListener(\"x\", () => log.push(2)); t.dispatchEvent(new Event(\"x\")); return log.join(); });
+
+const timed = AbortSignal.timeout(20);
+const timedLog = [];
+timed.addEventListener(\"abort\", () => timedLog.push(timed.reason.name + \":\" + timed.reason.message + \":\" + timed.reason.code));
+setTimeout(() => { out.push(\"timeout signal: \" + [timed.aborted, timedLog.join()].join(\" | \")); }, 120);
+"
+
+pub fn dom_events_match_node_test() {
+  let rt = run_to_end(run_commonjs(node_runtime(), dom_events_script))
+  assert out_lines(rt)
+    == [
+      "event basics: ping | true | true | false | false |  |  | 0 | false | number | true | false | []",
+      "event tags: [object Event] | 0 | 2 | 3 | NONE,CAPTURING_PHASE,AT_TARGET,BUBBLING_PHASE | 5",
+      "event keys: bubbles,cancelBubble,cancelable,composed,composedPath,currentTarget,defaultPrevented,eventPhase,initEvent,isTrusted,preventDefault,returnValue,srcElement,stopImmediatePropagation,stopPropagation,target,timeStamp,type",
+      "preventDefault: false,true,false",
+      "no type threw TypeError ERR_MISSING_ARGS \"The \\\"type\\\" argument must be specified\"",
+      "bad options threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"options\\\" argument must be of type object. Received type number (5)\"",
+      "getter on wrong this threw TypeError ERR_INVALID_THIS \"Value of \\\"this\\\" must be of type Event\"",
+      "custom event: c | 1 |  | true | [object CustomEvent]",
+      "dispatch order and this: a:true:true:true:2,b:true | true | true |  | 0",
+      "once, duplicate, remove: 12,14,15,15",
+      "stopImmediatePropagation: 1",
+      "cancel result: false,true",
+      "passive ignores preventDefault: true",
+      "null listener: true",
+      "bad listener threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"listener\\\" argument must be an instance of EventListener. Received type number (5)\"",
+      "missing listener threw TypeError ERR_MISSING_ARGS \"The \\\"type\\\" and \\\"listener\\\" arguments must be specified\"",
+      "dispatch non-event threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"event\\\" argument must be an instance of Event. Received an instance of Object\"",
+      "dispatch nothing threw TypeError ERR_MISSING_ARGS \"The \\\"event\\\" argument must be specified\"",
+      "redispatch during dispatch: Error ERR_EVENT_RECURSION The event \"x\" is already being dispatched",
+      "wrong this threw TypeError ERR_INVALID_THIS \"Value of \\\"this\\\" must be of type EventTarget\"",
+      "target tags: [object EventTarget] | addEventListener,removeEventListener,dispatchEvent",
+      "listener added during dispatch runs: 1",
+      "signal option: 1",
+      "bad signal option threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"options.signal\\\" property must be an instance of AbortSignal. Received type number (5)\"",
+      "subclass: 7",
+      "controller basics: false,,true | true | AbortError | This operation was aborted | 20 | true | listener:abort:true:true,onabort:true",
+      "custom reason: why,why",
+      "throwIfAborted when fine: undefined",
+      "onabort slot: ,true,",
+      "signal constructor threw TypeError ERR_ILLEGAL_CONSTRUCTOR \"Illegal constructor\"",
+      "AbortSignal.abort: true,AbortError,42",
+      "tags: [object AbortController] | [object AbortSignal] | true",
+      "timeout bad delay threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"delay\\\" is out of range. It must be >= 0 && <= 4294967295. Received -1\"",
+      "timeout not a number threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"delay\\\" argument must be of type number. Received type string ('5')\"",
+      "timeout not an integer threw RangeError ERR_OUT_OF_RANGE \"The value of \\\"delay\\\" is out of range. It must be an integer. Received 1.5\"",
+      "any of nothing: false",
+      "any already aborted: true,first",
+      "any follows: true | b | fired:b",
+      "any read without listener: true,late",
+      "any of any: true,deep,1",
+      "any bad input threw TypeError ERR_INVALID_ARG_TYPE \"signals cannot be converted to sequence.\"",
+      "any bad member threw TypeError ERR_INVALID_ARG_TYPE \"signals[0] is not of type AbortSignal.\"",
+      "remove with a boolean capture: 1",
+      "onabort takes only functions and objects: ,,true,",
+      "any wants real signals threw TypeError ERR_INVALID_ARG_TYPE \"signals[0] is not of type AbortSignal.\"",
+      "any of an already aborted any: true,gone",
+      "any keeps the first reason: a first",
+      "aborted getter on wrong this threw TypeError ERR_INVALID_THIS \"Value of \\\"this\\\" must be of type AbortSignal\"",
+      "listener error does not stop others: 1,2",
+      "timeout signal: true | TimeoutError:The operation was aborted due to timeout:23",
+    ]
+}
+
+const marks_and_measures_script = "
+const show = (label, run) => { try { out.push(label + \": \" + run()); } catch (error) { out.push(label + \" threw \" + error.name + \" \" + error.code + \" \" + JSON.stringify(error.message)); } };
+const { performance: perf, PerformanceEntry, PerformanceMark, PerformanceMeasure } = require(\"perf_hooks\");
+perf.clearMarks(); perf.clearMeasures();
+show(\"same object\", () => perf === performance);
+show(\"mark with time\", () => { const m = perf.mark(\"a\", { startTime: 10 }); return [m.name, m.entryType, m.startTime, m.duration, m.detail, m instanceof PerformanceMark, m instanceof PerformanceEntry, Object.prototype.toString.call(m), JSON.stringify(m)].join(\" | \"); });
+show(\"mark now\", () => { const m = perf.mark(\"b\"); return [typeof m.startTime, m.startTime >= 0, m.duration].join(); });
+show(\"mark coerces name\", () => perf.mark(5, { startTime: 20 }).name === \"5\");
+show(\"mark needs a name\", () => perf.mark());
+show(\"mark reserved name\", () => perf.mark(\"nodeStart\"));
+show(\"mark bad options\", () => perf.mark(\"x\", 5));
+show(\"mark bad time\", () => perf.mark(\"x\", { startTime: \"1\" }));
+show(\"mark negative time\", () => perf.mark(\"x\", { startTime: -1 }));
+show(\"measure between marks\", () => { perf.mark(\"s\", { startTime: 100 }); perf.mark(\"e\", { startTime: 250 }); const m = perf.measure(\"span\", \"s\", \"e\"); return [m.name, m.entryType, m.startTime, m.duration, m.detail, m instanceof PerformanceMeasure, Object.prototype.toString.call(m), JSON.stringify(m)].join(\" | \"); });
+show(\"measure with options\", () => { const a = perf.measure(\"o1\", { start: 5, end: 30 }); const b = perf.measure(\"o2\", { start: 5, duration: 7 }); const c = perf.measure(\"o3\", { end: 50, duration: 20 }); const d = perf.measure(\"o4\", { start: \"s\", end: \"e\" }); return [a.startTime, a.duration, b.startTime, b.duration, c.startTime, c.duration, d.startTime, d.duration].join(); });
+show(\"measure from zero\", () => { const m = perf.measure(\"z\", undefined, \"e\"); return [m.startTime, m.duration].join(); });
+show(\"measure unknown mark\", () => { try { perf.measure(\"bad\", \"nope\"); } catch (e) { return [e.name, e.code, e.message, e instanceof DOMException].join(\" | \"); } });
+show(\"measure name type\", () => perf.measure(5));
+show(\"measure no name\", () => perf.measure());
+show(\"measure options and endMark\", () => perf.measure(\"x\", { start: 1 }, \"e\"));
+show(\"measure all three\", () => perf.measure(\"x\", { start: 1, end: 2, duration: 1 }));
+show(\"measure negative number\", () => perf.measure(\"x\", { start: -5, end: 2 }));
+show(\"entries by type\", () => [perf.getEntriesByType(\"mark\").filter((e) => e.name !== \"b\").map((e) => e.name).join(), perf.getEntriesByType(\"measure\").map((e) => e.name).join(), perf.getEntriesByType(\"nope\").length].join(\" | \"));
+show(\"entries by name\", () => [perf.getEntriesByName(\"s\").length, perf.getEntriesByName(\"s\", \"measure\").length, perf.getEntriesByName(\"span\")[0].duration].join());
+show(\"entries sorted\", () => perf.getEntries().filter((e) => e.name !== \"b\").map((e) => e.name + \"@\" + e.startTime).join());
+show(\"by type needs arg\", () => perf.getEntriesByType());
+show(\"by name needs arg\", () => perf.getEntriesByName());
+show(\"clear one mark\", () => { perf.clearMarks(\"s\"); let after; try { perf.measure(\"m2\", \"s\"); after = \"still set\"; } catch (e) { after = e.name; } return [perf.getEntriesByName(\"s\").length, after].join(); });
+show(\"clear measures\", () => { perf.clearMeasures(\"o1\"); const left = perf.getEntriesByType(\"measure\").length; perf.clearMeasures(); return [left, perf.getEntriesByType(\"measure\").length].join(); });
+show(\"clear all marks\", () => { perf.clearMarks(); return perf.getEntriesByType(\"mark\").length; });
+show(\"clear reserved\", () => perf.clearMarks(\"nodeStart\"));
+show(\"construct entry\", () => new PerformanceEntry());
+show(\"construct measure\", () => new PerformanceMeasure());
+show(\"construct mark\", () => { const m = new PerformanceMark(\"made\", { startTime: 3 }); return [m.name, m.startTime, perf.getEntriesByName(\"made\").length].join(); });
+show(\"entry keys\", () => { const keys = []; for (const key in perf.mark(\"k\", { startTime: 1 })) keys.push(key); return keys.sort().join(); });
+show(\"wrong this\", () => perf.mark.call({}, \"x\"));
+show(\"entry getter wrong this\", () => Object.getOwnPropertyDescriptor(PerformanceEntry.prototype, \"name\").get.call({}));
+"
+
+pub fn performance_marks_and_measures_match_node_test() {
+  let rt = run_commonjs(node_runtime(), marks_and_measures_script)
+  assert out_lines(rt)
+    == [
+      "same object: true",
+      "mark with time: a | mark | 10 | 0 |  | true | true | [object PerformanceMark] | {\"name\":\"a\",\"entryType\":\"mark\",\"startTime\":10,\"duration\":0,\"detail\":null}",
+      "mark now: number,true,0",
+      "mark coerces name: true",
+      "mark needs a name threw TypeError ERR_MISSING_ARGS \"The \\\"name\\\" argument must be specified\"",
+      "mark reserved name threw TypeError ERR_INVALID_ARG_VALUE \"The argument 'name' is invalid. Received 'nodeStart'\"",
+      "mark bad options threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"options\\\" argument must be of type object. Received type number (5)\"",
+      "mark bad time threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"startTime\\\" argument must be of type number. Received type string ('1')\"",
+      "mark negative time threw TypeError ERR_PERFORMANCE_INVALID_TIMESTAMP \"-1 is not a valid timestamp\"",
+      "measure between marks: span | measure | 100 | 150 |  | true | [object PerformanceMeasure] | {\"name\":\"span\",\"entryType\":\"measure\",\"startTime\":100,\"duration\":150,\"detail\":null}",
+      "measure with options: 5,25,5,7,30,20,100,150",
+      "measure from zero: 0,250",
+      "measure unknown mark: SyntaxError | 12 | The \"nope\" performance mark has not been set | true",
+      "measure name type threw TypeError ERR_INVALID_ARG_TYPE \"The \\\"name\\\" argument must be of type string. Received type number (5)\"",
+      "measure no name threw TypeError ERR_MISSING_ARGS \"The \\\"name\\\" argument must be specified\"",
+      "measure options and endMark threw TypeError ERR_PERFORMANCE_MEASURE_INVALID_OPTIONS \"endMark must not be specified\"",
+      "measure all three threw TypeError ERR_PERFORMANCE_MEASURE_INVALID_OPTIONS \"Must not have options.start, options.end, and options.duration specified\"",
+      "measure negative number threw TypeError ERR_PERFORMANCE_INVALID_TIMESTAMP \"-5 is not a valid timestamp\"",
+      "entries by type: a,5,s,e | z,o1,o2,o3,span,o4 | 0",
+      "entries by name: 1,0,150",
+      "entries sorted: z@0,o1@5,o2@5,a@10,5@20,o3@30,s@100,span@100,o4@100,e@250",
+      "by type needs arg threw TypeError ERR_MISSING_ARGS \"The \\\"type\\\" argument must be specified\"",
+      "by name needs arg threw TypeError ERR_MISSING_ARGS \"The \\\"name\\\" argument must be specified\"",
+      "clear one mark: 0,SyntaxError",
+      "clear measures: 5,0",
+      "clear all marks: 0",
+      "clear reserved threw TypeError ERR_INVALID_ARG_VALUE \"The argument 'name' is invalid. Received 'nodeStart'\"",
+      "construct entry threw TypeError ERR_ILLEGAL_CONSTRUCTOR \"Illegal constructor\"",
+      "construct measure threw TypeError ERR_ILLEGAL_CONSTRUCTOR \"Illegal constructor\"",
+      "construct mark: made,3,0",
+      "entry keys: detail,duration,entryType,name,startTime",
+      "wrong this threw TypeError ERR_INVALID_THIS \"Value of \\\"this\\\" must be of type Performance\"",
+      "entry getter wrong this threw TypeError ERR_INVALID_THIS \"Value of \\\"this\\\" must be of type PerformanceEntry\"",
+    ]
+}
+
+pub fn web_globals_exist_only_when_asked_for_test() {
+  assert run(
+      start_on(engine.new(), []),
+      "[typeof DOMException, typeof QuotaExceededError, typeof Event, typeof EventTarget, typeof AbortController, typeof AbortSignal].join()",
+    ).0
+    == "'undefined,undefined,undefined,undefined,undefined,undefined'"
+}
+
+pub fn a_throwing_listener_does_not_break_the_dispatch_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "
+      const target = new EventTarget();
+      target.addEventListener('x', () => { throw new Error('from a listener'); });
+      target.addEventListener('x', () => out.push('second ran'));
+      out.push(target.dispatchEvent(new Event('x')));
+      ",
+    )
+  assert out_lines(rt) == ["second ran", "true"]
+}
+
+pub fn a_mark_detail_needs_structured_clone_test() {
+  let rt = run_commonjs(node_runtime(), describe <> "
+        out.push(performance.mark('plain').detail);
+        out.push(describe(() => performance.mark('with detail', { detail: { n: 1 } })));
+        globalThis.structuredClone = (value) => ({ ...value, copied: true });
+        out.push(JSON.stringify(performance.mark('with detail', { detail: { n: 1 } }).detail));
+        ")
+  assert out_lines(rt)
+    == [
+      "",
+      "Error [ERR_METHOD_NOT_IMPLEMENTED]: The structuredClone method is not implemented code",
+      "{\"n\":1,\"copied\":true}",
+    ]
 }

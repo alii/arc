@@ -47,29 +47,14 @@ function invalidThis(type) {
 }
 
 class TextEncoder {
-  #brand = true;
+  #encoding = "utf-8";
 
-  static #check(encoder) {
-    if (encoder == null || !(#brand in encoder)) throw invalidThis("TextEncoder");
-  }
-
-  get encoding() {
-    TextEncoder.#check(this);
-    return "utf-8";
-  }
-
-  encode(input = "") {
-    TextEncoder.#check(this);
+  #encode(input) {
     return new Uint8Array(native.encode(`${input}`));
   }
 
   // read counts string positions as this engine indexes them
-  encodeInto(src, dest) {
-    TextEncoder.#check(this);
-    validateString(src, "src");
-    if (!dest || !(dest instanceof Uint8Array)) {
-      throw invalidArgType("dest", "Uint8Array", dest);
-    }
+  #encodeInto(src, dest) {
     const whole = new Uint8Array(native.encode(src));
     if (whole.length <= dest.length) {
       dest.set(whole);
@@ -85,6 +70,22 @@ class TextEncoder {
     }
     dest.set(whole.subarray(0, written));
     return { read, written };
+  }
+
+  get encoding() {
+    return this.#encoding;
+  }
+
+  encode(input = "") {
+    return this.#encode(input);
+  }
+
+  encodeInto(src, dest) {
+    validateString(src, "src");
+    if (!dest || !(dest instanceof Uint8Array)) {
+      throw invalidArgType("dest", "Uint8Array", dest);
+    }
+    return this.#encodeInto(src, dest);
   }
 }
 

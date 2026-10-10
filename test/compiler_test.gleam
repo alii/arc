@@ -7347,65 +7347,6 @@ pub fn direct_eval_var_survives_throw_test() -> Nil {
   )
 }
 
-pub fn dom_exception_exists_test() -> Nil {
-  assert_normal("typeof DOMException", KStr("function"))
-}
-
-pub fn dom_exception_default_name_test() -> Nil {
-  assert_normal("new DOMException().name", KStr("Error"))
-  assert_normal("new DOMException().message", KStr(""))
-  assert_normal("new DOMException().code", KNum(JFloat(0.0)))
-}
-
-pub fn dom_exception_construct_test() -> Nil {
-  assert_normal(
-    "var e = new DOMException('m', 'SyntaxError');
-     e.name === 'SyntaxError' && e.message === 'm' && e.code === 12",
-    KBool(True),
-  )
-}
-
-pub fn dom_exception_data_clone_code_test() -> Nil {
-  assert_normal(
-    "new DOMException('', 'DataCloneError').code",
-    KNum(JFloat(25.0)),
-  )
-}
-
-pub fn dom_exception_unknown_name_code_test() -> Nil {
-  assert_normal("new DOMException('', 'NoSuchError').code", KNum(JFloat(0.0)))
-}
-
-pub fn dom_exception_proto_chain_test() -> Nil {
-  assert_normal(
-    "Object.getPrototypeOf(DOMException.prototype) === Error.prototype",
-    KBool(True),
-  )
-}
-
-pub fn dom_exception_instanceof_error_test() -> Nil {
-  assert_normal(
-    "var e = new DOMException('m', 'AbortError');
-     e instanceof DOMException && e instanceof Error
-       && !(e instanceof TypeError)",
-    KBool(True),
-  )
-}
-
-pub fn dom_exception_to_string_test() -> Nil {
-  assert_normal(
-    "new DOMException('boom', 'DataCloneError').toString()",
-    KStr("DataCloneError: boom"),
-  )
-}
-
-pub fn dom_exception_to_string_tag_test() -> Nil {
-  assert_normal(
-    "Object.prototype.toString.call(new DOMException())",
-    KStr("[object DOMException]"),
-  )
-}
-
 pub fn default_derived_ctor_does_not_iterate_test() -> Nil {
   assert_normal(
     "
