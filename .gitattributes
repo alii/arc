@@ -1,4 +1,5 @@
 spark/src/spark/js.gleam linguist-generated=true
+spark/src/spark/spark_idna_tables.erl linguist-generated=true
 src/arc/internal/arc_tz_links_ffi.erl linguist-generated=true
 src/arc/parser/arc_regex_prop_tables_ffi.erl linguist-generated=true
 src/arc/parser/arc_regex_uni17_ffi.erl linguist-generated=true

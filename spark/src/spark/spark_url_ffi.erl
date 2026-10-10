@@ -611,37 +611,14 @@ forbidden_domain(C) ->
     C =< 16#20 orelse C =:= $% orelse C =:= 16#7F orelse forbidden_host(C).
 
 %% domain to ascii. A name that is all ascii is only lower-cased, encoded
-%% labels and all, which is what node does. For names beyond ascii this
-%% follows uts 46 only roughly: compatibility mapping, lower case and
-%% punycode, without the full mapping table or the bidi and joiner checks
+%% labels and all, which is what node does; anything else goes through uts 46
 to_ascii(Domain) ->
     Ascii = case lists:all(fun(C) -> C < 128 end, Domain) of
         true -> [lower(C) || C <- Domain];
-        false ->
-            Labels = [ascii_label(Label) || Label <- split_dots(map_unicode(Domain))],
-            lists:append(lists:join(".", Labels))
+        false -> spark_idna:to_ascii(Domain)
     end,
     (Ascii =:= [] orelse lists:any(fun forbidden_domain/1, Ascii)) andalso throw(failure),
     Ascii.
-
-map_unicode(Domain) ->
-    lists:member(16#FFFD, Domain) andalso throw(failure),
-    Kept = [dot(C) || C <- Domain, not ignored(C)],
-    Folded = string:lowercase(unicode:characters_to_nfkc_list(Kept)),
-    [dot(C) || C <- unicode:characters_to_nfkc_list(Folded)].
-
-dot(16#3002) -> $.;
-dot(16#FF0E) -> $.;
-dot(16#FF61) -> $.;
-dot(C) -> C.
-
-ignored(16#00AD) -> true;
-ignored(16#034F) -> true;
-ignored(16#200B) -> true;
-ignored(16#2060) -> true;
-ignored(16#FEFF) -> true;
-ignored(C) when C >= 16#FE00, C =< 16#FE0F -> true;
-ignored(_) -> false.
 
 split_dots(Chars) -> split_dots(Chars, [], []).
 
@@ -651,20 +628,6 @@ split_dots([C | Rest], Label, Labels) ->
     split_dots(Rest, [C | Label], Labels);
 split_dots([], Label, Labels) ->
     lists:reverse([lists:reverse(Label) | Labels]).
-
-ascii_label("xn--" ++ Encoded = Label) ->
-    Decoded = punycode_decode(Encoded),
-    %% it has to hold something beyond ascii, in the form mapping leaves alone
-    Valid = Decoded =/= []
-        andalso lists:any(fun(C) -> C >= 128 end, Decoded)
-        andalso map_unicode(Decoded) =:= Decoded,
-    Valid orelse throw(failure),
-    Label;
-ascii_label(Label) ->
-    case lists:all(fun(C) -> C < 128 end, Label) of
-        true -> Label;
-        false -> "xn--" ++ punycode_encode(Label)
-    end.
 
 %% uts 46 to-ascii alone, the empty string when the name is not valid
 idna_to_ascii(Domain) ->
@@ -681,14 +644,7 @@ domain_to_ascii(Domain) ->
 
 domain_to_unicode(Domain) ->
     Ascii = unicode:characters_to_list(domain_to_ascii(Domain)),
-    Labels = [unicode_label(Label) || Label <- split_dots(Ascii)],
-    unicode:characters_to_binary(lists:join(".", Labels)).
-
-unicode_label("xn--" ++ Encoded = Label) ->
-    try punycode_decode(Encoded)
-    catch throw:failure -> Label
-    end;
-unicode_label(Label) -> Label.
+    unicode:characters_to_binary(spark_idna:to_unicode(Ascii)).
 
 %% the last label is a number in some base
 ends_in_number(Ascii) ->
@@ -799,102 +755,6 @@ ipv6_done(Pieces, _) when length(Pieces) >= 8 -> throw(failure);
 ipv6_done(Pieces, Compress) ->
     {Before, After} = lists:split(Compress, Pieces),
     Before ++ lists:duplicate(8 - length(Pieces), 0) ++ After.
-
-%% ---- punycode, rfc 3492
-
--define(BASE, 36).
--define(TMIN, 1).
--define(TMAX, 26).
--define(SKEW, 38).
--define(DAMP, 700).
-
-punycode_encode(Input) ->
-    Basic = [C || C <- Input, C < 128],
-    Handled = length(Basic),
-    Out = case Basic of
-        [] -> [];
-        _ -> [$- | lists:reverse(Basic)]
-    end,
-    puny_enc(Input, 128, 0, 72, Handled, Handled, Out).
-
-%% Out is the result so far, newest first
-puny_enc(Input, _N, _Delta, _Bias, _Basic, Handled, Out) when Handled >= length(Input) ->
-    lists:reverse(Out);
-puny_enc(Input, N, Delta0, Bias0, Basic, Handled0, Out0) ->
-    M = lists:min([C || C <- Input, C >= N]),
-    Delta1 = Delta0 + (M - N) * (Handled0 + 1),
-    {Delta, Bias, Handled, Out} =
-        lists:foldl(
-            fun(C, {D, B, H, O}) when C < M -> {D + 1, B, H, O};
-               (C, {D, B, H, O}) when C =:= M ->
-                    O1 = puny_digits(D, ?BASE, B, O),
-                    {0, adapt(D, H + 1, H =:= Basic), H + 1, O1};
-               (_, Acc) -> Acc
-            end,
-            {Delta1, Bias0, Handled0, Out0}, Input),
-    puny_enc(Input, M + 1, Delta + 1, Bias, Basic, Handled, Out).
-
-puny_digits(Q, K, Bias, Out) ->
-    T = threshold(K, Bias),
-    case Q < T of
-        true -> [puny_digit(Q) | Out];
-        false ->
-            puny_digits((Q - T) div (?BASE - T), K + ?BASE, Bias,
-                        [puny_digit(T + (Q - T) rem (?BASE - T)) | Out])
-    end.
-
-threshold(K, Bias) when K =< Bias + ?TMIN -> ?TMIN;
-threshold(K, Bias) when K >= Bias + ?TMAX -> ?TMAX;
-threshold(K, Bias) -> K - Bias.
-
-puny_digit(D) when D < 26 -> $a + D;
-puny_digit(D) -> $0 + D - 26.
-
-adapt(Delta, Points, First) ->
-    D0 = case First of
-        true -> Delta div ?DAMP;
-        false -> Delta div 2
-    end,
-    adapt_loop(D0 + D0 div Points, 0).
-
-adapt_loop(Delta, K) when Delta > ((?BASE - ?TMIN) * ?TMAX) div 2 ->
-    adapt_loop(Delta div (?BASE - ?TMIN), K + ?BASE);
-adapt_loop(Delta, K) ->
-    K + ((?BASE - ?TMIN + 1) * Delta) div (Delta + ?SKEW).
-
-punycode_decode(Input) ->
-    {Basic, Rest} = case string:rchr(Input, $-) of
-        0 -> {[], Input};
-        At -> {lists:sublist(Input, At - 1), lists:nthtail(At, Input)}
-    end,
-    lists:all(fun(C) -> C < 128 end, Basic) orelse throw(failure),
-    puny_dec(Rest, Basic, 128, 0, 72).
-
-puny_dec([], Out, _N, _I, _Bias) -> Out;
-puny_dec(Input, Out, N0, I0, Bias0) ->
-    {I1, Rest} = puny_number(Input, I0, 1, ?BASE, Bias0),
-    Length = length(Out) + 1,
-    Bias = adapt(I1 - I0, Length, I0 =:= 0),
-    N = N0 + I1 div Length,
-    (N > 16#10FFFF orelse (N >= 16#D800 andalso N =< 16#DFFF)) andalso throw(failure),
-    I = I1 rem Length,
-    {Before, After} = lists:split(I, Out),
-    puny_dec(Rest, Before ++ [N | After], N, I + 1, Bias).
-
-puny_number([], _I, _W, _K, _Bias) -> throw(failure);
-puny_number([C | Rest], I, W, K, Bias) ->
-    Digit = if
-        C >= $a, C =< $z -> C - $a;
-        C >= $A, C =< $Z -> C - $A;
-        C >= $0, C =< $9 -> C - $0 + 26;
-        true -> throw(failure)
-    end,
-    I1 = I + Digit * W,
-    T = threshold(K, Bias),
-    case Digit < T of
-        true -> {I1, Rest};
-        false -> puny_number(Rest, I1, W * (?BASE - T), K + ?BASE, Bias)
-    end.
 
 %% ---- serialising, with the positions node's url class reads
 
