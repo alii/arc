@@ -23,6 +23,9 @@ const names = [
   "path_posix",
   "path_win32",
   "net",
+  "querystring_internal",
+  "querystring",
+  "url",
 ]
 
 const target = "src/spark/js.gleam"

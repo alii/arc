@@ -69,6 +69,12 @@ function rangeError(code, message) {
   return new NodeRangeError(code, message);
 }
 
+const NodeURIError = nodeErrorClass(URIError);
+
+function uriError(code, message) {
+  return new NodeURIError(code, message);
+}
+
 function formatList(array, type) {
   switch (array.length) {
     case 0:
@@ -312,6 +318,8 @@ module.exports = {
   error,
   typeError,
   rangeError,
+  uriError,
+  inspect,
   invalidArgType,
   invalidArgValue,
   outOfRange,

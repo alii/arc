@@ -100,6 +100,9 @@ const shipped_sources = [
   js.path_posix,
   js.path_win32,
   js.net,
+  js.querystring_internal,
+  js.querystring,
+  js.url,
 ]
 
 /// compiles the js of every builtin spark ships; installs and runs nothing

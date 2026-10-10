@@ -26,7 +26,9 @@ import spark/path
 import spark/perf_hooks
 import spark/platform.{type Platform}
 import spark/process.{type Process, Process}
+import spark/querystring
 import spark/timers
+import spark/url
 
 type CliError {
   Usage
@@ -73,6 +75,9 @@ fn builtins(
     path.posix_builtin(),
     path.win32_builtin(),
     net.builtin(),
+    querystring.internal_builtin(),
+    querystring.builtin(),
+    url.builtin(),
   ]
 }
 

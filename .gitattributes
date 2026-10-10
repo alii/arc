@@ -1,0 +1,11 @@
+spark/src/spark/js.gleam linguist-generated=true
+src/arc/internal/arc_tz_links_ffi.erl linguist-generated=true
+src/arc/parser/arc_regex_prop_tables_ffi.erl linguist-generated=true
+src/arc/parser/arc_regex_uni17_ffi.erl linguist-generated=true
+scripts/unicode/arc_regex_uni17_packed.erl linguist-generated=true
+.github/test262/pass.txt linguist-generated=true
+.github/test262/pass-aot.txt linguist-generated=true
+test/test262_snapshot.txt linguist-generated=true
+website/public/atomvm/arc.avm linguist-generated=true
+manifest.toml linguist-generated=true
+bun.lock linguist-generated=true
