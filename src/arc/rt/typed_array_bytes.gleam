@@ -57,15 +57,11 @@ pub fn splice_clamped(
   }
 }
 
-pub fn fill_clamped(
-  data: BitArray,
-  byte_off: Int,
-  count: Int,
-  elem: BitArray,
-) -> #(BitArray, Int) {
+// `elem` `count` times over, empty for a count that is not positive
+pub fn repeated(elem: BitArray, count: Int) -> BitArray {
   case count <= 0 {
-    True -> #(data, 0)
-    False -> splice_clamped(data, byte_off, binary_copy(elem, count))
+    True -> <<>>
+    False -> binary_copy(elem, count)
   }
 }
 

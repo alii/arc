@@ -20,7 +20,6 @@ import arc/rt/types.{
   TypedArrayObj, classify, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/bool
 import gleam/dict
 import gleam/int
@@ -413,31 +412,25 @@ pub fn bytes(ctx: Context(host), val: JsVal) -> Option(BitArray) {
   case rt_store.cell_get(st, h) {
     SObject(kind: ArrayBufferObj(..), ..) -> rt_buffer.bytes(st, h)
     SObject(kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:), ..) -> {
-      use data <- option.then(rt_buffer.bytes(st, buffer))
-      let view =
-        rt_buffer.view_bounds(
-          bit_array.byte_size(data),
-          elem_kind,
-          byte_offset,
-          length,
-        )
+      use view <- option.then(rt_buffer.live_view(
+        st,
+        rt_buffer.View(buffer:, elem_kind:, byte_offset:, length:),
+      ))
       let size =
         rt_buffer.view_len(view) * typed_array_bytes.elem_size(elem_kind)
-      byte_range(data, byte_offset, size)
+      rt_buffer.read_region(st, buffer, byte_offset, size)
     }
     SObject(kind: DataViewObj(buffer:, byte_offset:, byte_length:), ..) -> {
-      use data <- option.then(rt_buffer.bytes(st, buffer))
+      use storage <- option.then(rt_buffer.storage(st, buffer))
       let size =
-        option.unwrap(byte_length, bit_array.byte_size(data) - byte_offset)
-      byte_range(data, byte_offset, size)
+        option.unwrap(
+          byte_length,
+          rt_buffer.storage_byte_size(storage) - byte_offset,
+        )
+      rt_buffer.storage_read_region(storage, byte_offset, size)
     }
     _ -> None
   }
-}
-
-fn byte_range(data: BitArray, offset: Int, size: Int) -> Option(BitArray) {
-  use <- bool.guard(size < 0, None)
-  option.from_result(bit_array.slice(data, offset, size))
 }
 
 /// opaque embedder object; handles inside value are gc-traced

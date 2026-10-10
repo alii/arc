@@ -249,6 +249,13 @@ pub type ViewElementType {
 pub type BufferStorage {
   Detached(max_byte_length: Option(Int))
   Bytes(bytes: BitArray, max_byte_length: Option(Int))
+  // a big buffer once an element is written: pieces in a tree, so a write
+  // copies one piece and not the buffer
+  Chunked(
+    pieces: TreeArray(BitArray),
+    byte_length: Int,
+    max_byte_length: Option(Int),
+  )
   Immutable(bytes: BitArray)
   Shared(block: SharedBlock, max_byte_length: Option(Int))
 }

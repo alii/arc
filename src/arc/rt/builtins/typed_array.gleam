@@ -11,7 +11,7 @@ import arc/rt/call as rt_call
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
-import arc/rt/typed_array_bytes.{fill_clamped, splice_clamped, zeroed}
+import arc/rt/typed_array_bytes.{zeroed}
 import arc/rt/types.{
   type Agent, type ArrayIterKind, type BuiltinPair, type Handle, type JsNum,
   type JsVal, type Realm, type TypedArrayKind, type TypedArrayNative,
@@ -323,9 +323,9 @@ fn create_with_args(
   let obj = mk_object(obj_h)
   case view_of(st, obj_h) {
     Some(view) ->
-      case view_witness_bytes(st, view) {
+      case view_witness_size(st, view) {
         Error(err) -> witness_type_error(st, err)
-        Ok(_bytes) -> {
+        Ok(_byte_size) -> {
           let l =
             buffer.typed_array_view_length(
               st,
@@ -615,14 +615,14 @@ fn from_buffer(
     }
   }
   // detached check after the observable conversions
-  case buffer.storage(st, buf_h) |> option.then(buffer.storage_bits) {
-    None ->
+  case buffer.is_detached(st, buf_h) {
+    True ->
       rt_val.throw_type_error(
         st,
         "Cannot perform Construct on a detached ArrayBuffer",
       )
-    Some(data) -> {
-      let buf_len = bit_array.byte_size(data)
+    False -> {
+      let buf_len = buffer.live_byte_size(st, buf_h)
       let range_err = fn(msg) { rt_val.throw_range_error(st, msg) }
       let resizable =
         buffer.storage(st, buf_h)
@@ -701,13 +701,13 @@ fn from_typed_array(
         <> typed_array_name(src_kind),
     )
   })
-  case buffer.bytes(st, src_buf) {
-    None ->
+  case buffer.is_detached(st, src_buf) {
+    True ->
       rt_val.throw_type_error(
         st,
         "Cannot perform Construct on a detached ArrayBuffer",
       )
-    Some(src_data) -> {
+    False -> {
       let size = typed_array_bytes.elem_size(kind)
       let byte_len = src_len * size
       use <- bool.lazy_guard(byte_len > limits.max_buffer_byte_length, fn() {
@@ -715,7 +715,7 @@ fn from_typed_array(
       })
       let src_size = typed_array_bytes.elem_size(src_kind)
       use <- bool.lazy_guard(
-        src_off + src_len * src_size > bit_array.byte_size(src_data),
+        src_off + src_len * src_size > buffer.live_byte_size(st, src_buf),
         fn() {
           rt_val.throw_type_error(
             st,
@@ -726,7 +726,8 @@ fn from_typed_array(
       let new_data = case kind == src_kind {
         // bounds proved above, crash rather than zero-fill
         True -> {
-          let assert Ok(bytes) = bit_array.slice(src_data, src_off, byte_len)
+          let assert Some(bytes) =
+            buffer.read_region(st, src_buf, src_off, byte_len)
           bytes
         }
         False ->
@@ -946,11 +947,11 @@ fn try_bulk_store(
   use view <- option.then(view_of(st, typed_array_h))
   let TypedArrayView(buffer: buf, kind:, byte_offset:, length:, ..) = view
   use region <- option.then(buffer.typed_array_encode_primitives(kind, values))
-  case buffer.bytes(st, buf) {
-    None -> Some(st)
-    Some(data) -> {
+  case buffer.is_detached(st, buf) {
+    True -> Some(st)
+    False -> {
       let size = typed_array_bytes.elem_size(kind)
-      let byte_size = bit_array.byte_size(data)
+      let byte_size = buffer.live_byte_size(st, buf)
       let len = case length {
         Some(n) -> n
         None -> int.max(0, { byte_size - byte_offset } / size)
@@ -966,8 +967,7 @@ fn try_bulk_store(
         }
       }
       let off = byte_offset + start * size
-      let #(new_data, written) = splice_clamped(data, off, region)
-      Some(buffer.store_region(st, buf, new_data, off, written))
+      Some(buffer.write_region_clamped(st, buf, off, region))
     }
   }
 }
@@ -1001,11 +1001,11 @@ fn validate_typed_array(st: Agent, this: JsVal) -> TypedArrayWitness {
   let view = require_typed_array(st, this)
   let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
     view
-  case buffer.bytes(st, buf) {
-    None -> witness_type_error(st, buffer.BufferDetached)
-    Some(data) -> {
+  case buffer.is_detached(st, buf) {
+    True -> witness_type_error(st, buffer.BufferDetached)
+    False -> {
       let size = typed_array_bytes.elem_size(kind)
-      case off + len * size > bit_array.byte_size(data) {
+      case off + len * size > buffer.live_byte_size(st, buf) {
         True -> witness_type_error(st, buffer.OutOfBoundsView)
         False -> view
       }
@@ -1118,15 +1118,14 @@ fn proto_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let start = relative_index(s, len)
   let end = relative_index(e, len)
   // revalidate after the observable coercions
-  let data = witness_bytes(st, this)
+  let byte_size = witness_size(st, this)
   let size = typed_array_bytes.elem_size(kind)
-  let avail = int.max(0, { bit_array.byte_size(data) - off } / size)
+  let avail = int.max(0, { byte_size - off } / size)
   let start = int.min(start, avail)
   let end = int.min(end, avail)
   let elem = buffer.typed_array_encode_value(zeroed(size), 0, converted)
-  let region_off = off + start * size
-  let #(new_data, written) = fill_clamped(data, region_off, end - start, elem)
-  #(this, buffer.store_region(st, buf, new_data, region_off, written))
+  let region = typed_array_bytes.repeated(elem, end - start)
+  #(this, buffer.write_region_clamped(st, buf, off + start * size, region))
 }
 
 fn convert_for_kind(
@@ -1160,7 +1159,7 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- bool.lazy_guard(offset < 0, fn() {
     rt_val.throw_range_error(st, "offset is out of bounds")
   })
-  let dst_data = witness_bytes(st, this)
+  let dst_size = witness_size(st, this)
   let len = live_length(st, this)
   case classify(src) {
     KHandle(src_h) ->
@@ -1173,13 +1172,13 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
             length: src_len,
             ..,
           ) = src_view
-          case view_witness_bytes(st, src_view) {
+          case view_witness_size(st, src_view) {
             Error(err) -> witness_type_error(st, err)
-            Ok(_src_bytes) ->
+            Ok(_src_size) ->
               set_from_typed_array(
                 st,
                 view,
-                dst_data,
+                dst_size,
                 offset,
                 len,
                 src_buf,
@@ -1209,17 +1208,17 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-fn witness_bytes(st: Agent, this: JsVal) -> BitArray {
-  case try_witness_bytes(st, this) {
+fn witness_size(st: Agent, this: JsVal) -> Int {
+  case try_witness_size(st, this) {
     Error(err) -> witness_type_error(st, err)
-    Ok(data) -> data
+    Ok(byte_size) -> byte_size
   }
 }
 
 fn set_from_typed_array(
   st: Agent,
   view: TypedArrayWitness,
-  data: BitArray,
+  dst_size: Int,
   offset: Int,
   len: Int,
   src_buf: Handle,
@@ -1228,8 +1227,7 @@ fn set_from_typed_array(
   src_len: Int,
 ) -> #(JsVal, Agent) {
   let TypedArrayWitness(buffer: dst_buf, kind:, byte_offset: dst_off, ..) = view
-  let src_live = option.is_some(buffer.bytes(st, src_buf))
-  use <- bool.lazy_guard(!src_live, fn() {
+  use <- bool.lazy_guard(buffer.is_detached(st, src_buf), fn() {
     rt_val.throw_type_error(
       st,
       "Cannot perform set from a detached ArrayBuffer",
@@ -1248,9 +1246,7 @@ fn set_from_typed_array(
       convert_elements(st, src_buf, src_kind, src_off, src_len, kind, size)
   }
   let start = dst_off + offset * size
-  let avail =
-    { int.clamp(bit_array.byte_size(data) - start, 0, src_len * size) / size }
-    * size
+  let avail = { int.clamp(dst_size - start, 0, src_len * size) / size } * size
   let region = case avail == src_len * size {
     True -> region
     False -> {
@@ -1258,14 +1254,7 @@ fn set_from_typed_array(
       region
     }
   }
-  let #(new_data, written) = splice_clamped(data, start, region)
-  case written > 0 {
-    True -> #(
-      mk_undefined(),
-      buffer.store_region(st, dst_buf, new_data, start, written),
-    )
-    False -> #(mk_undefined(), st)
-  }
+  #(mk_undefined(), buffer.write_region_clamped(st, dst_buf, start, region))
 }
 
 fn set_from_array_like(
@@ -1396,7 +1385,7 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(#(target, target_h), st) = species_create(st, this, kind, count)
   use <- bool.guard(count == 0, #(target, st))
   // revalidate source, species ctor may have detached or shrunk it
-  let _source_bytes = witness_bytes(st, this)
+  let _source_size = witness_size(st, this)
   case view_of_value(st, target) {
     Some(TypedArrayView(
       buffer: target_buf,
@@ -1410,31 +1399,23 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
           // copy only whole live source elements
           let copy_elems = int.clamp(live_length(st, this) - start, 0, count)
           let src_byte = off + start * size
-          case buffer.bytes(st, target_buf) {
-            None -> #(target, st)
-            Some(tdata) -> {
+          case buffer.is_detached(st, target_buf) {
+            True -> #(target, st)
+            False -> {
               let avail =
                 int.clamp(
-                  bit_array.byte_size(tdata) - target_off,
+                  buffer.live_byte_size(st, target_buf) - target_off,
                   0,
                   copy_elems * size,
                 )
               // same-buffer overlap: ascending byte order is observable
               let region = case target_buf == buf {
-                True -> seq_copy_region(tdata, src_byte, target_off, avail)
+                True -> seq_copy_region(st, buf, src_byte, target_off, avail)
                 False -> copy_region(st, buf, src_byte, avail)
               }
-              let #(new_data, written) =
-                splice_clamped(tdata, target_off, region)
               #(
                 target,
-                buffer.store_region(
-                  st,
-                  target_buf,
-                  new_data,
-                  target_off,
-                  written,
-                ),
+                buffer.write_region_clamped(st, target_buf, target_off, region),
               )
             }
           }
@@ -1451,11 +1432,18 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ascending byte copy within one binary, overlap repeats leading bytes
-fn seq_copy_region(data: BitArray, src: Int, dst: Int, n: Int) -> BitArray {
+// ascending byte copy within one buffer, overlap repeats leading bytes
+fn seq_copy_region(
+  st: Agent,
+  buf: Handle,
+  src: Int,
+  dst: Int,
+  n: Int,
+) -> BitArray {
   case dst > src && dst < src + n {
-    False -> slice_clamped(data, src, n)
-    True -> repeat_to(slice_clamped(data, src, dst - src), n, <<>>)
+    False -> buffer.read_region_clamped(st, buf, src, n)
+    True ->
+      repeat_to(buffer.read_region_clamped(st, buf, src, dst - src), n, <<>>)
   }
 }
 
@@ -1470,15 +1458,6 @@ fn repeat_to(pattern: BitArray, n: Int, acc: BitArray) -> BitArray {
   }
 }
 
-// bytes at off clamped to what lies inside data, total
-fn slice_clamped(data: BitArray, off: Int, len: Int) -> BitArray {
-  let size = bit_array.byte_size(data)
-  let start = int.clamp(off, 0, size)
-  let assert Ok(bytes) =
-    bit_array.slice(data, start, int.clamp(len, 0, size - start))
-  bytes
-}
-
 // bytes past the live buffer read as zero
 fn copy_region(
   st: Agent,
@@ -1486,16 +1465,11 @@ fn copy_region(
   byte_off: Int,
   byte_len: Int,
 ) -> BitArray {
-  case buffer.bytes(st, buf) {
-    None -> zeroed(byte_len)
-    Some(data) -> {
-      let bytes = slice_clamped(data, byte_off, byte_len)
-      let got = bit_array.byte_size(bytes)
-      case got == byte_len {
-        True -> bytes
-        False -> bit_array.concat([bytes, zeroed(byte_len - got)])
-      }
-    }
+  let bytes = buffer.read_region_clamped(st, buf, byte_off, byte_len)
+  let got = bit_array.byte_size(bytes)
+  case got == byte_len {
+    True -> bytes
+    False -> bit_array.concat([bytes, zeroed(byte_len - got)])
   }
 }
 
@@ -1685,17 +1659,17 @@ fn witness_type_error(st: Agent, err: buffer.ViewWitnessError) -> a {
   rt_val.throw_type_error(st, buffer.view_witness_error_message(err))
 }
 
-// §23.2.4.4 witness checks; ok carries the live bytes as proof
-fn view_witness_bytes(
+// §23.2.4.4 witness checks; ok carries the live byte size as proof
+fn view_witness_size(
   st: Agent,
   view: TypedArrayView,
-) -> Result(BitArray, buffer.ViewWitnessError) {
+) -> Result(Int, buffer.ViewWitnessError) {
   let TypedArrayView(buffer: buf, kind:, byte_offset: off, length: declared, ..) =
     view
-  case buffer.bytes(st, buf) {
-    None -> Error(buffer.BufferDetached)
-    Some(data) -> {
-      let byte_size = bit_array.byte_size(data)
+  case buffer.is_detached(st, buf) {
+    True -> Error(buffer.BufferDetached)
+    False -> {
+      let byte_size = buffer.live_byte_size(st, buf)
       let size = typed_array_bytes.elem_size(kind)
       let oob = case declared {
         Some(n) -> off + n * size > byte_size
@@ -1703,18 +1677,18 @@ fn view_witness_bytes(
       }
       case oob {
         True -> Error(buffer.OutOfBoundsView)
-        False -> Ok(data)
+        False -> Ok(byte_size)
       }
     }
   }
 }
 
-fn try_witness_bytes(
+fn try_witness_size(
   st: Agent,
   this: JsVal,
-) -> Result(BitArray, buffer.ViewWitnessError) {
+) -> Result(Int, buffer.ViewWitnessError) {
   case view_of_value(st, this) {
-    Some(view) -> view_witness_bytes(st, view)
+    Some(view) -> view_witness_size(st, view)
     None -> Error(buffer.NotAView)
   }
 }
@@ -1997,7 +1971,7 @@ fn proto_copy_within(
   let count = int.min(final - from, len - to)
   use <- bool.guard(count <= 0, #(this, st))
   // revalidate, coercions may detach or shrink a fixed view
-  let data = witness_bytes(st, this)
+  let _byte_size = witness_size(st, this)
   let size = typed_array_bytes.elem_size(kind)
   // tracking view follows a shrink, never a grow
   let live_len = int.min(len, live_length(st, this))
@@ -2006,10 +1980,9 @@ fn proto_copy_within(
   let final = int.min(final, live_len)
   let count = int.min(final - from, live_len - to)
   use <- bool.guard(count <= 0, #(this, st))
-  let assert Ok(region) = bit_array.slice(data, off + from * size, count * size)
-  let target = off + to * size
-  let #(new_data, written) = splice_clamped(data, target, region)
-  #(this, buffer.store_region(st, buf, new_data, target, written))
+  let assert Some(region) =
+    buffer.read_region(st, buf, off + from * size, count * size)
+  #(this, buffer.write_region_clamped(st, buf, off + to * size, region))
 }
 
 fn reversed_bytes(data: BitArray, off: Int, len: Int, size: Int) -> BitArray {
@@ -2038,13 +2011,12 @@ fn proto_reverse(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
     view
   require_mutable(st, buf)
-  case buffer.bytes(st, buf) {
+  let size = typed_array_bytes.elem_size(kind)
+  case buffer.read_region(st, buf, off, len * size) {
     None -> #(this, st)
-    Some(data) -> {
-      let size = typed_array_bytes.elem_size(kind)
-      let region = reversed_bytes(data, off, len, size)
-      let #(new_data, written) = splice_clamped(data, off, region)
-      #(this, buffer.store_region(st, buf, new_data, off, written))
+    Some(view_bytes) -> {
+      let region = reversed_bytes(view_bytes, 0, len, size)
+      #(this, buffer.write_region_clamped(st, buf, off, region))
     }
   }
 }
@@ -2325,9 +2297,9 @@ fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(view, sorted, st) = sorted_snapshot(st, this, args)
   let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
     view
-  case buffer.bytes(st, buf) {
-    None -> #(this, st)
-    Some(data) -> {
+  case buffer.is_detached(st, buf) {
+    True -> #(this, st)
+    False -> {
       let size = typed_array_bytes.elem_size(kind)
       // clamp to currently valid indices, comparefn may have shrunk buffer
       let region = encode_region(kind, size, sorted)
@@ -2339,11 +2311,7 @@ fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
           region
         }
       }
-      let #(new_data, written) = splice_clamped(data, off, region)
-      case written > 0 {
-        True -> #(this, buffer.store_region(st, buf, new_data, off, written))
-        False -> #(this, st)
-      }
+      #(this, buffer.write_region_clamped(st, buf, off, region))
     }
   }
 }
@@ -2358,9 +2326,9 @@ fn proto_to_sorted(
   let #(fresh, st) = same_type_create(st, kind, len)
   let FreshTypedArray(value: typed_array_val, buffer: new_buf, ..) = fresh
   let size = typed_array_bytes.elem_size(kind)
-  let new_data = case buffer.bytes(st, new_buf) {
-    Some(_fresh) -> encode_region(kind, size, sorted)
-    None -> zeroed(len * size)
+  let new_data = case buffer.is_detached(st, new_buf) {
+    False -> encode_region(kind, size, sorted)
+    True -> zeroed(len * size)
   }
   write_fresh_buffer(st, new_buf, new_data, typed_array_val)
 }

@@ -6,7 +6,6 @@ import arc/rt/builtins/options
 import arc/rt/builtins/realm_ops
 import arc/rt/limits
 import arc/rt/store as rt_store
-import arc/rt/typed_array_bytes.{splice_clamped}
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, ArrayBufferObj, Bytes, KHandle, KStr,
   KUndef, NumKind, SObject, TypedArrayObj, Uint8Kind, classify, mk_int,
@@ -108,21 +107,21 @@ fn require_mutable(st: Agent, this: JsVal) -> Nil {
 }
 
 type Uint8LiveView {
-  Uint8LiveView(buffer: Handle, data: BitArray, byte_offset: Int, length: Int)
+  Uint8LiveView(buffer: Handle, byte_offset: Int, length: Int)
 }
 
-// length from the same read as data, never re-read
+// the view's length as it is right now
 fn live_view(st: Agent, this: JsVal) -> Uint8LiveView {
   case uint8_view(st, this) {
     Some(Uint8View(buffer:, byte_offset:, length:)) ->
-      case buffer.bytes(st, buffer) {
-        None ->
+      case buffer.is_detached(st, buffer) {
+        True ->
           rt_val.throw_type_error(
             st,
             buffer.view_witness_error_message(buffer.BufferDetached),
           )
-        Some(data) -> {
-          let byte_size = bit_array.byte_size(data)
+        False -> {
+          let byte_size = buffer.live_byte_size(st, buffer)
           let oob = case length {
             Some(n) -> byte_offset + n > byte_size
             None -> byte_offset > byte_size
@@ -143,7 +142,6 @@ fn live_view(st: Agent, this: JsVal) -> Uint8LiveView {
                 )
               Uint8LiveView(
                 buffer:,
-                data:,
                 byte_offset:,
                 length: buffer.view_len(bounds),
               )
@@ -219,9 +217,7 @@ pub fn to_base64(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     get_enum_option(st, opts, "alphabet", base64_alphabet, Base64)
   let #(omit_val, st) = options.get_option(st, opts, "omitPadding")
   let padding = !rt_val.to_boolean(omit_val)
-  let view = live_view(st, this)
-  let assert Ok(bytes) =
-    bit_array.slice(view.data, view.byte_offset, view.length)
+  let bytes = view_bytes(st, live_view(st, this))
   let out = case alphabet {
     Base64Url -> bit_array.base64_url_encode(bytes, padding)
     Base64 -> bit_array.base64_encode(bytes, padding)
@@ -231,9 +227,7 @@ pub fn to_base64(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 
 pub fn to_hex(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let Nil = validate_uint8_array(st, this)
-  let view = live_view(st, this)
-  let assert Ok(bytes) =
-    bit_array.slice(view.data, view.byte_offset, view.length)
+  let bytes = view_bytes(st, live_view(st, this))
   #(mk_string(string.lowercase(bit_array.base16_encode(bytes))), st)
 }
 
@@ -288,18 +282,11 @@ fn read_written_result(st: Agent, read: Int, written: Int) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-fn write_bytes(
-  st: Agent,
-  buffer: Handle,
-  data: BitArray,
-  off: Int,
-  bytes: BitArray,
-) -> Agent {
-  let #(new_data, written) = splice_clamped(data, off, bytes)
-  case written {
-    0 -> st
-    _ -> buffer.store_region(st, buffer, new_data, off, written)
-  }
+fn view_bytes(st: Agent, view: Uint8LiveView) -> BitArray {
+  let assert Some(bytes) =
+    buffer.read_region(st, view.buffer, view.byte_offset, view.length)
+    as "uint8_codec: a live view read past its buffer"
+  bytes
 }
 
 fn decode_error(st: Agent, codec: Codec) -> a {
@@ -316,12 +303,12 @@ fn decode_into_view(
   res: DecodeResult,
   codec: Codec,
 ) -> #(JsVal, Agent) {
-  let Uint8LiveView(buffer:, data:, byte_offset: off, ..) = view
+  let Uint8LiveView(buffer:, byte_offset: off, ..) = view
   case res {
     DecodeFailed(partial:) ->
-      decode_error(write_bytes(st, buffer, data, off, partial), codec)
+      decode_error(buffer.write_region_clamped(st, buffer, off, partial), codec)
     Decoded(read:, bytes:) -> {
-      let st = write_bytes(st, buffer, data, off, bytes)
+      let st = buffer.write_region_clamped(st, buffer, off, bytes)
       read_written_result(st, read, bit_array.byte_size(bytes))
     }
   }

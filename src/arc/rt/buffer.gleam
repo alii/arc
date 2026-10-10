@@ -1,4 +1,5 @@
 import arc/bytecode/key.{type PropertyKey, Index}
+import arc/internal/tree_array.{type TreeArray}
 import arc/rt/elements
 import arc/rt/store as rt_store
 import arc/rt/typed_array_bytes.{
@@ -8,9 +9,10 @@ import arc/rt/types.{
   type Agent, type BigIntKind, type BufferStorage, type Handle, type JsElements,
   type JsNum, type JsVal, type NumberKind, type Property, type SabOwner,
   type TypedArrayKind, AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj,
-  BigKind, Bytes, DataProperty, Detached, Immutable, JFloat, JInt, JNan, JNegInf,
-  JPosInf, KBig, KHandle, KNum, LocalBlock, NumKind, Ordinary, OwnerBlock,
-  SObject, SShapedObject, Shared, classify, mk_bigint, mk_int, mk_number,
+  BigKind, Bytes, Chunked, DataProperty, Detached, Immutable, JFloat, JInt, JNan,
+  JNegInf, JPosInf, KBig, KHandle, KNum, LocalBlock, NumKind, Ordinary,
+  OwnerBlock, SObject, SShapedObject, Shared, classify, mk_bigint, mk_int,
+  mk_number,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -30,24 +32,67 @@ fn read(owner: SabOwner) -> BitArray
 @external(erlang, "arc_rt_sab_ffi", "write")
 fn write(owner: SabOwner, byte_offset: Int, chunk: BitArray) -> Nil
 
+// a buffer over this many bytes turns into pieces the first time a write of
+// at most small_write_max bytes lands in it
+const chunking_min = 4096
+
+const small_write_max = 1024
+
+@external(erlang, "arc_rt_buffer_ffi", "split")
+fn split(bytes: BitArray) -> TreeArray(BitArray)
+
+// the pieces as one binary again, a copy of the whole buffer
+@external(erlang, "arc_rt_buffer_ffi", "join")
+pub fn join(pieces: TreeArray(BitArray)) -> BitArray
+
+// the bytes at a range and where they start in the binary handed back
+@external(erlang, "arc_rt_buffer_ffi", "locate")
+fn locate(
+  pieces: TreeArray(BitArray),
+  byte_offset: Int,
+  count: Int,
+) -> #(BitArray, Int)
+
+@external(erlang, "arc_rt_buffer_ffi", "read_region")
+fn read_pieces(
+  pieces: TreeArray(BitArray),
+  byte_offset: Int,
+  count: Int,
+) -> BitArray
+
+@external(erlang, "arc_rt_buffer_ffi", "write_region")
+fn write_pieces(
+  pieces: TreeArray(BitArray),
+  byte_offset: Int,
+  region: BitArray,
+) -> TreeArray(BitArray)
+
+@external(erlang, "arc_rt_buffer_ffi", "update")
+fn update(
+  pieces: TreeArray(BitArray),
+  byte_offset: Int,
+  count: Int,
+  write: fn(BitArray, Int) -> BitArray,
+) -> TreeArray(BitArray)
+
 pub fn storage_is_shared(storage: BufferStorage) -> Bool {
   case storage {
     Shared(..) -> True
-    Bytes(..) | Immutable(..) | Detached(..) -> False
+    Bytes(..) | Chunked(..) | Immutable(..) | Detached(..) -> False
   }
 }
 
 pub fn storage_is_detached(storage: BufferStorage) -> Bool {
   case storage {
     Detached(..) -> True
-    Bytes(..) | Immutable(..) | Shared(..) -> False
+    Bytes(..) | Chunked(..) | Immutable(..) | Shared(..) -> False
   }
 }
 
 pub fn storage_is_immutable(storage: BufferStorage) -> Bool {
   case storage {
     Immutable(..) -> True
-    Bytes(..) | Shared(..) | Detached(..) -> False
+    Bytes(..) | Chunked(..) | Shared(..) | Detached(..) -> False
   }
 }
 
@@ -55,6 +100,7 @@ pub fn storage_max_byte_length(storage: BufferStorage) -> Option(Int) {
   case storage {
     Detached(max_byte_length:)
     | Bytes(max_byte_length:, ..)
+    | Chunked(max_byte_length:, ..)
     | Shared(max_byte_length:, ..) -> max_byte_length
     Immutable(..) -> None
   }
@@ -66,6 +112,7 @@ pub fn storage_byte_size(storage: BufferStorage) -> Int {
     Bytes(bytes:, ..)
     | Immutable(bytes:)
     | Shared(block: LocalBlock(bytes:), ..) -> bit_array.byte_size(bytes)
+    Chunked(byte_length:, ..) -> byte_length
     Shared(block: OwnerBlock(byte_length:, ..), max_byte_length: None) ->
       byte_length
     Shared(block: OwnerBlock(owner:, ..), max_byte_length: Some(_)) ->
@@ -79,8 +126,96 @@ pub fn storage_bits(storage: BufferStorage) -> Option(BitArray) {
     Bytes(bytes:, ..)
     | Immutable(bytes:)
     | Shared(block: LocalBlock(bytes:), ..) -> Some(bytes)
+    Chunked(pieces:, ..) -> Some(join(pieces))
     Shared(block: OwnerBlock(owner:, ..), ..) -> Some(read(owner))
   }
+}
+
+// `count` bytes at `byte_offset`, none when detached or out of range
+pub fn storage_read_region(
+  storage: BufferStorage,
+  byte_offset: Int,
+  count: Int,
+) -> Option(BitArray) {
+  case storage {
+    Chunked(pieces:, byte_length:, ..) ->
+      case
+        byte_offset >= 0 && count >= 0 && byte_offset + count <= byte_length
+      {
+        True -> Some(read_pieces(pieces, byte_offset, count))
+        False -> None
+      }
+    _ -> {
+      use data <- option.then(storage_bits(storage))
+      option.from_result(bit_array.slice(data, byte_offset, count))
+    }
+  }
+}
+
+pub fn read_region(
+  st: Agent,
+  buffer: Handle,
+  byte_offset: Int,
+  count: Int,
+) -> Option(BitArray) {
+  use storage <- option.then(storage(st, buffer))
+  storage_read_region(storage, byte_offset, count)
+}
+
+// overwrites the bytes at `byte_offset` with `region`, which must fit inside
+// the buffer; a detached buffer is left alone
+pub fn write_region(
+  st: Agent,
+  buffer: Handle,
+  byte_offset: Int,
+  region: BitArray,
+) -> Agent {
+  use cell <- rt_store.cell_update(st, buffer)
+  let assert SObject(kind: ArrayBufferObj(storage:), ..) = cell
+    as "buffer.write_region: handle does not hold an ArrayBuffer"
+  let count = bit_array.byte_size(region)
+  let written =
+    element_written(storage, byte_offset, count, fn(data, off) {
+      typed_array_bytes.splice_clamped(data, off, region).0
+    })
+  SObject(
+    ..cell,
+    kind: ArrayBufferObj(storage: option.unwrap(written, storage)),
+  )
+}
+
+// write_region for a region that may reach past the end: only the part that
+// fits is written
+pub fn write_region_clamped(
+  st: Agent,
+  buffer: Handle,
+  byte_offset: Int,
+  region: BitArray,
+) -> Agent {
+  let size = bit_array.byte_size(region)
+  let fits = int.min(size, live_byte_size(st, buffer) - byte_offset)
+  use <- bool.guard(byte_offset < 0 || fits <= 0, st)
+  case fits == size {
+    True -> write_region(st, buffer, byte_offset, region)
+    False -> {
+      let assert Ok(region) = bit_array.slice(region, 0, fits)
+      write_region(st, buffer, byte_offset, region)
+    }
+  }
+}
+
+// the bytes of [byte_offset, byte_offset + count) that lie inside the buffer,
+// none of them for a detached one
+pub fn read_region_clamped(
+  st: Agent,
+  buffer: Handle,
+  byte_offset: Int,
+  count: Int,
+) -> BitArray {
+  let size = live_byte_size(st, buffer)
+  let start = int.clamp(byte_offset, 0, size)
+  read_region(st, buffer, start, int.clamp(count, 0, size - start))
+  |> option.unwrap(<<>>)
 }
 
 pub fn storage_store_region(
@@ -92,6 +227,16 @@ pub fn storage_store_region(
   case storage {
     Bytes(bytes: _, max_byte_length:) ->
       Bytes(bytes: new_bits, max_byte_length:)
+    Chunked(pieces:, byte_length:, max_byte_length:) ->
+      // a same-size image only differs in the region, so the pieces stay
+      case bit_array.byte_size(new_bits) == byte_length {
+        True -> {
+          let assert Ok(region) = bit_array.slice(new_bits, byte_offset, count)
+            as "storage_store_region: write range outside the new buffer image"
+          Chunked(..storage, pieces: write_pieces(pieces, byte_offset, region))
+        }
+        False -> Bytes(bytes: new_bits, max_byte_length:)
+      }
     Shared(block:, max_byte_length:) -> {
       let assert True =
         byte_offset >= 0
@@ -124,13 +269,20 @@ pub fn bytes(st: Agent, buffer: Handle) -> Option(BitArray) {
   storage(st, buffer) |> option.then(storage_bits)
 }
 
+pub fn is_detached(st: Agent, buffer: Handle) -> Bool {
+  storage(st, buffer)
+  |> option.map(storage_is_detached)
+  |> option.unwrap(True)
+}
+
 pub fn is_immutable(st: Agent, buffer: Handle) -> Bool {
   storage(st, buffer)
   |> option.map(storage_is_immutable)
   |> option.unwrap(False)
 }
 
-fn live_byte_size(st: Agent, buffer: Handle) -> Int {
+// 0 when detached
+pub fn live_byte_size(st: Agent, buffer: Handle) -> Int {
   storage(st, buffer)
   |> option.map(storage_byte_size)
   |> option.unwrap(0)
@@ -241,8 +393,16 @@ pub fn view_length(st: Agent, view: View) -> Int {
 
 pub fn live_view(st: Agent, view: View) -> Option(ViewBounds) {
   let View(buffer:, elem_kind:, byte_offset:, length:) = view
-  use data <- option.map(bytes(st, buffer))
-  view_bounds(bit_array.byte_size(data), elem_kind, byte_offset, length)
+  case storage(st, buffer) {
+    None | Some(Detached(..)) -> None
+    Some(storage) ->
+      Some(view_bounds(
+        storage_byte_size(storage),
+        elem_kind,
+        byte_offset,
+        length,
+      ))
+  }
 }
 
 fn valid_integer_index(view: ViewBounds, idx: Int) -> Bool {
@@ -268,16 +428,13 @@ pub fn typed_array_element(
   idx: Int,
 ) -> Option(JsVal) {
   use <- bool.guard(idx < 0 || idx >= length, None)
-  case bytes(st, buffer) {
-    None -> None
-    Some(data) ->
-      element_of_view(
-        data,
-        fixed_view(bit_array.byte_size(data), elem_kind, byte_offset, length),
-        elem_kind,
-        idx,
-      )
-  }
+  use storage <- option.then(storage(st, buffer))
+  element_of_view(
+    storage,
+    fixed_view(storage_byte_size(storage), elem_kind, byte_offset, length),
+    elem_kind,
+    idx,
+  )
 }
 
 pub fn typed_array_element_live(
@@ -289,28 +446,39 @@ pub fn typed_array_element_live(
   idx: Int,
 ) -> Option(JsVal) {
   use <- bool.guard(idx < 0, None)
-  case bytes(st, buffer) {
-    None -> None
-    Some(data) ->
-      element_of_view(
-        data,
-        view_bounds(bit_array.byte_size(data), elem_kind, byte_offset, length),
-        elem_kind,
-        idx,
-      )
-  }
+  use storage <- option.then(storage(st, buffer))
+  element_of_view(
+    storage,
+    view_bounds(storage_byte_size(storage), elem_kind, byte_offset, length),
+    elem_kind,
+    idx,
+  )
 }
 
 fn element_of_view(
-  data: BitArray,
+  storage: BufferStorage,
   view: ViewBounds,
   elem_kind: TypedArrayKind,
   idx: Int,
 ) -> Option(JsVal) {
   case valid_integer_index(view, idx) {
-    True ->
-      Some(decode_typed_element(data, view_element_offset(view, idx), elem_kind))
     False -> None
+    True -> {
+      let off = view_element_offset(view, idx)
+      case storage {
+        Bytes(bytes:, ..)
+        | Immutable(bytes:)
+        | Shared(block: LocalBlock(bytes:), ..) ->
+          Some(decode_typed_element(bytes, off, elem_kind))
+        Chunked(pieces:, ..) -> {
+          let #(data, off) = locate(pieces, off, view.elem_size)
+          Some(decode_typed_element(data, off, elem_kind))
+        }
+        Shared(block: OwnerBlock(owner:, ..), ..) ->
+          Some(decode_typed_element(read(owner), off, elem_kind))
+        Detached(..) -> None
+      }
+    }
   }
 }
 
@@ -335,11 +503,11 @@ pub fn typed_array_iter_length(
   byte_offset: Int,
   length: Option(Int),
 ) -> Result(Int, ViewWitnessError) {
-  case bytes(st, buffer) {
-    None -> Error(BufferDetached)
-    Some(data) -> {
+  case storage(st, buffer) {
+    None | Some(Detached(..)) -> Error(BufferDetached)
+    Some(storage) -> {
       let view =
-        view_bounds(bit_array.byte_size(data), elem_kind, byte_offset, length)
+        view_bounds(storage_byte_size(storage), elem_kind, byte_offset, length)
       case view_in_bounds(view) {
         False -> Error(OutOfBoundsView)
         True -> Ok(view_len(view))
@@ -452,12 +620,9 @@ fn write_typed_element(
           let off = view_element_offset(bounds, i)
           use <- bool.guard(!valid_integer_index(bounds, i), #(True, st))
           use <- bool.guard(storage_is_immutable(storage), #(False, st))
-          case storage_bits(storage) {
+          case element_written(storage, off, size, write) {
             None -> #(True, st)
-            Some(data) -> {
-              let new_bits = write(data, off)
-              let new_storage =
-                storage_store_region(storage, new_bits, off, size)
+            Some(new_storage) -> {
               let st =
                 rt_store.cell_set(
                   st,
@@ -471,6 +636,35 @@ fn write_typed_element(
         _ -> #(True, st)
       }
     None -> #(True, st)
+  }
+}
+
+// none when detached
+fn element_written(
+  storage: BufferStorage,
+  off: Int,
+  size: Int,
+  write: fn(BitArray, Int) -> BitArray,
+) -> Option(BufferStorage) {
+  case storage {
+    Bytes(bytes:, max_byte_length:) -> {
+      let byte_length = bit_array.byte_size(bytes)
+      case byte_length > chunking_min && size <= small_write_max {
+        False -> Some(Bytes(bytes: write(bytes, off), max_byte_length:))
+        True ->
+          Some(Chunked(
+            pieces: update(split(bytes), off, size, write),
+            byte_length:,
+            max_byte_length:,
+          ))
+      }
+    }
+    Chunked(pieces:, ..) ->
+      Some(Chunked(..storage, pieces: update(pieces, off, size, write)))
+    _ -> {
+      use data <- option.map(storage_bits(storage))
+      storage_store_region(storage, write(data, off), off, size)
+    }
   }
 }
 

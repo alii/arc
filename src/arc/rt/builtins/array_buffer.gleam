@@ -17,11 +17,12 @@ import arc/rt/types.{
   ArrayBufferN, ArrayBufferObj, ArrayBufferResize, ArrayBufferSlice,
   ArrayBufferSliceToImmutable, ArrayBufferTransfer,
   ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable, Bytes,
-  DataViewObj, Detached, Immutable, KHandle, KUndef, LocalBlock, OwnerBlock,
-  SObject, Shared, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
-  SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
-  SharedArrayBufferGrow, SharedArrayBufferSlice, StringKey, TypedArrayObj,
-  classify, mk_bool, mk_int, mk_object, mk_undefined,
+  Chunked, DataViewObj, Detached, Immutable, KHandle, KUndef, LocalBlock,
+  OwnerBlock, SObject, Shared, SharedArrayBufferConstructor,
+  SharedArrayBufferGetByteLength, SharedArrayBufferGetGrowable,
+  SharedArrayBufferGetMaxByteLength, SharedArrayBufferGrow,
+  SharedArrayBufferSlice, StringKey, TypedArrayObj, classify, mk_bool, mk_int,
+  mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -625,7 +626,7 @@ fn require_buffer(st: Agent, this: JsVal, method: String) -> LiveBuffer {
 fn require_unshared(st: Agent, buf: LiveBuffer, method: String) -> LiveBuffer {
   case buf.storage {
     Shared(..) -> incompatible(st, method)
-    Bytes(..) | Immutable(..) | Detached(..) -> buf
+    Bytes(..) | Chunked(..) | Immutable(..) | Detached(..) -> buf
   }
 }
 
@@ -636,7 +637,8 @@ fn require_shared(
 ) -> types.SharedBlock {
   case buf.storage {
     Shared(block:, ..) -> block
-    Bytes(..) | Immutable(..) | Detached(..) -> incompatible(st, method)
+    Bytes(..) | Chunked(..) | Immutable(..) | Detached(..) ->
+      incompatible(st, method)
   }
 }
 
@@ -676,6 +678,7 @@ fn require_unshared_bytes(
 ) -> BitArray {
   case buf.storage {
     Bytes(bytes:, ..) | Immutable(bytes:) -> bytes
+    Chunked(pieces:, ..) -> buffer.join(pieces)
     Shared(..) -> incompatible(st, method)
     Detached(..) -> detached_error(st, method)
   }
@@ -688,7 +691,13 @@ fn require_resizable_bytes(
 ) -> #(BitArray, Int) {
   case buf.storage {
     Bytes(bytes:, max_byte_length: Some(max)) -> #(bytes, max)
-    Bytes(max_byte_length: None, ..) | Immutable(..) ->
+    Chunked(pieces:, max_byte_length: Some(max), ..) -> #(
+      buffer.join(pieces),
+      max,
+    )
+    Bytes(max_byte_length: None, ..)
+    | Chunked(max_byte_length: None, ..)
+    | Immutable(..) ->
       rt_val.throw_type_error(
         st,
         "ArrayBuffer.prototype."
@@ -720,7 +729,7 @@ fn require_not_immutable(
           <> method
           <> " called on an immutable ArrayBuffer",
       )
-    Bytes(..) | Shared(..) | Detached(..) -> buf
+    Bytes(..) | Chunked(..) | Shared(..) | Detached(..) -> buf
   }
 }
 

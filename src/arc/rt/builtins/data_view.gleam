@@ -3,7 +3,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
-import arc/rt/typed_array_bytes.{splice_clamped}
+import arc/rt/typed_array_bytes
 import arc/rt/types.{
   type Agent, type BuiltinPair, type DataViewNative, type Handle, type JsNum,
   type JsVal, type ObjKind, type ViewBigElement, type ViewElementType,
@@ -15,7 +15,6 @@ import arc/rt/types.{
   classify, mk_bigint, mk_int, mk_number, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -188,9 +187,9 @@ fn get_view_value(
   let #(view, get_index, st) = view_and_index(st, this, args)
   let little = rt_val.to_boolean(arg_at(args, 1))
   let elem_size = element_size(element)
-  let #(data, pos) = checked_view_bytes(st, view, get_index, elem_size)
-  let assert Ok(chunk) = bit_array.slice(data, pos, elem_size)
-    as "data_view: checked_view_bytes let slice run past buffer"
+  let pos = checked_view_offset(st, view, get_index, elem_size)
+  let assert Some(chunk) = buffer.read_region(st, view.buffer, pos, elem_size)
+    as "data_view: checked_view_offset let a read run past the buffer"
   #(decode(element, chunk, little), st)
 }
 
@@ -207,13 +206,9 @@ fn set_view_value(
   let #(encoded, st) = encode_value(st, element, arg_at(args, 1))
   let little = rt_val.to_boolean(arg_at(args, 2))
   let elem_size = element_size(element)
-  let #(data, pos) = checked_view_bytes(st, view, get_index, elem_size)
+  let pos = checked_view_offset(st, view, get_index, elem_size)
   let chunk = to_endian(encoded, little, elem_size)
-  let #(new_data, written) = splice_clamped(data, pos, chunk)
-  #(
-    mk_undefined(),
-    buffer.store_region(st, view.buffer, new_data, pos, written),
-  )
+  #(mk_undefined(), buffer.write_region(st, view.buffer, pos, chunk))
 }
 
 type ViewRecord {
@@ -261,18 +256,18 @@ fn view_and_index(
   #(view, get_index, st)
 }
 
-fn checked_view_bytes(
+// the element's offset in the buffer, once it is known to lie in the view
+fn checked_view_offset(
   st: Agent,
   view: ViewRecord,
   get_index: Int,
   elem_size: Int,
-) -> #(BitArray, Int) {
+) -> Int {
   let size = view_size(st, view)
   use Nil <- helpers.guard(get_index + elem_size <= size, fn() {
     rt_val.throw_range_error(st, "Offset is outside the bounds of the DataView")
   })
-  let data = buffer_data(st, view.buffer)
-  #(data, view.byte_offset + get_index)
+  view.byte_offset + get_index
 }
 
 fn as_array_buffer(st: Agent, val: JsVal) -> Option(Handle) {
@@ -298,17 +293,6 @@ fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
       option.is_some(buffer.storage_max_byte_length(storage)),
     )
     None -> rt_val.throw_type_error(st, "DataView buffer is not an ArrayBuffer")
-  }
-}
-
-fn buffer_data(st: Agent, buf: Handle) -> BitArray {
-  case buffer.bytes(st, buf) {
-    Some(bits) -> bits
-    None ->
-      rt_val.throw_type_error(
-        st,
-        "Cannot perform operation on a detached ArrayBuffer",
-      )
   }
 }
 
