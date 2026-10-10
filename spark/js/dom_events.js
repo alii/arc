@@ -6,7 +6,18 @@ const {
   rangeError,
   invalidArgType,
   validateObject,
+  inspect,
 } = require("spark:errors");
+
+const kInspect = Symbol.for("nodejs.util.inspect.custom");
+
+function customInspect(self, obj, depth, options) {
+  if (depth < 0) return self;
+  const opts = Object.assign({}, options, {
+    depth: options.depth === null ? null : options.depth - 1,
+  });
+  return `${self.constructor.name} ${inspect(obj, opts)}`;
+}
 const loop = require("spark:loop");
 const { DOMException } = require("spark:domexception");
 const { setTimeout, clearTimeout } = require("node:timers");
@@ -97,6 +108,26 @@ class Event {
     this[kType] = `${type}`;
     this.#bubbles = !!bubbles;
     this.#cancelable = !!cancelable;
+  }
+
+  [kInspect](depth, options) {
+    if (!isEvent(this)) throw invalidThis("Event");
+    const name = this.constructor.name;
+    if (depth < 0) return name;
+    const opts = Object.assign({}, options, {
+      depth: Number.isInteger(options.depth)
+        ? options.depth - 1
+        : options.depth,
+    });
+    return `${name} ${inspect(
+      {
+        type: this[kType],
+        defaultPrevented: this.#defaultPrevented,
+        cancelable: this.#cancelable,
+        timeStamp: this.#timestamp,
+      },
+      opts,
+    )}`;
   }
 
   stopImmediatePropagation() {
@@ -532,6 +563,17 @@ class EventTarget {
     }
   }
 
+  [kInspect](depth, options) {
+    const name = this.constructor.name;
+    if (depth < 0) return name;
+    const opts = Object.assign({}, options, {
+      depth: Number.isInteger(options.depth)
+        ? options.depth - 1
+        : options.depth,
+    });
+    return `${name} ${inspect({}, opts)}`;
+  }
+
   dispatchEvent(event) {
     if (!isEventTarget(this)) throw invalidThis("EventTarget");
     if (arguments.length < 1) throw missingArgs("event");
@@ -825,6 +867,10 @@ class AbortSignal extends EventTarget {
     this[kComposite] = composite;
   }
 
+  [kInspect](depth, options) {
+    return customInspect(this, { aborted: this.aborted }, depth, options);
+  }
+
   get aborted() {
     validateThisAbortSignal(this);
     refreshCompositeSignal(this);
@@ -1010,6 +1056,10 @@ function runAbort(signal) {
 
 class AbortController {
   #signal;
+
+  [kInspect](depth, options) {
+    return customInspect(this, { signal: this.signal }, depth, options);
+  }
 
   get signal() {
     this.#signal ??= new AbortSignal(kDontThrowSymbol);

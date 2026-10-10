@@ -33,6 +33,7 @@ import spark/querystring
 import spark/string_decoder
 import spark/timers
 import spark/url
+import spark/util
 
 @external(erlang, "spark_test_ffi", "main")
 pub fn main() -> Nil
@@ -71,6 +72,7 @@ fn builtins() -> List(Builtin(Nil)) {
     url.builtin(),
     events.builtin(),
     string_decoder.builtin(),
+    util.builtin(),
   ]
 }
 
@@ -2694,5 +2696,252 @@ pub fn string_decoder_matches_node_test() {
       "end 1 1899718399",
       "shape 1 3147696307",
       "without 1 1479083447",
+    ]
+}
+
+const util_script = "
+const util = require(\"util\");
+let seed = 2112;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const call = (f) => { try { const v = f(); return typeof v === \"string\" ? v : JSON.stringify(v) ?? String(v); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f).replace(/\\n/g, \"\\\\n\"));
+// ---- generated values through inspect with generated options
+function leaf() {
+  return pick([
+    () => rnd(1000) - 500, () => 1.5, () => -0, () => NaN, () => Infinity, () => 123456789, () => 12345678901234567890n, () => \"str\", () => \"it's \\\"q\\\"\", () => \"line\\nbreak\", () => \"\", () => \"x\".repeat(30),
+    () => true, () => null, () => undefined, () => Symbol(\"sym\"), () => Symbol.for(\"reg\"), () => Symbol.iterator, () => new Date(86400000 * rnd(20000)), () => new Date(NaN), () => /re+g/gi,
+    () => function named() {}, () => () => {}, () => async function af() {}, () => function* gen() {}, () => Math.max, () => new Boolean(false), () => new Number(3), () => new String(\"boxed\"), () => Object(5n), () => Object(Symbol(\"b\")),
+    () => new Uint8Array([1, 2, 3]), () => new Float64Array(2), () => new ArrayBuffer(4), () => new DataView(new ArrayBuffer(2)), () => Buffer.from(\"hi\"), () => new Uint16Array(0),
+    () => Promise.resolve(7), () => Promise.reject(3).catch(() => {}) && new Promise(() => {}), () => new WeakMap(), () => new WeakSet(), () => new Map().entries(), () => new Set([1]).values(), () => [1, 2][Symbol.iterator](),
+    () => Object.create(null), () => Object.create({ inherited: 1 }), () => new (class Point { constructor() { this.x = 1; } })(), () => new (class extends Map {})(), () => new (class Sub extends Array {})(2),
+    () => (function () { return arguments; })(1, 2), () => new Proxy({ p: 1 }, {}), () => new Proxy(function f() {}, {}), () => globalThis.undefinedThing, () => [, , 1], () => new Array(5), () => Object.freeze({ fr: 1 }), () => Object.seal([1]),
+    () => ({ get g() { return 1; }, set s(v) {}, get gs() { return 2; }, set gs(v) {} }), () => ({ [Symbol(\"k\")]: 1, 2: \"two\", \"needs quote\": 1, valid_id: 2 }), () => new URLSearchParams(\"a=1&b=2\"), () => new URL(\"https://u:p@h.test:8/p?q#f\"),
+    () => { const e = new Error(\"flat\"); e.stack = \"Error: flat\\n    at fixed (file.js:1:1)\"; return e; }, () => { const e = new TypeError(\"with props\"); e.stack = \"TypeError: with props\\n    at x (y.js:2:3)\"; e.code = \"E_X\"; e.extra = [1]; return e; },
+    () => { const e = new RangeError(\"cause\"); e.stack = \"RangeError: cause\"; e.cause = \"why\"; return e; }, () => new AggregateError([], \"agg\") && Object.assign(new AggregateError([1], \"agg\"), { stack: \"AggregateError: agg\" }),
+    () => { const o = { name: \"circ\" }; o.self = o; o.list = [o, { o }]; return o; }, () => new AbortController().signal, () => new EventTarget(), () => new (require(\"events\"))(), () => new TextEncoder(), () => new TextDecoder(),
+  ])();
+}
+function value(depth) {
+  if (depth <= 0 || rnd(3) === 0) return leaf();
+  switch (rnd(5)) {
+    case 0: return Array.from({ length: rnd(8) }, () => value(depth - 1));
+    case 1: { const o = {}; for (let i = 0; i < rnd(6); i++) o[pick([\"a\", \"b\", \"long_key_name\", \"k\" + i, \"x y\"])] = value(depth - 1); return o; }
+    case 2: return new Map(Array.from({ length: rnd(4) }, () => [value(depth - 1), value(depth - 1)]));
+    case 3: return new Set(Array.from({ length: rnd(5) }, () => value(depth - 1)));
+    default: return Array.from({ length: 5 + rnd(120) }, (_, i) => (rnd(2) ? i * 7 : \"s\" + i));
+  }
+}
+const optionSets = [undefined, { depth: 0 }, { depth: 4 }, { depth: null }, { compact: false }, { compact: 1 }, { compact: true, breakLength: Infinity }, { breakLength: 40 }, { sorted: true }, { showHidden: true }, { maxArrayLength: 3 }, { maxArrayLength: 0 }, { maxStringLength: 5 }, { numericSeparator: true }, { getters: true }, { getters: \"set\" }, { showProxy: true }, { colors: true }, { customInspect: false }, { depth: 1, compact: 3, breakLength: 60, sorted: true }];
+for (let i = 0; i < 300; i++) {
+  const v = value(3), o = pick(optionSets);
+  lines.push(\"I \" + i + \" \" + JSON.stringify(o) + \" \" + call(() => util.inspect(v, o)).replace(/\\n/g, \"\\\\n\"));
+}
+for (let i = 0; i < 100; i++) { const a = value(2), b = rnd(3) ? a : value(2); lines.push(\"Q \" + i + \" \" + call(() => [util.isDeepStrictEqual(a, b), util.isDeepStrictEqual(a, a), util.isDeepStrictEqual(a, structuredCloneish(a))])); }
+function structuredCloneish(v) { if (Array.isArray(v)) return v.map(structuredCloneish); if (v instanceof Map) return new Map([...v].map(([k, x]) => [k, structuredCloneish(x)])); if (v instanceof Set) return new Set(v); if (v && typeof v === \"object\" && Object.getPrototypeOf(v) === Object.prototype) { const o = {}; for (const k of Reflect.ownKeys(v)) { const d = Object.getOwnPropertyDescriptor(v, k); if (\"value\" in d) o[k] = k === \"self\" ? o : structuredCloneish(d.value); else Object.defineProperty(o, k, d); } return o; } return v; }
+// ---- format
+const fargs = [[\"%s %s\", \"a\"], [\"%s\", { a: 1 }], [\"%s\", 5n], [\"%s\", Symbol(\"x\")], [\"%s\", -0], [\"%s\", null], [\"%d\", \"42\"], [\"%d\", \"x\"], [\"%d\", 5n], [\"%i\", 3.9], [\"%f\", \"1.5x\"], [\"%j\", { a: [1] }], [\"%j\", 5n], [\"%o\", [1, { a: 2 }]], [\"%O\", { a: { b: { c: { d: 1 } } } }], [\"%c styled\", \"color: red\"], [\"%% %s\", 1], [\"%x\", 1], [\"no subs\", 1, \"two\", { three: 3 }], [5, 6], [{ a: 1 }, \"b\"], [\"%s:%s\", \"only\"], [\"%s\", new Date(0)], [\"%s\", new Error(\"e\").message], [\"%s\", [1, [2, [3]]]], [\"%s\", class K {}.name], [\"a\", Symbol(\"s\")], [\"%s %s %s\", null, undefined, NaN], [\"%d %d\", 1e21, -0]];
+for (const a of fargs) t(\"format \" + JSON.stringify(a, (k, v) => (typeof v === \"bigint\" ? v + \"n\" : typeof v === \"symbol\" ? String(v) : typeof v === \"function\" ? \"fn\" : v)), () => util.format(...a));
+t(\"formatWithOptions\", () => util.formatWithOptions({ compact: false, depth: 0 }, \"%o and\", { a: { b: 1 } }, { c: { d: 1 } }));
+t(\"formatWithOptions bad\", () => util.formatWithOptions(5, \"x\"));
+// ---- types
+const samples = { date: new Date(), regexp: /x/, map: new Map(), set: new Set(), weakmap: new WeakMap(), weakset: new WeakSet(), promise: Promise.resolve(), proxy: new Proxy({}, {}), error: new Error(\"e\"), typeerror: new TypeError(\"e\"), args: (function () { return arguments; })(), asyncfn: async () => {}, genfn: function* () {}, asyncgen: async function* () {}, fn: () => {}, genobj: (function* () {})(), mapiter: new Map().keys(), setiter: new Set().entries(), arraybuffer: new ArrayBuffer(1), sab: new SharedArrayBuffer(1), dataview: new DataView(new ArrayBuffer(1)), u8: new Uint8Array(1), f64: new Float64Array(1), big64: new BigInt64Array(1), buffer: Buffer.alloc(1), boxedn: new Number(1), boxeds: new String(\"\"), boxedb: new Boolean(true), boxedbig: Object(1n), boxedsym: Object(Symbol()), plain: {}, array: [], nul: null, num: 1, str: \"s\", fake: { [Symbol.toStringTag]: \"Date\" }, domex: new DOMException(\"d\") };
+for (const name of Object.keys(util.types).sort()) t(\"types.\" + name, () => Object.entries(samples).filter(([, v]) => util.types[name](v)).map(([k]) => k).join(\",\"));
+// ---- the rest of the api
+t(\"keys\", () => Object.keys(util).sort());
+t(\"promisify\", () => { const f = util.promisify((a, b, cb) => cb(null, a + b)); return [typeof f, f.length, f.name, Object.getPrototypeOf(f) === Function.prototype]; });
+t(\"promisify custom\", () => { const f = () => {}; f[util.promisify.custom] = () => \"custom\"; return [util.promisify(f)(), String(util.promisify.custom)]; });
+t(\"promisify bad\", () => util.promisify(5));
+t(\"promisify custom bad\", () => { const f = () => {}; f[util.promisify.custom] = 5; return util.promisify(f); });
+t(\"callbackify bad\", () => util.callbackify(5));
+t(\"inherits\", () => { function A() {} function B() {} B.prototype.hi = () => \"hi\"; util.inherits(A, B); return [new A().hi(), A.super_ === B, new A() instanceof B]; });
+t(\"inherits bad\", () => util.inherits(5, function () {}));
+t(\"inherits bad proto\", () => util.inherits(function () {}, { prototype: undefined }));
+t(\"deprecate\", () => { const f = util.deprecate((x) => x * 2, \"old\", \"DEP_X\"); return [f(2), f.name, f.length]; });
+t(\"deprecate bad code\", () => util.deprecate(() => {}, \"m\", 5));
+t(\"_extend\", () => util._extend({ a: 1 }, { b: 2 }));
+t(\"isArray\", () => [util.isArray([]), util.isArray({})]);
+t(\"toUSVString\", () => [util.toUSVString(\"ok\"), util.toUSVString(5)]);
+t(\"stripVTControlCharacters\", () => [util.stripVTControlCharacters(\"\\u001b[31mred\\u001b[0m plain \\u001b]8;;http://x\\u0007link\\u001b]8;;\\u0007\"), call(() => util.stripVTControlCharacters(5))]);
+t(\"styleText\", () => [util.styleText(\"red\", \"x\", { validateStream: false }), util.styleText([\"bold\", \"underline\"], \"y\", { validateStream: false }), call(() => util.styleText(\"red\", 5))].map((s) => JSON.stringify(s)));
+t(\"getSystemErrorName\", () => [util.getSystemErrorName(-2), util.getSystemErrorName(-13), call(() => util.getSystemErrorName(2)), call(() => util.getSystemErrorName(\"x\")), util.getSystemErrorMessage(-2), util.getSystemErrorMap().get(-2)]);
+t(\"debuglog\", () => { const d = util.debuglog(\"nope\"); d(\"not shown %d\", 1); return [typeof d, d.enabled, util.debug === util.debuglog]; });
+t(\"inspect.custom\", () => { class C { [util.inspect.custom](depth, options, inspect) { return \"custom:\" + depth + \":\" + typeof options.stylize + \":\" + (inspect === util.inspect); } } return [util.inspect(new C()), util.inspect({ c: new C() }), util.inspect(new C(), { customInspect: false }), String(util.inspect.custom)]; });
+t(\"inspect.custom returns object\", () => util.inspect({ [util.inspect.custom]: () => ({ replaced: true }) }));
+t(\"inspect.defaultOptions\", () => { const old = { ...util.inspect.defaultOptions }; util.inspect.defaultOptions = { depth: 0 }; const r = util.inspect({ a: { b: 1 } }); util.inspect.defaultOptions = old; return [r, Object.keys(old).sort()]; });
+t(\"inspect.defaultOptions bad\", () => { util.inspect.defaultOptions = 5; });
+t(\"inspect bad options\", () => util.inspect({}, 5));
+t(\"inspect legacy args\", () => util.inspect({ a: { b: { c: {} } } }, true, 0, false));
+t(\"inspect.colors/styles\", () => [Object.keys(util.inspect.colors).length, Object.keys(util.inspect.styles).sort(), util.inspect(\"s\", { colors: true }), util.inspect(5, { colors: true })].map((s) => JSON.stringify(s)));
+t(\"inspect buffer\", () => [util.inspect(Buffer.from(\"hello\")), util.inspect(Buffer.alloc(60)), util.inspect(Buffer.alloc(0)), util.inspect({ b: Buffer.from([1]) })]);
+t(\"inspect long string\", () => util.inspect(\"a\".repeat(120) + \"\\n\" + \"b\".repeat(20)));
+t(\"inspect string quotes\", () => [util.inspect(\"'\"), util.inspect(\"\\\"\"), util.inspect(\"`'\\\"\"), util.inspect(\"a\\tb\\u0001\\u007f\\u00a0\"), util.inspect(\"\\ud83d\\ude00\")]);
+t(\"inspect numbers\", () => [0, -0, 1e21, 1e-7, 123456.789, -1234567, 0xffffffffffn].map((n) => util.inspect(n, { numericSeparator: true })));
+t(\"inspect class instance kinds\", () => [util.inspect(new (class A { #p = 1; x = 2; })()), util.inspect(Object.create(class B {}.prototype)), util.inspect(Object.setPrototypeOf({ a: 1 }, null)), util.inspect(Object.setPrototypeOf([1], null))]);
+t(\"inspect symbols and keys\", () => util.inspect({ [Symbol()]: 1, [Symbol(\"d\")]: 2, \"a-b\": 3, 1e3: 4, constructor: 5, __proto__: null }));
+t(\"inspect nested arrays\", () => util.inspect([[[[[1]]]], [[[[2]]]]]));
+t(\"inspect big map/set\", () => [util.inspect(new Map(Array.from({ length: 5 }, (_, i) => [i, { i }]))), util.inspect(new Set(Array.from({ length: 120 }, (_, i) => i)))]);
+t(\"inspect typed arrays\", () => [util.inspect(new Float32Array([1.5, -0, NaN])), util.inspect(new BigUint64Array([1n])), util.inspect(new Uint8Array(200)), util.inspect(new Int8Array(2), { showHidden: true })]);
+t(\"inspect promises\", () => [util.inspect(Promise.resolve({ a: 1 })), util.inspect(new Promise(() => {})), util.inspect((() => { const p = Promise.reject(new RangeError(\"r\")); p.catch(() => {}); p.then = undefined; return Object.assign(Promise.reject(1), {}).catch(() => {}); })())]);
+t(\"inspect rejected\", () => { const p = Promise.reject(\"why\"); p.catch(() => {}); return util.inspect(p); });
+t(\"inspect proxies\", () => [util.inspect(new Proxy([1, 2], {})), util.inspect(new Proxy({ a: 1 }, { get: () => 5 })), util.inspect(new Proxy(new Map(), {}), { showProxy: true }), (() => { const { proxy, revoke } = Proxy.revocable({}, {}); revoke(); return util.inspect(proxy) + util.inspect(proxy, { showProxy: true }); })()]);
+t(\"inspect iterators mid-way\", () => { const it = new Map([[1, \"a\"], [2, \"b\"], [3, \"c\"]]).entries(); it.next(); const s = new Set([\"x\", \"y\"]).values(); s.next(); s.next(); return [util.inspect(it), util.inspect(s), util.inspect(new Map([[1, 2]]).keys()), util.inspect(new Map([[1, 2]]).values()), util.inspect(new Set([1]).entries())]; });
+t(\"inspect weak\", () => { const k = { key: 1 }; return [util.inspect(new WeakMap([[k, \"v\"]]), { showHidden: true }), util.inspect(new WeakSet([k]), { showHidden: true })]; });
+t(\"inspect functions\", () => [util.inspect(function () {}), util.inspect(Object.assign(() => {}, { prop: 1 })), util.inspect(async () => {}), util.inspect(function* g() {}), util.inspect(async function* ag() {}), util.inspect(Object.setPrototypeOf(function np() {}, null)), util.inspect(Math.sin), util.inspect((() => {}).bind(null))]);
+t(\"inspect boxed\", () => [util.inspect(new String(\"s\")), util.inspect(Object.assign(new Number(1), { extra: true })), util.inspect(Object(Symbol(\"b\"))), util.inspect(new Boolean(true)), util.inspect(Object(-0))]);
+t(\"inspect dates\", () => [util.inspect(new Date(\"2026-01-02T03:04:05.678Z\")), util.inspect(new Date(\"nope\")), util.inspect(Object.assign(new Date(0), { extra: 1 }))]);
+t(\"inspect module-like\", () => util.inspect(Object.defineProperty({}, Symbol.toStringTag, { value: \"Tagged\" })));
+t(\"inspect circular\", () => { const a = {}; const b = { a }; a.b = b; a.list = [a, b]; const m = new Map(); m.set(\"self\", m); return [util.inspect(a), util.inspect(m)]; });
+t(\"inspect depth default\", () => util.inspect({ a: { b: { c: { d: { e: 1 } } } } }));
+t(\"inspect array extras\", () => util.inspect(Object.assign([1, 2], { extra: \"x\", [-1]: \"neg\" })));
+t(\"inspect object with many keys\", () => util.inspect(Object.fromEntries(Array.from({ length: 30 }, (_, i) => [\"key\" + i, i]))));
+t(\"inspect line widths\", () => util.inspect({ a: \"x\".repeat(30), b: \"y\".repeat(30), c: [1, 2, 3], d: { e: \"z\".repeat(20) } }));
+t(\"isDeepStrictEqual kinds\", () => [[new Date(1), new Date(1)], [/a/g, /a/g], [/a/g, /a/i], [new Map([[1, { a: 1 }]]), new Map([[1, { a: 1 }]])], [new Set([{ a: 1 }]), new Set([{ a: 1 }])], [[1, , 3], [1, undefined, 3]], [new Uint8Array([1]), new Uint8Array([1])], [new Uint8Array([1]), new Int8Array([1])], [Buffer.from(\"a\"), Buffer.from(\"a\")], [NaN, NaN], [0, -0], [{ a: undefined }, {}], [Object.create(null), {}], [new Number(1), new Number(1)], [new Number(1), 1], [Symbol.for(\"a\"), Symbol.for(\"a\")], [new Error(\"a\"), new Error(\"a\")], [new Error(\"a\"), new TypeError(\"a\")], [{ [Symbol(\"s\")]: 1 }, { [Symbol(\"s\")]: 1 }], [[1, 2], { 0: 1, 1: 2, length: 2 }], [new Float64Array([NaN]), new Float64Array([NaN])], [new ArrayBuffer(2), new ArrayBuffer(2)], [() => {}, () => {}], [new URL(\"http://a/\"), new URL(\"http://a/\")]].map(([a, b]) => util.isDeepStrictEqual(a, b)));
+t(\"isPartialDeepStrictEqual\", () => [util.isPartialDeepStrictEqual({ a: 1, b: 2 }, { a: 1 }), util.isPartialDeepStrictEqual({ a: 1 }, { a: 1, b: 2 }), util.isPartialDeepStrictEqual([1, 2, 3], [1, 3]), util.isPartialDeepStrictEqual(new Set([1, 2]), new Set([2]))]);
+const pa = (config) => () => { const r = util.parseArgs(config); return [r.values, r.positionals, r.tokens?.length]; };
+t(\"parseArgs basics\", pa({ args: [\"-f\", \"--bar\", \"b\", \"pos\"], options: { foo: { type: \"boolean\", short: \"f\" }, bar: { type: \"string\" } }, allowPositionals: true }));
+t(\"parseArgs multiple\", pa({ args: [\"--x=1\", \"--x\", \"2\", \"-abc\", \"--\", \"--raw\"], options: { x: { type: \"string\", multiple: true }, a: { type: \"boolean\", short: \"a\" }, b: { type: \"boolean\", short: \"b\" }, c: { type: \"boolean\", short: \"c\" } }, allowPositionals: true, tokens: true }));
+t(\"parseArgs defaults\", pa({ args: [], options: { n: { type: \"string\", default: \"d\" }, v: { type: \"boolean\", default: false } } }));
+t(\"parseArgs negative\", pa({ args: [\"--no-color\", \"--verbose\"], options: { color: { type: \"boolean\" }, verbose: { type: \"boolean\" } }, allowNegative: true }));
+t(\"parseArgs unknown\", pa({ args: [\"--nope\"], options: {} }));
+t(\"parseArgs unexpected positional\", pa({ args: [\"pos\"], options: {} }));
+t(\"parseArgs missing value\", pa({ args: [\"--bar\"], options: { bar: { type: \"string\" } } }));
+t(\"parseArgs bad type\", pa({ args: [], options: { x: { type: \"number\" } } }));
+t(\"parseArgs not strict\", pa({ args: [\"--anything=1\", \"-z\", \"p\"], strict: false }));
+t(\"MIMEType\", () => { const m = new util.MIMEType(\"Text/HTML; Charset=UTF-8; q=\\\"a b\\\"\"); m.params.set(\"x\", \"y z\"); return [String(m), m.type, m.subtype, m.essence, [...m.params], m.params.get(\"charset\"), m.params.has(\"q\"), JSON.stringify(m), Object.prototype.toString.call(m)]; });
+t(\"MIMEType setters\", () => { const m = new util.MIMEType(\"a/b\"); m.type = \"Image\"; m.subtype = \"PNG\"; m.params.delete(\"none\"); return [String(m), call(() => { m.type = \"\"; }), call(() => { m.subtype = \"a/b\"; })]; });
+t(\"MIMEType bad\", () => new util.MIMEType(\"nope\"));
+t(\"MIMEType bad 2\", () => new util.MIMEType(\"a/b;;;=x; ok=1; ok=2; bad key=3\").toString());
+t(\"MIMEParams\", () => { const p = new util.MIMEParams(); p.set(\"a\", \"1\"); p.set(\"b\", \"needs \\\"quote\\\"\"); return [String(p), [...p.keys()], [...p.values()], call(() => p.set(\"bad key\", \"x\")), call(() => p.set(\"k\", \"\\u0001\"))]; });
+t(\"TextEncoder via util\", () => [util.TextEncoder === TextEncoder, util.TextDecoder === TextDecoder]);
+t(\"diff\", () => [util.diff(\"abc\", \"abd\"), util.diff([\"a\", \"b\"], [\"a\", \"c\", \"b\"]), call(() => util.diff(1, 2))]);
+t(\"errors from real internals\", () => { try { util.inherits(null, null); } catch (e) { return [e.name, e.code, e.message, String(e), Object.keys(e), e instanceof TypeError]; } });
+const later = [];
+const settle = (label, promise) => later.push(promise.then((v) => label + \" resolved \" + JSON.stringify(v), (e) => label + \" rejected \" + e.name + \" \" + e.code + \" \" + e.message));
+settle(\"promisify ok\", util.promisify((a, cb) => cb(null, a * 2))(21));
+settle(\"promisify err\", util.promisify((cb) => cb(new RangeError(\"nope\")))());
+settle(\"promisify multi\", util.promisify((cb) => cb(null, 1, 2))());
+settle(\"promisify this\", util.promisify(function (cb) { cb(null, this.v); }).call({ v: 9 }));
+settle(\"callbackify ok\", new Promise((resolve) => util.callbackify(async (x) => x + 1)(1, (err, v) => resolve([err, v]))));
+settle(\"callbackify err\", new Promise((resolve) => util.callbackify(async () => { throw new TypeError(\"t\"); })((err) => resolve([err.name, err.message]))));
+settle(\"callbackify falsy\", new Promise((resolve) => util.callbackify(() => Promise.reject(null))((err) => resolve([err.name, err.code, err.message, err.reason]))));
+settle(\"aborted\", (async () => { try { return typeof util.aborted; } catch (e) { return e.code; } })());
+Promise.all(later).then((settled) => {
+for (const l of settled) lines.push(l);
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"I \") ? \"inspect generated\" : line.startsWith(\"Q \") ? \"equality generated\" : line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+});
+
+"
+
+// 300 generated values through util.inspect with generated options, 100
+// generated pairs through isDeepStrictEqual, and the rest of util's api:
+// format, the type checks, promisify, callbackify, deprecate, inherits,
+// parseArgs, MIMEType, styleText. Each line is a kind of case, how many, and
+// a hash of what they printed in node 26.11.1
+pub fn util_matches_node_test() {
+  let rt = run_to_end(run_commonjs(node_runtime(), util_script))
+  assert out_lines(rt)
+    == [
+      "inspect generated 300 3268287443",
+      "equality generated 100 4160163590",
+      "format 29 3792613809",
+      "formatWithOptions 2 2015960298",
+      "types.isAnyArrayBuffer 1 214766504",
+      "types.isArgumentsObject 1 2535157484",
+      "types.isArrayBuffer 1 3330399800",
+      "types.isArrayBufferView 1 2166171830",
+      "types.isAsyncFunction 1 4183330138",
+      "types.isBigInt64Array 1 1786692618",
+      "types.isBigIntObject 1 1868185150",
+      "types.isBigUint64Array 1 2065710283",
+      "types.isBooleanObject 1 167649939",
+      "types.isBoxedPrimitive 1 223422513",
+      "types.isCryptoKey 1 1988536836",
+      "types.isDataView 1 4216004130",
+      "types.isDate 1 2822054148",
+      "types.isExternal 1 894203657",
+      "types.isFloat16Array 1 1433812038",
+      "types.isFloat32Array 1 3062104812",
+      "types.isFloat64Array 1 1692366621",
+      "types.isGeneratorFunction 1 1734199955",
+      "types.isGeneratorObject 1 2406055909",
+      "types.isInt16Array 1 3667569725",
+      "types.isInt32Array 1 1022047855",
+      "types.isInt8Array 1 2027317124",
+      "types.isKeyObject 1 2629801816",
+      "types.isMap 1 3715368968",
+      "types.isMapIterator 1 1352726520",
+      "types.isModuleNamespaceObject 1 1923184824",
+      "types.isNativeError 1 648746506",
+      "types.isNumberObject 1 2900715116",
+      "types.isPromise 1 734702404",
+      "types.isProxy 1 2892445468",
+      "types.isRegExp 1 3152985342",
+      "types.isSet 1 1600652700",
+      "types.isSetIterator 1 2053560772",
+      "types.isSharedArrayBuffer 1 4145424114",
+      "types.isStringObject 1 192097003",
+      "types.isSymbolObject 1 550507250",
+      "types.isTypedArray 1 132524420",
+      "types.isUint16Array 1 3140921112",
+      "types.isUint32Array 1 1947380282",
+      "types.isUint8Array 1 3242454048",
+      "types.isUint8ClampedArray 1 1426495401",
+      "types.isWeakMap 1 3937712720",
+      "types.isWeakSet 1 1636978364",
+      "keys 1 1263016706",
+      "promisify 8 3227000877",
+      "callbackify 4 4239679772",
+      "inherits 3 2997554435",
+      "deprecate 2 326341593",
+      "_extend 1 4095957226",
+      "isArray 1 2561164555",
+      "toUSVString 1 4110052284",
+      "stripVTControlCharacters 1 408470721",
+      "styleText 1 2410168453",
+      "getSystemErrorName 1 3492535761",
+      "debuglog 1 1231086015",
+      "inspect.custom 2 2658837409",
+      "inspect.defaultOptions 2 3188036314",
+      "inspect 25 3569434369",
+      "inspect.colors/styles 1 3353156063",
+      "isDeepStrictEqual 1 3961245404",
+      "isPartialDeepStrictEqual 1 3536904300",
+      "parseArgs 9 134904136",
+      "MIMEType 4 1661135267",
+      "MIMEParams 1 3763910895",
+      "TextEncoder 1 1892808332",
+      "diff 1 3229962060",
+      "errors 1 198243991",
+      "aborted 1 1600073568",
+    ]
+}
+
+pub fn error_messages_show_values_as_node_does_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "const show = (f) => { try { f(); } catch (error) { out.push(error.message); } };
+      show(() => Buffer.alloc(-1));
+      show(() => Buffer.from({}));
+      show(() => new URL('/', { a: [1, { b: new Map() }] }));
+      show(() => new (require('events'))().emit('error', { why: new Set([1]) }));",
+    )
+  assert out_lines(rt)
+    == [
+      "The value of \"size\" is out of range. It must be >= 0 && <= 9007199254740991. Received -1",
+      "The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received an instance of Object",
+      "Invalid URL",
+      "Unhandled error. ({ why: Set(1) { 1 } })",
     ]
 }

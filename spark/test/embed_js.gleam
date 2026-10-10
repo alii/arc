@@ -7,6 +7,7 @@ import simplifile
 const names = [
   "bootstrap",
   "errors",
+  "internal",
   "async_hooks",
   "timers",
   "fs",
@@ -28,6 +29,7 @@ const names = [
   "url",
   "events",
   "string_decoder",
+  "util",
 ]
 
 const target = "src/spark/js.gleam"

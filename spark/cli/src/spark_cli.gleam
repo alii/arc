@@ -31,6 +31,7 @@ import spark/querystring
 import spark/string_decoder
 import spark/timers
 import spark/url
+import spark/util
 
 type CliError {
   Usage
@@ -82,6 +83,7 @@ fn builtins(
     url.builtin(),
     events.builtin(),
     string_decoder.builtin(),
+    util.builtin(),
   ]
 }
 

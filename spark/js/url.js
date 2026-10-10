@@ -55,7 +55,7 @@ const IteratorPrototype = Object.getPrototypeOf(
   Object.getPrototypeOf([][Symbol.iterator]()),
 );
 
-const inspect = Object.assign((value) => describe(value), {
+const inspect = Object.assign((value, options) => describe(value, options), {
   custom: Symbol.for("nodejs.util.inspect.custom"),
 });
 

@@ -1,6 +1,14 @@
 "use strict";
 
-const { inspect } = native;
+let realInspect;
+
+// node's util.inspect, loaded the first time a message needs it
+function inspect(value, options) {
+  realInspect ??= require("spark:internal").load(
+    "internal/util/inspect",
+  ).inspect;
+  return realInspect(value, options);
+}
 
 const classRegExp = /^[A-Z][a-zA-Z0-9]*$/;
 
@@ -123,7 +131,7 @@ function determineSpecificType(value) {
       if (value.constructor && "name" in value.constructor) {
         return `an instance of ${value.constructor.name}`;
       }
-      return `${inspect(value)}`;
+      return `${inspect(value, { depth: -1 })}`;
     case "string":
       value.length > 28 && (value = `${value.slice(0, 25)}...`);
       if (value.indexOf("'") === -1) {

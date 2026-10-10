@@ -19,6 +19,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import spark/builtin.{type Builtin, Builtin}
+import spark/inspect_natives
 import spark/io.{type Answer, type Failure, type Io, type ReplySlip}
 import spark/js
 
@@ -67,7 +68,7 @@ pub type Next {
 
 const runtime_specifier = "spark:runtime"
 
-const core_specifiers = ["spark:loop", "spark:errors"]
+const core_specifiers = ["spark:loop", "spark:errors", "spark:internal"]
 
 /// an engine with spark's own js compiled into it and none of it run
 ///
@@ -84,6 +85,7 @@ pub opaque type Compiled(host) {
 
 const shipped_sources = [
   js.errors,
+  js.internal,
   js.async_hooks,
   js.timers,
   js.fs,
@@ -105,6 +107,7 @@ const shipped_sources = [
   js.url,
   js.events,
   js.string_decoder,
+  js.util,
 ]
 
 /// compiles the js of every builtin spark ships; installs and runs nothing
@@ -175,6 +178,7 @@ pub fn start_compiled(
     register(rt, builtin, io, compiled.factories, hidden:)
   }
   use rt <- result.try(register(rt, errors_builtin(), True))
+  use rt <- result.try(register(rt, internal_builtin(), True))
   use rt <- result.try(
     list.try_fold(builtins, rt, fn(rt, builtin) { register(rt, builtin, False) }),
   )
@@ -186,16 +190,25 @@ fn errors_builtin() -> Builtin(host) {
   Builtin(
     specifier: "spark:errors",
     source: js.errors,
-    natives: fn(_io) {
-      [
-        host.HostMethod("inspect", 1, fn(ctx, args, _this) {
-          let text = rt_inspect.describe(ctx.agent, host.first_arg(args))
-          #(Ok(mk_string(text)), ctx)
-        }),
-      ]
-    },
-    dependencies: [],
+    natives: fn(_io) { [] },
+    dependencies: ["spark:internal"],
     optional: [],
+    exports: [],
+    globals: [],
+  )
+}
+
+// node's own internals (errors, validators, util, inspect) for the modules
+// ported from node; only builtins can require it, and it loads on first use
+fn internal_builtin() -> Builtin(host) {
+  Builtin(
+    specifier: "spark:internal",
+    source: js.internal,
+    natives: fn(_io) { inspect_natives.natives() },
+    dependencies: ["spark:loop"],
+    optional: [
+      "node:process", "node:buffer", "node:path", "node:url", "spark:dom_events",
+    ],
     exports: [],
     globals: [],
   )

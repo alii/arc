@@ -5,6 +5,7 @@ const {
   rangeError,
   invalidArgType,
   validateString,
+  inspect,
 } = require("spark:errors");
 
 const utf8Labels = new Set([
@@ -46,8 +47,37 @@ function invalidThis(type) {
   return typeError("ERR_INVALID_THIS", `Value of "this" must be of type ${type}`);
 }
 
+const kInspect = Symbol.for("nodejs.util.inspect.custom");
+
+function getConstructorOf(obj) {
+  while (obj) {
+    const descriptor = Object.getOwnPropertyDescriptor(obj, "constructor");
+    if (
+      descriptor !== undefined &&
+      typeof descriptor.value === "function" &&
+      descriptor.value.name !== ""
+    ) {
+      return descriptor.value;
+    }
+    obj = Object.getPrototypeOf(obj);
+  }
+  return null;
+}
+
 class TextEncoder {
   #encoding = "utf-8";
+
+  [kInspect](depth, opts) {
+    if (typeof depth === "number" && depth < 0) return this;
+    const ctor = getConstructorOf(this);
+    const obj = {
+      __proto__: {
+        constructor: ctor === null ? TextEncoder : ctor,
+      },
+    };
+    obj.encoding = this.#encoding;
+    return inspect(obj, opts);
+  }
 
   #encode(input) {
     return new Uint8Array(native.encode(`${input}`));
@@ -91,7 +121,11 @@ class TextEncoder {
 
 const empty = new Uint8Array(0);
 
+const kDecoder = Symbol("decoder");
+
 class TextDecoder {
+  // node marks its decoders this way, and inspect shows it
+  [kDecoder] = true;
   #fatal;
   #ignoreBOM;
   #bomSeen = false;
@@ -127,6 +161,17 @@ class TextDecoder {
   get fatal() {
     TextDecoder.#check(this);
     return this.#fatal;
+  }
+
+  [kInspect](depth) {
+    TextDecoder.#check(this);
+    if (typeof depth === "number" && depth < 0) return this;
+    const constructor = getConstructorOf(this) || TextDecoder;
+    const obj = { __proto__: { constructor } };
+    obj.encoding = this.encoding;
+    obj.fatal = this.fatal;
+    obj.ignoreBOM = this.ignoreBOM;
+    return `${constructor.name} ${inspect(obj)}`;
   }
 
   get ignoreBOM() {

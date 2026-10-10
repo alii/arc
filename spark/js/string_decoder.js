@@ -214,7 +214,7 @@ const shims = {
 };
 
 const files = {
-  "string_decoder": function (module, exports, require, process) {
+  "string_decoder": function (module, exports, require, process, primordials, internalBinding) {
     "use strict";
 
     const { Buffer } = require("buffer");
@@ -319,11 +319,20 @@ function load(name) {
     return made.exports;
   }
   if (!Object.hasOwn(files, name)) {
+    if (shims.fallback !== undefined) return shims.fallback(name);
     throw new Error("no module " + name + " in this port");
   }
   const made = { exports: {} };
   loaded.set(name, made);
-  files[name](made, made.exports, load, shims.process());
+  files[name](
+    made,
+    made.exports,
+    load,
+    shims.process(),
+    shims.primordials,
+    shims.internalBinding,
+  );
+  shims.afterLoad?.[name]?.(made.exports);
   return made.exports;
 }
 

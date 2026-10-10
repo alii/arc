@@ -62,7 +62,7 @@ const shims = {
     spliceOne,
   }),
   "internal/util/inspect": () => ({
-    inspect: (value) => errors.inspect(value),
+    inspect: (value, options) => errors.inspect(value, options),
     identicalSequenceRange,
   }),
   // without the dom events module there are no event targets to meet
@@ -86,7 +86,7 @@ const shims = {
 };
 
 const files = {
-  "events": function (module, exports, require, process) {
+  "events": function (module, exports, require, process, primordials, internalBinding) {
     "use strict";
 
     const kRejection = Symbol.for("nodejs.rejection");
@@ -1042,7 +1042,7 @@ const files = {
       };
     }
   },
-  "internal/events/abort_listener": function (module, exports, require, process) {
+  "internal/events/abort_listener": function (module, exports, require, process, primordials, internalBinding) {
     "use strict";
 
     const {
@@ -1105,7 +1105,7 @@ const files = {
       addAbortListener,
     };
   },
-  "internal/events/symbols": function (module, exports, require, process) {
+  "internal/events/symbols": function (module, exports, require, process, primordials, internalBinding) {
     "use strict";
 
     const kFirstEventParam = Symbol("kFirstEventParam");
@@ -1114,7 +1114,7 @@ const files = {
       kFirstEventParam,
     };
   },
-  "internal/fixed_queue": function (module, exports, require, process) {
+  "internal/fixed_queue": function (module, exports, require, process, primordials, internalBinding) {
     "use strict";
 
     const kSize = 2048;
@@ -1199,11 +1199,20 @@ function load(name) {
     return made.exports;
   }
   if (!Object.hasOwn(files, name)) {
+    if (shims.fallback !== undefined) return shims.fallback(name);
     throw new Error("no module " + name + " in this port");
   }
   const made = { exports: {} };
   loaded.set(name, made);
-  files[name](made, made.exports, load, shims.process());
+  files[name](
+    made,
+    made.exports,
+    load,
+    shims.process(),
+    shims.primordials,
+    shims.internalBinding,
+  );
+  shims.afterLoad?.[name]?.(made.exports);
   return made.exports;
 }
 
