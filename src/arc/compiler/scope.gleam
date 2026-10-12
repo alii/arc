@@ -83,6 +83,22 @@ pub type NameCapture {
   NameCapture(name: String, parent_slot: Int)
 }
 
+pub type FnForm {
+  FnDeclaration
+  FnExpression
+}
+
+/// where a function's text starts and what its parse took from the code
+/// around it, which is all that parsing it again alone needs
+pub type FnSource {
+  FnSource(start: Int, line: Int, form: FnForm, strict: Bool)
+}
+
+/// how the code around a function compiled alone hands it one captured name
+pub type CaptureSeed {
+  CaptureSeed(boxed: Bool, declared_kind: BindingKind)
+}
+
 pub type FunctionInfo {
   FunctionInfo(
     local_count: Int,
@@ -97,6 +113,8 @@ pub type FunctionInfo {
     annexb_candidates: List(String),
     is_arrow: Bool,
     is_derived_constructor: Bool,
+    // None when the function cannot be compiled alone
+    source: Option(FnSource),
   )
 }
 
@@ -133,6 +151,8 @@ pub type AnalyzeOpts {
     fallthrough: GlobalFallthrough,
     strict: Bool,
     parent_names: Dict(String, Int),
+    // a parent name not listed here is boxed, as a direct eval's caller's are
+    parent_seeds: Dict(String, CaptureSeed),
     lexical_captures: Dict(LexicalRef, Int),
     linker_seeded_exports: Set(String),
     // sloppy script root vars get real slots; measured slower, off by default
@@ -150,6 +170,7 @@ pub fn default_analyze_opts() -> AnalyzeOpts {
     fallthrough: ToGlobal,
     strict: False,
     parent_names: dict.new(),
+    parent_seeds: dict.new(),
     lexical_captures: dict.new(),
     linker_seeded_exports: set.new(),
     module_slot_globals: False,

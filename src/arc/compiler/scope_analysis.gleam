@@ -48,6 +48,7 @@ fn blank_function_info(
     annexb_candidates: [],
     is_arrow: raw.is_arrow,
     is_derived_constructor: raw.is_derived_constructor,
+    source: raw.source,
   )
 }
 
@@ -64,13 +65,11 @@ pub fn finalize(builder: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
     | ClassStaticBlock -> CaptureBinding
   }
   let parent_bindings =
-    dict.map_values(opts.parent_names, fn(_name, slot) {
-      Binding(
-        slot:,
-        kind: CaptureBinding,
-        boxed: True,
-        declared_kind: parent_declared_kind,
-      )
+    dict.map_values(opts.parent_names, fn(name, slot) {
+      let scope.CaptureSeed(boxed:, declared_kind:) =
+        dict.get(opts.parent_seeds, name)
+        |> result.unwrap(scope.CaptureSeed(True, parent_declared_kind))
+      Binding(slot:, kind: CaptureBinding, boxed:, declared_kind:)
     })
   // with_stack indexes parent_names so it adds no slots
   let root_base =
@@ -1413,7 +1412,8 @@ fn apply_boxing(
       let scope = scopes_get_or_panic(scopes, sid)
       let bindings =
         dict.map_values(scope.bindings, fn(name, b) {
-          case set.contains(vars_to_box, name) {
+          // a captured name stays held the way it arrived
+          case b.kind != CaptureBinding && set.contains(vars_to_box, name) {
             True -> Binding(..b, boxed: True)
             False -> b
           }

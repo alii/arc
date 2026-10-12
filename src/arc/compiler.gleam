@@ -26,6 +26,59 @@ import gleam/set.{type Set}
 pub type CompileError =
   emit.EmitError
 
+/// what the code around a function hands it when it is compiled alone
+pub type AloneContext {
+  AloneContext(
+    mode: parser.ParseMode,
+    source: scope.FnSource,
+    // the name the code around it gave it
+    name: Option(String),
+    // its captured names: each with the parent's slot and how it is held
+    captures: List(#(String, Int, scope.CaptureSeed)),
+  )
+}
+
+pub type AloneError {
+  AloneParseError(parser.ParseError)
+  AloneCompileError(CompileError)
+}
+
+/// compiles the one function that starts at `context.source` in `bytes`,
+/// giving the template the whole-unit compile gives for it
+pub fn compile_function_alone(
+  bytes: BitArray,
+  context: AloneContext,
+) -> Result(FuncTemplate, AloneError) {
+  let AloneContext(mode:, source:, name:, captures:) = context
+  use #(function, scopes) <- result.try(
+    parser.parse_function_at(bytes, mode, source)
+    |> result.map_error(AloneParseError),
+  )
+  let opts =
+    scope.AnalyzeOpts(
+      ..scope.default_analyze_opts(),
+      strict: source.strict,
+      parent_names: dict.from_list(
+        list.map(captures, fn(capture) { #(capture.0, capture.1) }),
+      ),
+      parent_seeds: dict.from_list(
+        list.map(captures, fn(capture) { #(capture.0, capture.2) }),
+      ),
+    )
+  let tree = scope_analysis.finalize(scopes, opts)
+  use #(child, tree) <- result.map(
+    emit.function_alone(
+      function,
+      tree,
+      source.form,
+      name,
+      strict: source.strict,
+    )
+    |> result.map_error(AloneCompileError),
+  )
+  compile_child(child, tree, scope.root_scope_id)
+}
+
 pub fn error_message(err: CompileError) -> String {
   case err {
     emit.BreakOutsideLoop -> "break outside loop"

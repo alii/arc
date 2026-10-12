@@ -311,61 +311,131 @@ fn init_parser(
   mode: ParseMode,
   cont: fn(Parser) -> Result(a, ParseError),
 ) -> Result(a, ParseError) {
-  let bytes = bit_array.from_string(source)
+  cont(parser_at(bit_array.from_string(source), mode, 0, 1))
+}
+
+// a parser whose first token is the one at pos, which is on this line
+fn parser_at(bytes: BitArray, mode: ParseMode, pos: Int, line: Int) -> Parser {
   let #(source_kind, code_kind) = case mode {
     Module -> #(lexer.ModuleSource, scope.Module)
     Script -> #(lexer.ScriptSource, scope.Script)
   }
-  cont(
-    ensure_current(Parser(
-      tokens: [],
-      scan: lexer.scanner_at(bytes, 0, 1, source_kind),
-      mode:,
-      prev_line: 1,
-      prev_end: 0,
-      bytes:,
-      ctx: GrammarContext(
-        strict: mode == Module,
-        allow_in: True,
-        function_depth: 0,
-        loop_depth: 0,
-        switch_depth: 0,
-        label_set: [],
-        in_generator: False,
-        in_async: False,
-        in_static_block: False,
-        in_class_field_init: False,
-        in_method: False,
-        allow_new_target: False,
-        allow_super_call: False,
-        allow_super_property: False,
-        declaring: NotDeclaring,
-        in_block: False,
-        module_top_level: False,
-        in_single_stmt_pos: False,
-        has_cover_initializer: False,
-        dup_proto_pos: None,
-        in_formal_params: False,
-        in_catch_param: False,
-        in_arrow_params: False,
-        has_non_simple_param: False,
-        param_bound_names: [],
-        pending_strict_name: None,
-        in_export_decl: False,
-        in_case_clause: False,
-      ),
-      class_body_depth: 0,
-      private_refs: [],
-      outer_private_names: [],
-      last_expr_assignable: False,
-      last_expr_is_assignment: False,
-      literal_invalid_as_pattern: False,
-      export_names: set.new(),
-      export_local_refs: [],
-      import_bindings: set.new(),
-      last_expr_name: None,
-      scopes: scope_builder.init(code_kind),
-    )),
+  ensure_current(Parser(
+    tokens: [],
+    scan: lexer.scanner_at(bytes, pos, line, source_kind),
+    mode:,
+    prev_line: line,
+    prev_end: pos,
+    bytes:,
+    ctx: GrammarContext(
+      strict: mode == Module,
+      allow_in: True,
+      function_depth: 0,
+      loop_depth: 0,
+      switch_depth: 0,
+      label_set: [],
+      in_generator: False,
+      in_async: False,
+      in_static_block: False,
+      in_class_field_init: False,
+      in_method: False,
+      allow_new_target: False,
+      allow_super_call: False,
+      allow_super_property: False,
+      declaring: NotDeclaring,
+      in_block: False,
+      module_top_level: False,
+      in_single_stmt_pos: False,
+      has_cover_initializer: False,
+      dup_proto_pos: None,
+      in_formal_params: False,
+      in_catch_param: False,
+      in_arrow_params: False,
+      has_non_simple_param: False,
+      param_bound_names: [],
+      pending_strict_name: None,
+      in_export_decl: False,
+      in_case_clause: False,
+    ),
+    class_body_depth: 0,
+    private_refs: [],
+    outer_private_names: [],
+    last_expr_assignable: False,
+    last_expr_is_assignment: False,
+    literal_invalid_as_pattern: False,
+    export_names: set.new(),
+    export_local_refs: [],
+    import_bindings: set.new(),
+    last_expr_name: None,
+    scopes: scope_builder.init(code_kind, bytes),
+  ))
+}
+
+/// one plain function parsed alone from where it starts in `bytes`, as the
+/// only thing under an empty root. A declaration's name is not declared in
+/// that root: around a function compiled alone, outer names are seeds
+pub fn parse_function_at(
+  bytes: BitArray,
+  mode: ParseMode,
+  source: scope.FnSource,
+) -> Result(#(ast.FunctionLiteral, scope_builder.ScopeBuilder), ParseError) {
+  let p = parser_at(bytes, mode, source.start, source.line)
+  let p =
+    Parser(
+      ..p,
+      ctx: GrammarContext(..p.ctx, strict: source.strict || mode == Module),
+    )
+  let is_async = peek(p) == Async
+  case source.form {
+    scope.FnDeclaration -> {
+      use #(p, function) <- result.map(parse_function_declaration(
+        p,
+        name_required: False,
+        is_async:,
+        declares_name: False,
+      ))
+      #(function, p.scopes)
+    }
+    scope.FnExpression -> {
+      use #(p, expression) <- result.map(parse_function_expression(p, is_async:))
+      let assert ast.FunctionExpression(
+        name:,
+        params:,
+        body:,
+        is_generator:,
+        is_async:,
+        ..,
+      ) = expression
+        as "parser: a function expression parsed as something else"
+      #(
+        ast.FunctionLiteral(name:, params:, body:, is_generator:, is_async:),
+        p.scopes,
+      )
+    }
+  }
+}
+
+// notes where a plain function starts so it can be parsed again alone. A
+// class body or a with block hands a function more than the note holds
+fn note_fn_source(inner: Parser, outer: Parser, form: scope.FnForm) -> Parser {
+  use <- bool.guard(
+    outer.class_body_depth > 0 || scope_builder.with_depth(outer.scopes) > 0,
+    inner,
+  )
+  let source =
+    scope.FnSource(
+      start: pos_of(outer),
+      line: line_of(outer),
+      form:,
+      strict: outer.ctx.strict,
+    )
+  Parser(
+    ..inner,
+    scopes: scope_builder.set_fn_source(
+      inner.scopes,
+      inner.scopes.current,
+      source,
+    ),
   )
 }
 
@@ -2353,6 +2423,7 @@ fn parse_function_statement(
     p,
     name_required: True,
     is_async:,
+    declares_name: True,
   ))
   #(p2, ast.declaration_to_statement(ast.DeclareFunction(function:)))
 }
@@ -2361,6 +2432,8 @@ fn parse_function_declaration(
   p: Parser,
   name_required name_required: Bool,
   is_async is_async: Bool,
+  // false when parsed alone, where the code around it is not there
+  declares_name declares_name: Bool,
 ) -> Result(#(Parser, ast.FunctionLiteral), ParseError) {
   use head <- result.try(parse_function_head(
     p,
@@ -2388,12 +2461,13 @@ fn parse_function_declaration(
       )
     False -> p_fn
   }
+  let p_fn = note_fn_source(p_fn, p, scope.FnDeclaration)
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(p_fn) |> restore_context_fn(p),
   )
-  use p6 <- result.map(case name {
-    None -> Ok(p5)
-    Some(name) ->
+  use p6 <- result.map(case name, declares_name {
+    None, _ | _, False -> Ok(p5)
+    Some(name), True ->
       register_function_name(
         p5,
         name,
@@ -5347,6 +5421,7 @@ fn parse_function_expression(
   let FunctionHead(after_name: p4, is_generator:, name:, ..) = head
   let p_inner =
     enter_function_context(p4, is_generator:, is_async:, strict_name: name)
+    |> note_fn_source(p, scope.FnExpression)
   let fn_scope = p_inner.scopes.current
   use #(p5, params, body) <- result.map(
     parse_function_params_and_body(p_inner) |> restore_context_fn(p),
@@ -5751,6 +5826,7 @@ fn parse_export_named_function(
     p2,
     name_required: True,
     is_async:,
+    declares_name: True,
   ))
   #(p3, ast.DeclareFunction(function:))
 }
@@ -5796,6 +5872,7 @@ fn parse_default_fn(
     p,
     name_required: False,
     is_async:,
+    declares_name: True,
   ))
   #(p2, DefaultFn(function:))
 }

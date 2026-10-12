@@ -219,6 +219,40 @@ pub fn eval_direct(
   emit_top_level_body(e, stmts, script_strict:, vars_to_global: !script_strict)
 }
 
+/// one plain function emitted as the only child of an otherwise empty root.
+/// `name` is the one the code around it gave it, which an anonymous function
+/// only has from there
+pub fn function_alone(
+  function: ast.FunctionLiteral,
+  tree: scope.ScopeTree,
+  form: scope.FnForm,
+  name: Option(String),
+  strict strict: Bool,
+) -> Result(#(CompiledChild, scope.ScopeTree), EmitError) {
+  let ast.FunctionLiteral(
+    name: written,
+    params:,
+    body:,
+    is_generator:,
+    is_async:,
+  ) = function
+  let shape = case form {
+    scope.FnDeclaration -> FnDecl(is_generator:, is_async:)
+    scope.FnExpression ->
+      FnExpr(self_name: ast.binding_name(written), is_generator:, is_async:)
+  }
+  let root = Emitter(..new_emitter(tree, root_scope_id), strict:)
+  use #(child, root) <- result.map(compile_function_body(
+    root,
+    name,
+    params,
+    StmtsBody(body),
+    shape:,
+  ))
+  // emitting takes scratch slots, which the tree counts
+  #(child, root.scope_tree)
+}
+
 pub fn module(
   items: List(ast.ModuleItem),
   tree: scope.ScopeTree,

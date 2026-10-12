@@ -3,10 +3,10 @@ import arc/bytecode/lexical.{
   ThisRef,
 }
 import arc/compiler/scope.{
-  type BindingKind, type ScopeId, type ScopeKind, Block, CaptureBinding, Catch,
-  ClassBody, ClassStaticBlock, ConstBinding, FnNameBinding, Function, LetBinding,
-  Module, ParamBinding, Script, VarBinding, With, is_function_kind, param_shim,
-  root_scope_id, with_object_name,
+  type BindingKind, type FnSource, type ScopeId, type ScopeKind, Block,
+  CaptureBinding, Catch, ClassBody, ClassStaticBlock, ConstBinding,
+  FnNameBinding, Function, LetBinding, Module, ParamBinding, Script, VarBinding,
+  With, is_function_kind, param_shim, root_scope_id, with_object_name,
 }
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -51,6 +51,7 @@ pub type RawFunctionInfo {
     is_arrow: Bool,
     is_derived_constructor: Bool,
     annexb_candidates: List(#(ScopeId, String)),
+    source: Option(FnSource),
   )
 }
 
@@ -58,6 +59,7 @@ const blank_raw_fn_info = RawFunctionInfo(
   is_arrow: False,
   is_derived_constructor: False,
   annexb_candidates: [],
+  source: None,
 )
 
 fn new_raw_scope(
@@ -113,10 +115,12 @@ pub type ScopeBuilder {
     try_scopes: List(ScopeId),
     try_assign_refs: List(TryAssignRef),
     own_lexical_refs: Dict(ScopeId, LexicalRefs),
+    // the text every offset in here points into
+    source: BitArray,
   )
 }
 
-pub fn init(root_kind: ScopeKind) -> ScopeBuilder {
+pub fn init(root_kind: ScopeKind, source: BitArray) -> ScopeBuilder {
   let root =
     new_raw_scope(
       root_scope_id,
@@ -138,6 +142,23 @@ pub fn init(root_kind: ScopeKind) -> ScopeBuilder {
     try_scopes: [],
     try_assign_refs: [],
     own_lexical_refs: dict.new(),
+    source:,
+  )
+}
+
+pub fn set_fn_source(
+  sb: ScopeBuilder,
+  fn_id: ScopeId,
+  source: FnSource,
+) -> ScopeBuilder {
+  let info = fn_info_at(sb, fn_id)
+  ScopeBuilder(
+    ..sb,
+    functions: dict.insert(
+      sb.functions,
+      fn_id,
+      RawFunctionInfo(..info, source: Some(source)),
+    ),
   )
 }
 
@@ -761,7 +782,7 @@ pub fn nearest_catch_params(sb: ScopeBuilder) -> List(String) {
   }
 }
 
-fn with_depth(sb: ScopeBuilder) -> Int {
+pub fn with_depth(sb: ScopeBuilder) -> Int {
   use _id, scope, acc <- fold_up(
     sb,
     from: sb.current,
