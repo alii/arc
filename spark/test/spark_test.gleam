@@ -3193,3 +3193,54 @@ pub fn stream_modules_share_one_stream_test() {
     ))
   assert out_lines(rt) == ["true", "ERR_METHOD_NOT_IMPLEMENTED", "ab"]
 }
+
+const process_emitter_script = "
+const process = require(\"process\");
+const EventEmitter = require(\"events\");
+const lines = [];
+const call = (f) => { try { const v = f(); return typeof v === \"string\" ? v : JSON.stringify(v) ?? String(v); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+const proto = Object.getPrototypeOf(process);
+t(\"is an emitter\", () => [process instanceof EventEmitter, Object.getPrototypeOf(proto) === EventEmitter.prototype, proto.constructor.name, typeof proto.constructor, Object.getOwnPropertyNames(proto)]);
+t(\"tag\", () => [Object.prototype.toString.call(process), Object.getOwnPropertyDescriptor(process, Symbol.toStringTag)]);
+t(\"emitter state\", () => [typeof process._events, Object.getPrototypeOf(process._events), typeof process._eventsCount, process._maxListeners === undefined, [\"_events\", \"_eventsCount\", \"_maxListeners\"].map((k) => Object.keys(process).includes(k))]);
+t(\"methods come from EventEmitter\", () => [\"on\", \"once\", \"off\", \"emit\", \"addListener\", \"removeListener\", \"removeAllListeners\", \"listeners\", \"rawListeners\", \"listenerCount\", \"eventNames\", \"prependListener\", \"prependOnceListener\", \"setMaxListeners\", \"getMaxListeners\"].map((m) => process[m] === EventEmitter.prototype[m] && !Object.hasOwn(process, m)));
+t(\"on, emit, off\", () => { const seen = []; const f = (a, b) => seen.push(\"f\" + a + b); process.on(\"spark-test\", f); process.once(\"spark-test\", (a) => seen.push(\"once\" + a)); const first = process.emit(\"spark-test\", 1, 2); const second = process.emit(\"spark-test\", 3, 4); process.off(\"spark-test\", f); return [first, second, process.emit(\"spark-test\"), seen, process.listenerCount(\"spark-test\")]; });
+t(\"returns process\", () => { const f = () => {}; const r = [process.on(\"x-ret\", f) === process, process.off(\"x-ret\", f) === process, process.setMaxListeners(process.getMaxListeners()) === process]; return r; });
+t(\"this in a listener\", () => { let same; process.once(\"x-this\", function () { same = this === process; }); process.emit(\"x-this\"); return same; });
+t(\"bad listener\", () => process.on(\"x-bad\", 5));
+t(\"getMaxListeners\", () => process.getMaxListeners());
+t(\"names of the test's own events are gone\", () => process.eventNames().filter((n) => String(n).startsWith(\"x-\") || n === \"spark-test\"));
+t(\"events helpers accept it\", () => { const f = () => {}; process.on(\"x-helper\", f); const r = [EventEmitter.getEventListeners(process, \"x-helper\").length, EventEmitter.listenerCount(process, \"x-helper\")]; process.off(\"x-helper\", f); return r; });
+t(\"error event with no listener throws\", () => process.emit(\"error\", new Error(\"boom\")));
+const later = [];
+later.push(EventEmitter.once(process, \"x-later\").then((args) => \"once resolved \" + JSON.stringify(args)));
+process.emit(\"x-later\", \"a\", 1);
+later.push(new Promise((resolve) => { process.once(\"x-tick\", (v) => resolve(\"emitted from a tick \" + v)); process.nextTick(() => process.emit(\"x-tick\", 7)); }));
+Promise.all(later).then((settled) => { for (const l of settled) lines.push(l); for (const l of lines) globalThis.out.push(l); });
+
+"
+
+// process is an EventEmitter the way node's is: by its prototype's
+// prototype, under a prototype named process. Each line is what node
+// 26.11.1 printed
+pub fn process_is_an_event_emitter_test() {
+  let rt = run_to_end(run_commonjs(node_runtime(), process_emitter_script))
+  assert out_lines(rt)
+    == [
+      "is an emitter [true,true,\"process\",\"function\",[\"constructor\"]]",
+      "tag [\"[object process]\",{\"value\":\"process\",\"writable\":true,\"enumerable\":false,\"configurable\":false}]",
+      "emitter state [\"object\",null,\"number\",true,[true,true,true]]",
+      "methods come from EventEmitter [true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]",
+      "on, emit, off [true,true,false,[\"f12\",\"once1\",\"f34\"],0]",
+      "returns process [true,true,true]",
+      "this in a listener true",
+      "bad listener threw TypeError ERR_INVALID_ARG_TYPE The \"listener\" argument must be of type function. Received type number (5)",
+      "getMaxListeners 10",
+      "names of the test's own events are gone []",
+      "events helpers accept it [1,1]",
+      "error event with no listener throws threw Error undefined boom",
+      "once resolved [\"a\",1]",
+      "emitted from a tick 7",
+    ]
+}

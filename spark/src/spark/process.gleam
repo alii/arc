@@ -27,7 +27,9 @@ pub type Process {
 
 /// node:process, so far: env, argv, cwd, platform, arch, pid, version,
 /// versions, uptime (from the engine's clock hook), nextTick, and
-/// stdout/stderr with write, which asks through the Write want
+/// stdout/stderr with write, which asks through the Write want. It is an
+/// EventEmitter as node's is, so the events module must be passed with it;
+/// nothing here emits an event of its own yet
 pub fn builtin(process: Process) -> Builtin(host) {
   Builtin(
     specifier: "node:process",
@@ -63,11 +65,12 @@ pub fn builtin(process: Process) -> Builtin(host) {
         ..async_hooks.context_natives()
       ]
     },
-    dependencies: ["spark:errors", "spark:loop"],
+    dependencies: ["spark:errors", "spark:loop", "node:events"],
     optional: [],
     exports: [
       "env", "argv", "platform", "arch", "pid", "version", "versions", "cwd",
-      "uptime", "nextTick", "stdout", "stderr",
+      "uptime", "nextTick", "stdout", "stderr", "_events", "_eventsCount",
+      "_maxListeners",
     ],
     globals: [],
   )

@@ -8398,6 +8398,7 @@ pub const process = "\"use strict\";
 const { facts, write, now, getContext, setContext } = native;
 const { invalidArgType, systemError, validateFunction } = require(\"spark:errors\");
 const loop = require(\"spark:loop\");
+const EventEmitter = require(\"node:events\");
 
 const given = facts();
 const startedAt = now();
@@ -8448,7 +8449,12 @@ function stream(fd, isTTY) {
   return out;
 }
 
-module.exports = {
+// node's process is an EventEmitter two steps up: its own prototype is an
+// object named process, and that one's prototype is EventEmitter's
+function process() {}
+Object.setPrototypeOf(process.prototype, EventEmitter.prototype);
+
+module.exports = Object.assign(Object.create(process.prototype), {
   env: given.env,
   argv: given.argv,
   platform: given.platform,
@@ -8466,7 +8472,15 @@ module.exports = {
   nextTick,
   stdout: stream(1, given.stdoutIsTTY),
   stderr: stream(2, given.stderrIsTTY),
-};
+});
+
+EventEmitter.call(module.exports);
+Object.defineProperty(module.exports, Symbol.toStringTag, {
+  enumerable: false,
+  writable: true,
+  configurable: false,
+  value: \"process\",
+});
 "
 
 pub const os = "\"use strict\";
