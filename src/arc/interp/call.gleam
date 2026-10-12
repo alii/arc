@@ -386,7 +386,7 @@ pub fn call_cell(
       }
     }
     // §10.4.1.1 bound call
-    SObject(kind: BoundFn(target:, bound_this:, bound_args:), ..) ->
+    SObject(kind: BoundFn(target:, bound_this:, bound_args:, ..), ..) ->
       call(
         state,
         mk_object(target),

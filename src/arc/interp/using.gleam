@@ -40,7 +40,15 @@ pub fn using_disposer(
 
 // built directly so the method's length/name are never read
 fn bound_disposer(st: Agent, method: Handle, val: JsVal) -> #(JsVal, Agent) {
-  let kind = types.BoundFn(target: method, bound_this: val, bound_args: [])
+  let kind =
+    types.BoundFn(
+      target: method,
+      bound_this: val,
+      bound_args: [],
+      length: types.mk_int(0),
+      target_name: "",
+      birth: types.BirthSettled,
+    )
   let proto = Some(st.realm.function.prototype)
   let #(h, st) =
     rt_store.cell_new(st, types.plain_object(kind, proto, dict.new()))

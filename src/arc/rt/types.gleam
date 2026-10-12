@@ -1734,7 +1734,16 @@ pub type ObjKind {
     birth: FnBirth,
   )
   NativeFn(token: NativeToken, name: String, length: Int, constructible: Bool)
-  BoundFn(target: Handle, bound_this: JsVal, bound_args: List(JsVal))
+  // length and the target's name are fixed when bound; they turn into props
+  // the first time something needs them there
+  BoundFn(
+    target: Handle,
+    bound_this: JsVal,
+    bound_args: List(JsVal),
+    length: JsVal,
+    target_name: String,
+    birth: FnBirth,
+  )
   HostObj(payload: HostTerm)
   ErrorObj(stack: String)
   MapObj(entries: OrderedEntries(MapKey, JsVal))

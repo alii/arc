@@ -10,8 +10,8 @@ import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsElements, type JsVal, type ObjKind,
   type ObjectKey, type ParsedDesc, type Property, type ShapeSlots, type SymbolId,
   type TypedArrayKind, AccessorProperty, Agent, ArgumentsObj, ArrayObj,
-  BirthPending, BirthSettled, BytecodeFn, CompiledFn, DataProperty, Dense,
-  KHandle, KNull, KTdz, KUndef, ModuleNamespace, NoElements, Ordinary,
+  BirthPending, BirthSettled, BoundFn, BytecodeFn, CompiledFn, DataProperty,
+  Dense, KHandle, KNull, KTdz, KUndef, ModuleNamespace, NoElements, Ordinary,
   ParsedDesc, ProxyObj, SAsyncContext, SAsyncGen, SBox, SDisposeCapability,
   SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, Store, StringKey,
   StringObj, SymbolKey, TypedArrayObj,
@@ -272,6 +272,10 @@ fn own_property_of(
       Some(birth_prop(types.mk_int(length), 0))
     CompiledFn(name:, birth: BirthPending(_), ..), Named("name") ->
       Some(birth_prop(types.mk_string(name), 1))
+    BoundFn(length:, birth: BirthPending(_), ..), Named("length") ->
+      Some(birth_prop(length, 0))
+    BoundFn(target_name:, birth: BirthPending(_), ..), Named("name") ->
+      Some(birth_prop(types.mk_string("bound " <> target_name), 1))
     _, _ -> dict.get(props, key) |> option.from_result
   }
 }
@@ -483,21 +487,25 @@ pub fn constructor_props(f: Handle) -> Dict(PropertyKey, Property) {
 }
 
 type PendingBirth {
-  PendingBirth(length: Int, name: String, prototype_parent: Option(Handle))
+  PendingBirth(length: JsVal, name: String, prototype_parent: Option(Handle))
 }
 
 fn pending_birth(cell: Cell) -> Option(PendingBirth) {
   case cell {
     SObject(kind: BytecodeFn(template:, birth: BirthPending(parent), ..), ..) ->
       Some(PendingBirth(
-        template.length,
+        types.mk_int(template.length),
         option.unwrap(template.name, ""),
         parent,
       ))
     SObject(
       kind: CompiledFn(length:, name:, birth: BirthPending(parent), ..),
       ..,
-    ) -> Some(PendingBirth(length, name, parent))
+    ) -> Some(PendingBirth(types.mk_int(length), name, parent))
+    SObject(
+      kind: BoundFn(length:, target_name:, birth: BirthPending(parent), ..),
+      ..,
+    ) -> Some(PendingBirth(length, "bound " <> target_name, parent))
     _ -> None
   }
 }
@@ -522,7 +530,7 @@ fn settle_birth(
   let assert SObject(kind:, props:, ..) = cell
   let props =
     props
-    |> dict.insert(Named("length"), birth_prop(types.mk_int(length), 0))
+    |> dict.insert(Named("length"), birth_prop(length, 0))
     |> dict.insert(Named("name"), birth_prop(types.mk_string(name), 1))
   let #(props, st) = case parent {
     None -> #(props, st)
@@ -553,6 +561,7 @@ fn settle_birth(
   let kind = case kind {
     BytecodeFn(..) -> BytecodeFn(..kind, birth: BirthSettled)
     CompiledFn(..) -> CompiledFn(..kind, birth: BirthSettled)
+    BoundFn(..) -> BoundFn(..kind, birth: BirthSettled)
     _ -> kind
   }
   rt_store.cell_set(st, f, SObject(..cell, kind:, props:))

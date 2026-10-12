@@ -145,6 +145,7 @@
 -define(NATIVEFN_SIZE, 5).
 
 -define(BOUNDFN_TAG, bound_fn).
+-define(BOUNDFN_BIRTH, 7).
 
 -define(ARRAYOBJ_TAG, array_obj).
 -define(ARRAYOBJ_LENGTH, 2).
@@ -353,6 +354,8 @@
                          birth_plain(element(?BYTECODEFN_BIRTH, Kind), K);
                      ?COMPILEDFN_TAG ->
                          birth_plain(element(?COMPILEDFN_BIRTH, Kind), K);
+                     ?BOUNDFN_TAG ->
+                         birth_plain(element(?BOUNDFN_BIRTH, Kind), K);
                      _ -> true
                  end
          end)).

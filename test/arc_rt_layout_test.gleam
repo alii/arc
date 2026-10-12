@@ -358,8 +358,17 @@ pub fn sobject_test() {
   assert tag_of(wrapper) == tag("STRINGOBJ_TAG")
   assert at(wrapper, "STRINGOBJ_VALUE") == dyn("s")
   assert dyn(GlobalObj) == tag("GLOBALOBJ")
-  assert tag_of(BoundFn(target: proto, bound_this: vx, bound_args: []))
-    == tag("BOUNDFN_TAG")
+  let bound =
+    BoundFn(
+      target: proto,
+      bound_this: vx,
+      bound_args: [],
+      length: vx,
+      target_name: "f",
+      birth: types.BirthSettled,
+    )
+  assert tag_of(bound) == tag("BOUNDFN_TAG")
+  assert at(bound, "BOUNDFN_BIRTH") == tag("BIRTH_SETTLED")
   let view =
     TypedArrayObj(
       buffer: proto,

@@ -141,7 +141,7 @@ fn call_cell(
       use st <- bracketed(st)
       try_call_native(st, token, this, args)
     }
-    SObject(kind: BoundFn(target:, bound_this:, bound_args:), ..) ->
+    SObject(kind: BoundFn(target:, bound_this:, bound_args:, ..), ..) ->
       try_call(st, mk_object(target), bound_this, list.append(bound_args, args))
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..) -> {
       use st <- bracketed(st)
@@ -945,15 +945,19 @@ pub fn bound_new(
   }
   let #(target_name, st) =
     rt_obj.get_prop(st, target_v, StringKey(Named("name")))
-  let bound_name = case classify(target_name) {
-    KStr(s) -> "bound " <> s
-    _ -> "bound "
+  let target_name = case classify(target_name) {
+    KStr(s) -> s
+    _ -> ""
   }
-  alloc_fn_cell(
-    st,
-    Some(st.realm.function.prototype),
-    BoundFn(target:, bound_this:, bound_args:),
-    length_v,
-    bound_name,
-  )
+  let kind =
+    BoundFn(
+      target:,
+      bound_this:,
+      bound_args:,
+      length: length_v,
+      target_name:,
+      birth: BirthPending(None),
+    )
+  let proto = Some(st.realm.function.prototype)
+  rt_store.cell_new(st, types.plain_object(kind, proto, dict.new()))
 }

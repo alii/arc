@@ -238,7 +238,7 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     }
     NativeFn(token:, name: _, length: _, constructible: _) ->
       push_refs(token, acc)
-    BoundFn(target:, bound_this:, bound_args:) -> {
+    BoundFn(target:, bound_this:, bound_args:, ..) -> {
       let acc = push_refs(bound_this, [target.id, ..acc])
       list.fold(bound_args, acc, fn(a, v) { push_refs(v, a) })
     }
