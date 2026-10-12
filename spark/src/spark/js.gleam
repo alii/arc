@@ -1170,32 +1170,52 @@ const uvErrors = new Map([
   [-4095, [\"EOF\", \"end of file\"]],
 ]);
 
-// what each other port holds, newest first, so a name asked for here can be
-// found in the port that holds it
-const loaders = [];
+// what each other port holds, so a name asked for here can be found in the
+// port that holds it: its files, and its stand-ins for modules it has no file
+// for. A file anywhere is taken before a stand-in, and this port's own
+// answer before another port's stand-in
+const fileLoaders = [];
+const standInLoaders = [];
 
-function addLoader(loader) {
-  loaders.push(loader);
+function addLoader(files, standIns) {
+  fileLoaders.push(files);
+  standInLoaders.push(standIns);
 }
 
-// a port may answer a name by asking here again (its stand-in for a module
-// another port holds); it is not asked twice for the one name
+function missing(error) {
+  return String(error?.message).startsWith(\"no module \");
+}
+
+// a port may answer a name by asking here again; it is not asked twice for
+// the one name
 const asking = new Set();
 
 function loadAnywhere(id) {
-  for (let i = loaders.length - 1; i >= 0; i--) {
+  for (let i = fileLoaders.length - 1; i >= 0; i--) {
+    try {
+      return fileLoaders[i](id);
+    } catch (error) {
+      if (!missing(error)) throw error;
+    }
+  }
+  try {
+    return own(id);
+  } catch (error) {
+    if (!missing(error)) throw error;
+  }
+  for (let i = standInLoaders.length - 1; i >= 0; i--) {
     const key = `${i}:${id}`;
     if (asking.has(key)) continue;
     asking.add(key);
     try {
-      return loaders[i](id);
+      return standInLoaders[i](id);
     } catch (error) {
-      if (!String(error?.message).startsWith(\"no module \")) throw error;
+      if (!missing(error)) throw error;
     } finally {
       asking.delete(key);
     }
   }
-  return own(id);
+  throw new Error(\"no module \" + id + \" in any port\");
 }
 
 function internalBinding(name) {
@@ -7909,6 +7929,15 @@ function own(name) {
   );
   shims.afterLoad?.[name]?.(made.exports);
   return made.exports;
+}
+
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
 }
 
 // what the files here call require: this file's own modules first, then
@@ -20527,6 +20556,15 @@ function own(name) {
   return made.exports;
 }
 
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
+}
+
 // what the files here call require: this file's own modules first, then
 // wherever else the name can be found
 function load(name) {
@@ -20881,6 +20919,15 @@ function own(name) {
   return made.exports;
 }
 
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
+}
+
 // what the files here call require: this file's own modules first, then
 // wherever else the name can be found
 function load(name) {
@@ -20914,7 +20961,7 @@ function optional(specifier) {
   }
 }
 
-internal.addLoader(own);
+internal.addLoader(shared, own);
 
 function missing(what) {
   return () => {
@@ -24227,6 +24274,15 @@ function own(name) {
   return made.exports;
 }
 
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
+}
+
 // what the files here call require: this file's own modules first, then
 // wherever else the name can be found
 function load(name) {
@@ -24260,7 +24316,7 @@ function optional(specifier) {
   }
 }
 
-internal.addLoader(own);
+internal.addLoader(shared, own);
 
 class Bytes {
   #parts;
@@ -31063,6 +31119,15 @@ function own(name) {
   return made.exports;
 }
 
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
+}
+
 // what the files here call require: this file's own modules first, then
 // wherever else the name can be found
 function load(name) {
@@ -31408,7 +31473,7 @@ const internal = require(\"spark:internal\");
 const loop = require(\"spark:loop\");
 const { Buffer } = require(\"node:buffer\");
 
-internal.addLoader(own);
+internal.addLoader(shared, own);
 
 const constants = internal.internalBinding(\"constants\").zlib;
 
@@ -32854,6 +32919,15 @@ function own(name) {
   return made.exports;
 }
 
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
+}
+
 // what the files here call require: this file's own modules first, then
 // wherever else the name can be found
 function load(name) {
@@ -32967,7 +33041,7 @@ function optional(specifier) {
   }
 }
 
-internal.addLoader(own);
+internal.addLoader(shared, own);
 
 function notHere(what) {
   const { codes } = internal.load(\"internal/errors\");
@@ -41419,6 +41493,15 @@ function own(name) {
   return made.exports;
 }
 
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
+}
+
 // what the files here call require: this file's own modules first, then
 // wherever else the name can be found
 function load(name) {
@@ -41445,7 +41528,7 @@ const internal = require(\"spark:internal\");
 // the web streams hold the webidl helpers these files use
 require(\"node:stream/web\");
 
-internal.addLoader(own);
+internal.addLoader(shared, own);
 
 function notHere(what) {
   const { codes } = internal.load(\"internal/errors\");
@@ -42313,6 +42396,15 @@ function own(name) {
   );
   shims.afterLoad?.[name]?.(made.exports);
   return made.exports;
+}
+
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
 }
 
 // what the files here call require: this file's own modules first, then
@@ -43988,7 +44080,7 @@ const loop = require(\"spark:loop\");
 const { Buffer } = require(\"node:buffer\");
 const { DOMException } = require(\"spark:domexception\");
 
-internal.addLoader(own);
+internal.addLoader(shared, own);
 
 function notHere(what) {
   const { codes } = internal.load(\"internal/errors\");
@@ -46697,6 +46789,15 @@ function own(name) {
   );
   shims.afterLoad?.[name]?.(made.exports);
   return made.exports;
+}
+
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error(\"no module \" + name + \" in this port\");
+  }
+  return own(name);
 }
 
 // what the files here call require: this file's own modules first, then

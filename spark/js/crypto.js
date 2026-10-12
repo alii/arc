@@ -8,7 +8,7 @@ const loop = require("spark:loop");
 const { Buffer } = require("node:buffer");
 const { DOMException } = require("spark:domexception");
 
-internal.addLoader(own);
+internal.addLoader(shared, own);
 
 function notHere(what) {
   const { codes } = internal.load("internal/errors");
@@ -2717,6 +2717,15 @@ function own(name) {
   );
   shims.afterLoad?.[name]?.(made.exports);
   return made.exports;
+}
+
+// what the other ports may have from here: the files, and not the stand-ins,
+// which are this port's own answers to its own questions
+function shared(name) {
+  if (!Object.hasOwn(files, name)) {
+    throw new Error("no module " + name + " in this port");
+  }
+  return own(name);
 }
 
 // what the files here call require: this file's own modules first, then
