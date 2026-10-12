@@ -3386,6 +3386,17 @@ pub fn for_in_of_head_functions_keep_their_scopes_test() -> Nil {
   )
 }
 
+pub fn computed_method_key_function_keeps_its_scope_test() -> Nil {
+  assert_normal(
+    "(function () {
+       var a = 'A', b = 'B';
+       var o = { [(function () { return a; })()]() { return b; } };
+       return o.A();
+     })()",
+    KStr("B"),
+  )
+}
+
 pub fn function_bind_name_test() -> Nil {
   assert_normal(
     "function foo() {} var b = foo.bind(null); b.name",

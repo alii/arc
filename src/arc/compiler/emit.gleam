@@ -4132,16 +4132,26 @@ fn emit_computed_init_property(
   emit_op(e, opcode.DefineFieldComputed)
 }
 
-// closure first so MakeMethod sees [obj, fn], then key, then swap
+// closure first so MakeMethod sees [obj, fn], then key, then swap. The key is
+// written first, so its scopes come first: it is emitted first and its code
+// placed after the closure's
 fn emit_computed_method_property(
   e: Emitter,
   emit_key: fn(Emitter) -> Result(Emitter, EmitError),
   value: ast.FunctionLiteral,
 ) -> Result(Emitter, EmitError) {
-  use e <- result.try(emit_method_value(e, value, None))
+  let before_key = e.code
+  use e <- result.try(emit_key(Emitter(..e, code: [])))
+  let key_code = e.code
+  use e <- result.map(emit_method_value(
+    Emitter(..e, code: before_key),
+    value,
+    None,
+  ))
   let e = emit_op(e, opcode.MakeMethod)
-  use e <- result.map(emit_key(e))
-  e |> emit_op(opcode.Swap) |> emit_op(opcode.DefineFieldComputed)
+  Emitter(..e, code: list.append(key_code, e.code))
+  |> emit_op(opcode.Swap)
+  |> emit_op(opcode.DefineFieldComputed)
 }
 
 fn emit_array_no_spread(
