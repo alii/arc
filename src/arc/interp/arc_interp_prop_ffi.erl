@@ -337,6 +337,10 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V)
 define_field(_, _, _, _) -> miss.
 
 %% keys given last first, values on top of stack
+new_object(Store, Proto, [], 0, Stack) when tuple_size(Store) =:= ?STORE_SIZE ->
+    Cell = {?SSHAPEDOBJECT_TAG, ?PLAIN_EMPTY_SHAPE, {?SOME, Proto}, {}, #{}},
+    Id = element(?STORE_NEXT_ID, Store),
+    {{?HANDLE_TAG, Id}, Stack, ?ALLOC_CELL(Store, element(?STORE_CELLS, Store), Id, Cell)};
 new_object(Store, Proto, Keys, N, Stack) when tuple_size(Store) =:= ?STORE_SIZE ->
     Seq = element(?STORE_PROP_SEQ, Store),
     {Props, Stack2} = literal_props(Keys, Stack, Seq),
@@ -428,13 +432,38 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
             put_prop(Store, Cells, Id, Cell, {?KEY_INDEX, Idx}, V, true);
         _ -> miss
     end;
-put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when ?IS_STR(Key) ->
+put_elem(Store, {?HANDLE_TAG, Id} = Obj, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V, true);
+        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
+            case put_field(Store, Obj, K, V, true) of
+                miss -> put_first_key(Store, Id, K, V);
+                Store1 -> Store1
+            end;
         {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} -> put_elem(Store, Obj, Idx, V);
         _ -> miss
     end;
 put_elem(_, _, _, _) -> miss.
+
+%% an empty `{}` given its first name through a computed key is a dictionary
+put_first_key(Store, Id, K, V) when tuple_size(Store) =:= ?STORE_SIZE ->
+    Cells = element(?STORE_CELLS, Store),
+    case arc_rt_arena_ffi:get(Id, Cells) of
+        {?SSHAPEDOBJECT_TAG, ?PLAIN_EMPTY_SHAPE, Proto, {}, _} ->
+            case chain_takes_write(Store, Cells, Proto, K) of
+                false -> miss;
+                true -> put_first_prop(Store, Cells, Id, Proto, K, V);
+                {true, Store1} -> put_first_prop(Store1, Cells, Id, Proto, K, V)
+            end;
+        _ -> miss
+    end.
+
+put_first_prop(Store, Cells, Id, Proto, K, V) when tuple_size(Store) =:= ?STORE_SIZE ->
+    Seq = element(?STORE_PROP_SEQ, Store),
+    Cell = {?SOBJECT_TAG, ?ORDINARY, Proto, #{K => ?PLAIN_PROPERTY(V, Seq)}, [],
+            ?ELEMS_NONE, true},
+    setelement(?STORE_PROP_SEQ,
+               setelement(?STORE_CELLS, Store, arc_rt_arena_ffi:set(Id, Cell, Cells)),
+               Seq + 1).
 
 %% a hole is a missing property, so the protos get a say
 fill_hole(Store, Cells, Id, Cell, Proto, Elems, Idx, V) ->

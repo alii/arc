@@ -6457,6 +6457,11 @@ fn put_elem_step(
   case classify(receiver) {
     KHandle(_) -> {
       use #(pk, state) <- result.try(guarded2(state, rt_val.to_property_key, k))
+      let state =
+        State(
+          ..state,
+          agent: rt_obj.devolve_dictionary(state.agent, receiver, pk),
+        )
       use #(ok, state) <- result.try(guarded4(
         state,
         rt_obj.set_prop,

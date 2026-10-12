@@ -162,6 +162,25 @@ pub fn devolve(st: Agent, h: Handle) -> Agent {
   }
 }
 
+// a plain object given a new name through a computed key is a dictionary:
+// it leaves its shape so each new key does not mint another one
+pub fn devolve_dictionary(st: Agent, receiver: JsVal, key: ObjectKey) -> Agent {
+  case types.classify(receiver), key {
+    types.KHandle(h), StringKey(Named(name)) ->
+      case rt_store.cell_get(st, h) {
+        SShapedObject(proto: Some(proto), offsets:, ..) as s
+          if proto == st.realm.object.prototype
+        ->
+          case dict.has_key(offsets, bit_array.from_string(name)) {
+            True -> st
+            False -> rt_store.cell_set(st, h, as_sobject(s))
+          }
+        _ -> st
+      }
+    _, _ -> st
+  }
+}
+
 // props dict wins over dense elements, check it first
 fn own_property_of(
   st: Agent,

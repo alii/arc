@@ -95,6 +95,8 @@
 %% proto sits at the same position in both object cells
 -define(CELL_PROTO, ?SOBJECT_PROTO).
 
+%% the shape an empty `{}` is born on; `new` receivers are born on 0
+-define(PLAIN_EMPTY_SHAPE, 1).
 %% ShapeDesc and the shape slots tuple
 -define(SHAPE_TAG, shape_desc).
 -define(SHAPE_SLOT_COUNT, 2).

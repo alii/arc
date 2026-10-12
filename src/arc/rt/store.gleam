@@ -18,10 +18,12 @@ pub fn new() -> Store {
     gc_threshold: 4096,
     // past the constant birth seqs
     prop_seq: 3,
+    // 0 is where `new` receivers start, 1 where `{}` starts
     shapes: dict.from_list([
       #(0, types.ShapeDesc(0, dict.new(), dict.new())),
+      #(1, types.ShapeDesc(0, dict.new(), dict.new())),
     ]),
-    next_shape: 1,
+    next_shape: 2,
     ics: dict.new(),
     plain_write_protos: dict.new(),
     global_epoch: 0,
