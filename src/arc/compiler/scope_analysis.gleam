@@ -346,100 +346,6 @@ fn annexb_blocked_by(raw: RawScope, name: String) -> Bool {
   }
 }
 
-fn resolve_raw_refs(
-  tree: ScopeTree,
-  builder: ScopeBuilder,
-) -> Set(#(ScopeId, String)) {
-  let #(_seen, captured) = {
-    use #(seen, captured) as acc, ref <- list.fold(builder.raw_refs, #(
-      set.new(),
-      set.new(),
-    ))
-    let seen_before = set.size(seen)
-    let seen = set.insert(seen, ref)
-    use <- bool.guard(set.size(seen) == seen_before, acc)
-    // ref.scope may be a pruned tombstone; start from a live ancestor
-    let assert Ok(raw) = dict.get(builder.scopes, ref.scope)
-      as "scope_analysis.resolve_raw_refs: dangling raw_ref"
-    let ref_fn = raw.function_scope
-    case declaring_scope(tree, builder, ref.scope, ref.name) {
-      Some(decl) if decl.function_scope == ref_fn -> #(seen, captured)
-      Some(_) | None -> #(seen, set.insert(captured, #(ref_fn, ref.name)))
-    }
-  }
-  captured
-}
-
-fn resolve_assign_refs(
-  tree: ScopeTree,
-  builder: ScopeBuilder,
-) -> Dict(ScopeId, Dict(String, ScopeId)) {
-  use acc, ref <- list.fold(builder.assign_refs, dict.new())
-  case declaring_scope(tree, builder, ref.scope, ref.name) {
-    None -> acc
-    Some(decl) ->
-      dict.upsert(acc, decl.function_scope, fn(prev) {
-        option.unwrap(prev, dict.new())
-        |> dict.upsert(ref.name, fn(last) {
-          int.max(ref.order_stamp, option.unwrap(last, 0))
-        })
-      })
-  }
-}
-
-fn resolve_try_assign_refs(
-  tree: ScopeTree,
-  builder: ScopeBuilder,
-) -> Dict(ScopeId, Set(String)) {
-  use acc, ref <- list.fold(builder.try_assign_refs, dict.new())
-  case
-    declaring_scope(tree, builder, ref.scope, ref.name),
-    declaring_scope(tree, builder, ref.try_scope, ref.name)
-  {
-    Some(decl), Some(outer) if decl.id == outer.id ->
-      dict.upsert(acc, decl.function_scope, fn(prev) {
-        option.unwrap(prev, set.new()) |> set.insert(ref.name)
-      })
-    _, _ -> acc
-  }
-}
-
-fn resolve_arguments_refs(
-  tree: ScopeTree,
-  builder: ScopeBuilder,
-) -> Set(ScopeId) {
-  use acc, ref <- list.fold(builder.raw_refs, set.new())
-  use <- bool.guard(ref.name != "arguments", acc)
-  case declaring_scope(tree, builder, ref.scope, ref.name) {
-    Some(decl) -> set.insert(acc, decl.function_scope)
-    None -> acc
-  }
-}
-
-// from may be a raw scope pruned before finalize
-fn declaring_scope(
-  tree: ScopeTree,
-  builder: ScopeBuilder,
-  from: ScopeId,
-  name: String,
-) -> Option(Scope) {
-  nearest_finalized(tree, builder, from)
-  |> option.then(find_declaring_scope(tree, _, name))
-}
-
-fn find_declaring_scope(
-  tree: ScopeTree,
-  scope_id: ScopeId,
-  name: String,
-) -> Option(Scope) {
-  let scope = get(tree, scope_id)
-  case dict.has_key(scope.bindings, name), scope.parent {
-    True, _ -> Some(scope)
-    False, Some(parent) -> find_declaring_scope(tree, parent, name)
-    False, None -> None
-  }
-}
-
 fn nearest_finalized(
   tree: ScopeTree,
   builder: ScopeBuilder,
@@ -450,6 +356,276 @@ fn nearest_finalized(
     Ok(RawScope(parent: Some(parent_id), ..)) ->
       nearest_finalized(tree, builder, parent_id)
     Ok(RawScope(parent: None, ..)) | Error(Nil) -> None
+  }
+}
+
+// the scope of fn_id that declares name, looking outward from scope_id and
+// never past the function's own root
+fn declared_within(
+  tree: ScopeTree,
+  scope_id: ScopeId,
+  name: String,
+  fn_id: ScopeId,
+) -> Option(Scope) {
+  let scope = get(tree, scope_id)
+  use <- bool.guard(scope.function_scope != fn_id, None)
+  case dict.has_key(scope.bindings, name), scope.parent {
+    True, _ -> Some(scope)
+    False, Some(parent) -> declared_within(tree, parent, name, fn_id)
+    False, None -> None
+  }
+}
+
+type OwnReads {
+  OwnReads(
+    // per function, the names it reads itself and does not declare
+    free: Dict(ScopeId, Set(String)),
+    // functions that read an `arguments` they declare themselves
+    arguments: Set(ScopeId),
+  )
+}
+
+// each read is settled inside the function it is written in: either that
+// function declares the name or it is free there
+fn resolve_own_reads(tree: ScopeTree, builder: ScopeBuilder) -> OwnReads {
+  let #(_seen, reads) = {
+    use #(seen, reads) as acc, ref <- list.fold(builder.raw_refs, #(
+      set.new(),
+      OwnReads(free: dict.new(), arguments: set.new()),
+    ))
+    let seen_before = set.size(seen)
+    let seen = set.insert(seen, ref)
+    use <- bool.guard(set.size(seen) == seen_before, acc)
+    // ref.scope may be a pruned tombstone; start from a live ancestor
+    let assert Ok(raw) = dict.get(builder.scopes, ref.scope)
+      as "scope_analysis.resolve_own_reads: dangling raw_ref"
+    let ref_fn = raw.function_scope
+    let declared =
+      nearest_finalized(tree, builder, ref.scope)
+      |> option.then(declared_within(tree, _, ref.name, ref_fn))
+    let reads = case declared, ref.name {
+      Some(_), "arguments" ->
+        OwnReads(..reads, arguments: set.insert(reads.arguments, ref_fn))
+      Some(_), _ -> reads
+      None, _ ->
+        OwnReads(
+          ..reads,
+          free: dict.upsert(reads.free, ref_fn, fn(prev) {
+            option.unwrap(prev, set.new()) |> set.insert(ref.name)
+          }),
+        )
+    }
+    #(seen, reads)
+  }
+  reads
+}
+
+// where the try block of a guarded write is, seen from one function
+type TrySide {
+  TryHere(ScopeId)
+  // in a function further out
+  TryAbove(ScopeId)
+  // in a function further in, so the write and its try look outward alike
+  TryBelow
+}
+
+// what a function, with everything inside it, writes that it does not declare
+type Outward {
+  Outward(
+    // the latest order stamp of each name
+    writes: Dict(String, ScopeId),
+    try_writes: List(#(String, TrySide)),
+  )
+}
+
+type WriteFacts {
+  WriteFacts(
+    assigned: Dict(ScopeId, Dict(String, ScopeId)),
+    try_assigned: Dict(ScopeId, Set(String)),
+    refs_arguments: Set(ScopeId),
+    outward: Dict(ScopeId, Outward),
+  )
+}
+
+// a write, and the live scope the search for its name starts from
+type OwnWrite(ref) {
+  OwnWrite(start: ScopeId, ref: ref)
+}
+
+// writes filed under the function they are written in
+fn writes_by_function(
+  tree: ScopeTree,
+  builder: ScopeBuilder,
+  refs: List(ref),
+  scope_of: fn(ref) -> ScopeId,
+) -> Dict(ScopeId, List(OwnWrite(ref))) {
+  use by_fn, ref <- list.fold(refs, dict.new())
+  case nearest_finalized(tree, builder, scope_of(ref)) {
+    None -> by_fn
+    Some(start) -> {
+      use prev <- dict.upsert(by_fn, get(tree, start).function_scope)
+      [OwnWrite(start:, ref:), ..option.unwrap(prev, [])]
+    }
+  }
+}
+
+// children first: a function settles the writes whose name it declares and
+// passes the rest outward, exactly as its own writes
+fn collect_write_facts(
+  tree: ScopeTree,
+  builder: ScopeBuilder,
+  subtree_by_fn: Dict(ScopeId, SubtreeFacts),
+  own_arguments: Set(ScopeId),
+  writes_by_fn: Dict(ScopeId, List(OwnWrite(scope_builder.AssignRef))),
+  try_writes_by_fn: Dict(ScopeId, List(OwnWrite(scope_builder.TryAssignRef))),
+  fn_id: ScopeId,
+  acc: WriteFacts,
+) -> WriteFacts {
+  let children = child_function_scopes(tree, fn_id)
+  let acc =
+    list.fold(children, acc, fn(acc, child_id) {
+      collect_write_facts(
+        tree,
+        builder,
+        subtree_by_fn,
+        own_arguments,
+        writes_by_fn,
+        try_writes_by_fn,
+        child_id,
+        acc,
+      )
+    })
+  let outward_of = fn(child_id) {
+    dict.get(acc.outward, child_id)
+    |> result.unwrap(Outward(writes: dict.new(), try_writes: []))
+  }
+
+  let writes = {
+    use filed, OwnWrite(start:, ref:) <- list.fold(
+      dict.get(writes_by_fn, fn_id) |> result.unwrap([]),
+      #(dict.new(), dict.new()),
+    )
+    file_write(tree, fn_id, start, ref.name, ref.order_stamp, filed)
+  }
+  let #(assigned_here, writes_out) = {
+    use filed, child_id <- list.fold(children, writes)
+    case get(tree, child_id).parent {
+      None -> filed
+      Some(site) -> {
+        use filed, name, stamp <- dict.fold(outward_of(child_id).writes, filed)
+        file_write(tree, fn_id, site, name, stamp, filed)
+      }
+    }
+  }
+
+  let try_side = fn(try_scope) {
+    case dict.get(builder.scopes, try_scope) {
+      Ok(raw) if raw.function_scope == fn_id -> TryHere(try_scope)
+      Ok(_) | Error(Nil) -> TryAbove(try_scope)
+    }
+  }
+  let try_writes = {
+    use filed, OwnWrite(start:, ref:) <- list.fold(
+      dict.get(try_writes_by_fn, fn_id) |> result.unwrap([]),
+      #(set.new(), []),
+    )
+    let side = try_side(ref.try_scope)
+    file_try_write(tree, builder, fn_id, start, ref.name, side, filed)
+  }
+  let #(try_assigned_here, try_writes_out) = {
+    use filed, child_id <- list.fold(children, try_writes)
+    case get(tree, child_id).parent {
+      None -> filed
+      Some(site) -> {
+        use filed, #(name, side) <- list.fold(
+          outward_of(child_id).try_writes,
+          filed,
+        )
+        let side = case side {
+          TryAbove(try_scope) -> try_side(try_scope)
+          TryHere(_) | TryBelow -> TryBelow
+        }
+        file_try_write(tree, builder, fn_id, site, name, side, filed)
+      }
+    }
+  }
+
+  let reads_arguments =
+    set.contains(own_arguments, fn_id)
+    || list.any(children, fn(child_id) {
+      let free = subtree_facts(subtree_by_fn, child_id).transitive_free
+      case set.contains(free, "arguments"), get(tree, child_id).parent {
+        True, Some(site) ->
+          option.is_some(declared_within(tree, site, "arguments", fn_id))
+        _, _ -> False
+      }
+    })
+
+  WriteFacts(
+    assigned: case dict.is_empty(assigned_here) {
+      True -> acc.assigned
+      False -> dict.insert(acc.assigned, fn_id, assigned_here)
+    },
+    try_assigned: case set.is_empty(try_assigned_here) {
+      True -> acc.try_assigned
+      False -> dict.insert(acc.try_assigned, fn_id, try_assigned_here)
+    },
+    refs_arguments: case reads_arguments {
+      True -> set.insert(acc.refs_arguments, fn_id)
+      False -> acc.refs_arguments
+    },
+    outward: dict.insert(
+      acc.outward,
+      fn_id,
+      Outward(writes: writes_out, try_writes: try_writes_out),
+    ),
+  )
+}
+
+// filed is #(names this function declares, names it passes outward), each
+// with the latest order stamp
+fn file_write(
+  tree: ScopeTree,
+  fn_id: ScopeId,
+  start: ScopeId,
+  name: String,
+  stamp: ScopeId,
+  filed: #(Dict(String, ScopeId), Dict(String, ScopeId)),
+) -> #(Dict(String, ScopeId), Dict(String, ScopeId)) {
+  let #(here, out) = filed
+  let latest = fn(prev) { int.max(stamp, option.unwrap(prev, 0)) }
+  case declared_within(tree, start, name, fn_id) {
+    Some(_) -> #(dict.upsert(here, name, latest), out)
+    None -> #(here, dict.upsert(out, name, latest))
+  }
+}
+
+// a guarded write counts when the name's declaration is outside the try: the
+// same scope answers for the write and for the try block
+fn file_try_write(
+  tree: ScopeTree,
+  builder: ScopeBuilder,
+  fn_id: ScopeId,
+  start: ScopeId,
+  name: String,
+  side: TrySide,
+  filed: #(Set(String), List(#(String, TrySide))),
+) -> #(Set(String), List(#(String, TrySide))) {
+  let #(here, out) = filed
+  case declared_within(tree, start, name, fn_id), side {
+    Some(_), TryBelow -> #(set.insert(here, name), out)
+    Some(decl), TryHere(try_scope) -> {
+      let outer =
+        nearest_finalized(tree, builder, try_scope)
+        |> option.then(declared_within(tree, _, name, fn_id))
+      case outer {
+        Some(outer) if outer.id == decl.id -> #(set.insert(here, name), out)
+        Some(_) | None -> filed
+      }
+    }
+    Some(_), TryAbove(_) -> filed
+    None, TryAbove(_) -> #(here, [#(name, side), ..out])
+    None, TryHere(_) | None, TryBelow -> #(here, [#(name, TryBelow), ..out])
   }
 }
 
@@ -531,11 +707,11 @@ fn analyze_captures(
   builder: ScopeBuilder,
   box_try_writes box_try_writes: Bool,
 ) -> ScopeTree {
-  let captured = resolve_raw_refs(tree, builder)
+  let reads = resolve_own_reads(tree, builder)
   let own_by_fn =
     collect_own_facts(
       tree,
-      free_names_by_fn(captured),
+      reads.free,
       builder.own_lexical_refs,
       root_scope_id,
       dict.new(),
@@ -549,18 +725,38 @@ fn analyze_captures(
       root_scope_id,
       dict.new(),
     )
-  let try_assigned = case box_try_writes {
-    True -> resolve_try_assign_refs(tree, builder)
-    False -> dict.new()
-  }
+  let writes =
+    collect_write_facts(
+      tree,
+      builder,
+      subtree_by_fn,
+      reads.arguments,
+      writes_by_function(tree, builder, builder.assign_refs, fn(ref) {
+        ref.scope
+      }),
+      case box_try_writes {
+        True ->
+          writes_by_function(tree, builder, builder.try_assign_refs, fn(ref) {
+            ref.scope
+          })
+        False -> dict.new()
+      },
+      root_scope_id,
+      WriteFacts(
+        assigned: dict.new(),
+        try_assigned: dict.new(),
+        refs_arguments: set.new(),
+        outward: dict.new(),
+      ),
+    )
   let analysis =
     CaptureAnalysis(
       own_by_fn:,
       subtree_by_fn:,
       scopes_by_fn:,
-      assigned: resolve_assign_refs(tree, builder),
-      try_assigned:,
-      refs_arguments: resolve_arguments_refs(tree, builder),
+      assigned: writes.assigned,
+      try_assigned: writes.try_assigned,
+      refs_arguments: writes.refs_arguments,
       fn_decls: fn_decl_scopes(builder),
     )
   let root_parent =
@@ -598,14 +794,6 @@ fn fn_member_scopes(
   fn_id: ScopeId,
 ) -> List(ScopeId) {
   dict.get(scopes_by_fn, fn_id) |> result.unwrap([])
-}
-
-fn free_names_by_fn(
-  captured: Set(#(ScopeId, String)),
-) -> Dict(ScopeId, Set(String)) {
-  use d, #(ref_fn, name) <- set.fold(captured, dict.new())
-  use prev <- dict.upsert(d, ref_fn)
-  option.unwrap(prev, set.new()) |> set.insert(name)
 }
 
 fn collect_own_facts(
