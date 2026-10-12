@@ -1,6 +1,7 @@
 -module(spark_cli_ffi).
 -export([access/2, realpath/1, write/2, env/0, cwd/0, platform/0, arch/0, pid/0, is_tty/1]).
 -export([stat/2, readlink/1, readdir/1, read_file/1]).
+-export([user/0, certificates/0, terminals/0]).
 -export([os_release/0, os_version/0, machine/0, hostname/0,
          homedir/0, tmpdir/0, little_endian/0, parallelism/0]).
 
@@ -157,6 +158,41 @@ uname(Flag) ->
 hostname() ->
     {ok, Name} = inet:gethostname(),
     unicode:characters_to_binary(Name).
+
+%% erlang cannot ask who it runs as, so: the owner of the home directory, and
+%% the names the shell left in the environment
+user() ->
+    Home = case os:getenv("HOME") of false -> "/"; H -> H end,
+    {Uid, Gid} = case file:read_file_info(Home) of
+        {ok, #file_info{uid = U, gid = G}} -> {U, G};
+        {error, _} -> {0, 0}
+    end,
+    Name = case os:getenv("USER") of false -> ""; N -> N end,
+    Shell = case os:getenv("SHELL") of
+        false -> none;
+        S -> {some, unicode:characters_to_binary(S)}
+    end,
+    {user, Uid, Gid, unicode:characters_to_binary(Name), Shell}.
+
+%% the machine's trusted roots as PEM texts; none if they cannot be read
+certificates() ->
+    try public_key:cacerts_get() of
+        Certs -> [pem(Der) || {cert, Der, _} <- Certs]
+    catch
+        _:_ -> []
+    end.
+
+pem(Der) ->
+    Lines = lines(base64:encode(Der)),
+    iolist_to_binary(["-----BEGIN CERTIFICATE-----\n", Lines,
+                      "-----END CERTIFICATE-----"]).
+
+lines(<<Line:64/binary, Rest/binary>>) -> [Line, $\n | lines(Rest)];
+lines(<<>>) -> [];
+lines(Last) -> [Last, $\n].
+
+terminals() ->
+    [Fd || {Fd, Stream} <- [{1, stdout}, {2, stderr}], is_tty(Stream)].
 
 homedir() ->
     case os:getenv("HOME") of

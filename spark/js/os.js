@@ -291,6 +291,26 @@ function fact(value) {
   return read;
 }
 
+// with the encoding "buffer" the texts come as Buffers, which needs the
+// buffer module to have been passed
+function userInfo(options) {
+  if (typeof options !== "object") options = null;
+  const user = {
+    uid: given.uid,
+    gid: given.gid,
+    username: given.username,
+    homedir: given.homedir,
+    shell: given.shell,
+  };
+  if (options?.encoding === "buffer") {
+    const { Buffer } = require("node:buffer");
+    for (const key of ["username", "homedir", "shell"]) {
+      if (user[key] !== null) user[key] = Buffer.from(user[key]);
+    }
+  }
+  return user;
+}
+
 module.exports = {
   arch: fact(given.arch),
   availableParallelism: fact(given.parallelism),
@@ -300,6 +320,7 @@ module.exports = {
   platform: fact(given.platform),
   release: fact(given.release),
   tmpdir: fact(given.tmpdir),
+  userInfo,
   type: fact(given.platform === "darwin" ? "Darwin" : "Linux"),
   version: fact(given.version),
   machine: fact(given.machine),

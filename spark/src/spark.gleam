@@ -113,6 +113,9 @@ const shipped_sources = [
   js.stream_consumers,
   js.structured_clone,
   js.zlib,
+  js.util_types,
+  js.tty,
+  js.tls,
 ]
 
 /// compiles the js of every builtin spark ships; installs and runs nothing

@@ -9506,6 +9506,26 @@ function fact(value) {
   return read;
 }
 
+// with the encoding \"buffer\" the texts come as Buffers, which needs the
+// buffer module to have been passed
+function userInfo(options) {
+  if (typeof options !== \"object\") options = null;
+  const user = {
+    uid: given.uid,
+    gid: given.gid,
+    username: given.username,
+    homedir: given.homedir,
+    shell: given.shell,
+  };
+  if (options?.encoding === \"buffer\") {
+    const { Buffer } = require(\"node:buffer\");
+    for (const key of [\"username\", \"homedir\", \"shell\"]) {
+      if (user[key] !== null) user[key] = Buffer.from(user[key]);
+    }
+  }
+  return user;
+}
+
 module.exports = {
   arch: fact(given.arch),
   availableParallelism: fact(given.parallelism),
@@ -9515,6 +9535,7 @@ module.exports = {
   platform: fact(given.platform),
   release: fact(given.release),
   tmpdir: fact(given.tmpdir),
+  userInfo,
   type: fact(given.platform === \"darwin\" ? \"Darwin\" : \"Linux\"),
   version: fact(given.version),
   machine: fact(given.machine),
@@ -32736,4 +32757,84 @@ function load(name) {
 }
 
 module.exports = load(\"zlib\");
+"
+
+pub const util_types = "\"use strict\";
+
+module.exports = require(\"node:util\").types;
+"
+
+pub const tty = "\"use strict\";
+
+const { codes } = require(\"spark:errors\");
+
+const terminals = native.terminals();
+
+function isatty(fd) {
+  return Number.isInteger(fd) && fd >= 0 && fd <= 2147483647 && terminals.includes(fd);
+}
+
+// a terminal read from or written to as a stream; nothing here can open one
+function ReadStream() {
+  throw new codes.ERR_METHOD_NOT_IMPLEMENTED(\"tty.ReadStream\");
+}
+
+function WriteStream() {
+  throw new codes.ERR_METHOD_NOT_IMPLEMENTED(\"tty.WriteStream\");
+}
+
+module.exports = { isatty, ReadStream, WriteStream };
+"
+
+pub const tls = "\"use strict\";
+
+const { codes, invalidArgValue, validateString } = require(\"spark:errors\");
+
+const given = native.certificates();
+const bundled = Object.freeze(given.bundled);
+const system = Object.freeze(given.system);
+const extra = Object.freeze(given.extra);
+// what a connection trusts when it names no certificates of its own
+const byDefault = Object.freeze([...given.bundled, ...given.extra]);
+
+function getCACertificates(type = \"default\") {
+  validateString(type, \"type\");
+  switch (type) {
+    case \"default\":
+      return byDefault;
+    case \"bundled\":
+      return bundled;
+    case \"system\":
+      return system;
+    case \"extra\":
+      return extra;
+    default:
+      throw invalidArgValue(\"type\", type);
+  }
+}
+
+// connections are not here yet; each of these says so when called
+function missing(name) {
+  return function () {
+    throw new codes.ERR_METHOD_NOT_IMPLEMENTED(`tls.${name}`);
+  };
+}
+
+module.exports = {
+  CLIENT_RENEG_LIMIT: 3,
+  CLIENT_RENEG_WINDOW: 600,
+  DEFAULT_ECDH_CURVE: \"auto\",
+  DEFAULT_MIN_VERSION: \"TLSv1.2\",
+  DEFAULT_MAX_VERSION: \"TLSv1.3\",
+  rootCertificates: bundled,
+  getCACertificates,
+  setDefaultCACertificates: missing(\"setDefaultCACertificates\"),
+  checkServerIdentity: missing(\"checkServerIdentity\"),
+  createSecureContext: missing(\"createSecureContext\"),
+  SecureContext: missing(\"SecureContext\"),
+  TLSSocket: missing(\"TLSSocket\"),
+  Server: missing(\"Server\"),
+  createServer: missing(\"createServer\"),
+  connect: missing(\"connect\"),
+};
 "

@@ -22,7 +22,7 @@ import spark/io.{
   Access, Io, ReadFile, Readdir, Readlink, Realpath, Stat, Stderr, Stdout, Write,
 } as _
 import spark/net
-import spark/os.{type Os, BigEndian, LittleEndian, Os}
+import spark/os.{type Os, type User, BigEndian, LittleEndian, Os}
 import spark/path
 import spark/perf_hooks
 import spark/platform.{type Platform}
@@ -32,6 +32,8 @@ import spark/stream
 import spark/string_decoder
 import spark/structured_clone
 import spark/timers
+import spark/tls.{Certificates}
+import spark/tty
 import spark/url
 import spark/util
 import spark/zlib
@@ -92,6 +94,12 @@ fn builtins(
     stream.consumers_builtin(),
     structured_clone.builtin(),
     zlib.builtin(),
+    util.types_builtin(),
+    tty.builtin(terminals()),
+    // the cli has no roots of its own to ship, so the machine's stand for both
+    tls.builtin(
+      Certificates(bundled: certificates(), system: certificates(), extra: []),
+    ),
   ]
 }
 
@@ -116,6 +124,15 @@ fn tmpdir() -> String
 @external(erlang, "spark_cli_ffi", "little_endian")
 fn little_endian() -> Bool
 
+@external(erlang, "spark_cli_ffi", "user")
+fn user() -> User
+
+@external(erlang, "spark_cli_ffi", "certificates")
+fn certificates() -> List(String)
+
+@external(erlang, "spark_cli_ffi", "terminals")
+fn terminals() -> List(Int)
+
 @external(erlang, "spark_cli_ffi", "parallelism")
 fn parallelism() -> Int
 
@@ -134,6 +151,7 @@ fn this_os(platform: Platform) -> Os {
       False -> BigEndian
     },
     parallelism: parallelism(),
+    user: user(),
   )
 }
 

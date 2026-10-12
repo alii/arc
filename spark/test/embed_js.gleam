@@ -35,6 +35,9 @@ const names = [
   "stream_consumers",
   "structured_clone",
   "zlib",
+  "util_types",
+  "tty",
+  "tls",
 ]
 
 const target = "src/spark/js.gleam"

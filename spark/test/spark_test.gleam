@@ -27,7 +27,7 @@ import spark/io.{
   Write,
 }
 import spark/net
-import spark/os.{BigEndian, Os}
+import spark/os.{BigEndian, Os, User}
 import spark/path
 import spark/perf_hooks
 import spark/platform.{type Platform, Darwin, Linux}
@@ -37,6 +37,8 @@ import spark/stream
 import spark/string_decoder
 import spark/structured_clone
 import spark/timers
+import spark/tls.{Certificates}
+import spark/tty
 import spark/url
 import spark/util
 import spark/zlib
@@ -84,6 +86,21 @@ fn builtins() -> List(Builtin(Nil)) {
     stream.consumers_builtin(),
     structured_clone.builtin(),
     zlib.builtin(),
+    util.types_builtin(),
+    tty.builtin([1]),
+    tls.builtin(
+      Certificates(
+        bundled: [
+          "-----BEGIN CERTIFICATE-----\nbundled one\n-----END CERTIFICATE-----",
+        ],
+        system: [
+          "-----BEGIN CERTIFICATE-----\nsystem one\n-----END CERTIFICATE-----",
+        ],
+        extra: [
+          "-----BEGIN CERTIFICATE-----\nextra one\n-----END CERTIFICATE-----",
+        ],
+      ),
+    ),
   ]
 }
 
@@ -99,6 +116,12 @@ fn made_up_os(platform: Platform) -> os.Os {
     tmpdir: "/tmp/made-up",
     endianness: BigEndian,
     parallelism: 3,
+    user: User(
+      uid: 1001,
+      gid: 100,
+      username: "glenda",
+      shell: option.Some("/bin/rc"),
+    ),
   )
 }
 
@@ -3915,4 +3938,78 @@ pub fn brotli_says_it_is_not_here_test() {
     )
   assert out_lines(rt)
     == ["ERR_METHOD_NOT_IMPLEMENTED", "ERR_METHOD_NOT_IMPLEMENTED"]
+}
+
+pub fn the_user_comes_from_the_embedder_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "const os = require('os');
+      out.push(JSON.stringify(os.userInfo()));
+      const bytes = os.userInfo({ encoding: 'buffer' });
+      out.push([Buffer.isBuffer(bytes.username), bytes.shell.toString(), bytes.uid].join());
+      out.push(typeof os.userInfo(5).uid);",
+    )
+  assert out_lines(rt)
+    == [
+      "{\"uid\":1001,\"gid\":100,\"username\":\"glenda\",\"homedir\":\"/usr/glenda\",\"shell\":\"/bin/rc\"}",
+      "true,/bin/rc,1001",
+      "number",
+    ]
+}
+
+pub fn a_terminal_is_one_the_embedder_named_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "const tty = require('tty');
+      out.push([0, 1, 2, -1, 1.5, '1', undefined].map((fd) => tty.isatty(fd)).join());
+      try { new tty.WriteStream(1); } catch (error) { out.push(error.code); }
+      out.push(Object.keys(tty).join());",
+    )
+  assert out_lines(rt)
+    == [
+      "false,true,false,false,false,false,false",
+      "ERR_METHOD_NOT_IMPLEMENTED",
+      "isatty,ReadStream,WriteStream",
+    ]
+}
+
+pub fn certificates_come_from_the_embedder_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "const tls = require('tls');
+      const names = (list) => list.map((pem) => pem.split('\\n')[1]).join();
+      out.push(names(tls.rootCertificates));
+      for (const type of [undefined, 'default', 'bundled', 'system', 'extra']) out.push(String(type) + ': ' + names(tls.getCACertificates(type)));
+      out.push([Object.isFrozen(tls.rootCertificates), tls.getCACertificates('bundled') === tls.rootCertificates, tls.getCACertificates() === tls.getCACertificates('default')].join());
+      for (const bad of ['nope', 5]) { try { tls.getCACertificates(bad); } catch (error) { out.push(error.code + ' ' + error.message); } }
+      try { tls.connect(443, 'example.test'); } catch (error) { out.push(error.code); }
+      out.push([tls.DEFAULT_MIN_VERSION, tls.DEFAULT_MAX_VERSION, tls.DEFAULT_ECDH_CURVE, tls.CLIENT_RENEG_LIMIT, tls.CLIENT_RENEG_WINDOW].join());",
+    )
+  assert out_lines(rt)
+    == [
+      "bundled one",
+      "undefined: bundled one,extra one",
+      "default: bundled one,extra one",
+      "bundled: bundled one",
+      "system: system one",
+      "extra: extra one",
+      "true,true,true",
+      "ERR_INVALID_ARG_VALUE The argument 'type' is invalid. Received 'nope'",
+      "ERR_INVALID_ARG_TYPE The \"type\" argument must be of type string. Received type number (5)",
+      "ERR_METHOD_NOT_IMPLEMENTED",
+      "TLSv1.2,TLSv1.3,auto,3,600",
+    ]
+}
+
+pub fn util_types_is_the_types_of_util_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "out.push(String(require('util/types') === require('util').types));
+      out.push(String(require('node:util/types').isPromise(Promise.resolve())));",
+    )
+  assert out_lines(rt) == ["true", "true"]
 }

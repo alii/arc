@@ -1,5 +1,6 @@
 import arc/host.{HostMethod}
-import arc/rt/types.{mk_int, mk_string}
+import arc/rt/types.{mk_int, mk_null, mk_string}
+import gleam/option.{type Option, None, Some}
 import spark/builtin.{type Builtin, Builtin}
 import spark/js
 import spark/platform.{type Platform}
@@ -19,7 +20,14 @@ pub type Os {
     endianness: Endianness,
     /// what `os.availableParallelism()` reports
     parallelism: Int,
+    /// who `os.userInfo()` says is running the script
+    user: User,
   )
+}
+
+pub type User {
+  /// `shell` is None where there is none to name, as on windows
+  User(uid: Int, gid: Int, username: String, shell: Option(String))
 }
 
 pub type Endianness {
@@ -28,8 +36,8 @@ pub type Endianness {
 }
 
 /// node:os, so far: arch, platform, type, release, version, machine,
-/// hostname, homedir, tmpdir, endianness, availableParallelism, constants,
-/// EOL, devNull
+/// hostname, homedir, tmpdir, endianness, availableParallelism, userInfo,
+/// constants, EOL, devNull
 pub fn builtin(os: Os) -> Builtin(host) {
   Builtin(
     specifier: "node:os",
@@ -55,17 +63,24 @@ pub fn builtin(os: Os) -> Builtin(host) {
                 }),
               ),
               #("parallelism", mk_int(os.parallelism)),
+              #("uid", mk_int(os.user.uid)),
+              #("gid", mk_int(os.user.gid)),
+              #("username", mk_string(os.user.username)),
+              #("shell", case os.user.shell {
+                Some(shell) -> mk_string(shell)
+                None -> mk_null()
+              }),
             ])
           #(Ok(facts), ctx)
         }),
       ]
     },
     dependencies: [],
-    optional: [],
+    optional: ["node:buffer"],
     exports: [
       "arch", "availableParallelism", "endianness", "homedir", "hostname",
-      "platform", "release", "tmpdir", "type", "version", "machine", "constants",
-      "EOL", "devNull",
+      "platform", "release", "tmpdir", "type", "userInfo", "version", "machine",
+      "constants", "EOL", "devNull",
     ],
     globals: [],
   )
