@@ -43,6 +43,7 @@ pub fn new() -> Store {
       minors_since_major: 0,
       plain_index_protos: dict.new(),
       async_context_mapping: types.mk_undefined(),
+      lazy_code: dict.new(),
     ),
   )
 }

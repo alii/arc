@@ -2200,6 +2200,8 @@ pub type StoreMeta {
     plain_index_protos: Dict(Int, Nil),
     // embedder value carried across promise jobs, undefined until a host sets it
     async_context_mapping: JsVal,
+    // functions compiled on first call, by unit and where their text starts
+    lazy_code: Dict(#(Int, Int), FuncTemplate),
   )
 }
 

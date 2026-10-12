@@ -251,6 +251,10 @@ pub fn throw_type_error(state: State, msg: String) -> Result(a, StepExit) {
   throw_error(state, TypeError, msg)
 }
 
+pub fn throw_syntax_error(state: State, msg: String) -> Result(a, StepExit) {
+  throw_error(state, error_kind.SyntaxError, msg)
+}
+
 pub fn throw_reference_error(state: State, msg: String) -> Result(a, StepExit) {
   throw_error(state, ReferenceError, msg)
 }

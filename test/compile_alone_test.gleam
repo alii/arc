@@ -1,3 +1,4 @@
+import arc/bytecode/lazy.{LazyFunction}
 import arc/compiler
 import arc/compiler/scope
 import arc/internal/tuple_array
@@ -37,13 +38,14 @@ fn alone(
   let #(start, line) = position(source, marker)
   let assert Ok(template) =
     compiler.compile_function_alone(
-      bit_array.from_string(source),
-      compiler.AloneContext(
-        mode: parser.Script,
+      LazyFunction(
+        bytes: bit_array.from_string(source),
+        is_module: False,
         source: scope.FnSource(start:, line:, form:, strict:),
         name:,
         captures:,
       ),
+      lazy: False,
     )
   template
 }

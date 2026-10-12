@@ -1,3 +1,4 @@
+import arc/bytecode/lazy.{type LazyFunction, LazyFunction}
 import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
 import arc/bytecode/opcode
 import arc/compiler/assemble
@@ -26,31 +27,24 @@ import gleam/set.{type Set}
 pub type CompileError =
   emit.EmitError
 
-/// what the code around a function hands it when it is compiled alone
-pub type AloneContext {
-  AloneContext(
-    mode: parser.ParseMode,
-    source: scope.FnSource,
-    // the name the code around it gave it
-    name: Option(String),
-    // its captured names: each with the parent's slot and how it is held
-    captures: List(#(String, Int, scope.CaptureSeed)),
-  )
-}
-
 pub type AloneError {
   AloneParseError(parser.ParseError)
   AloneCompileError(CompileError)
 }
 
-/// compiles the one function that starts at `context.source` in `bytes`,
-/// giving the template the whole-unit compile gives for it
+/// compiles the one function `function` describes, giving the template the
+/// whole-unit compile gives for it. With `lazy`, the plain functions written
+/// inside it are in turn left for their own first calls
 pub fn compile_function_alone(
-  bytes: BitArray,
-  context: AloneContext,
+  function: LazyFunction,
+  lazy lazy: Bool,
 ) -> Result(FuncTemplate, AloneError) {
-  let AloneContext(mode:, source:, name:, captures:) = context
-  use #(function, scopes) <- result.try(
+  let LazyFunction(bytes:, is_module:, source:, name:, captures:) = function
+  let mode = case is_module {
+    True -> parser.Module
+    False -> parser.Script
+  }
+  use #(literal, scopes) <- result.try(
     parser.parse_function_at(bytes, mode, source)
     |> result.map_error(AloneParseError),
   )
@@ -68,15 +62,21 @@ pub fn compile_function_alone(
   let tree = scope_analysis.finalize(scopes, opts)
   use #(child, tree) <- result.map(
     emit.function_alone(
-      function,
+      literal,
       tree,
       source.form,
       name,
       strict: source.strict,
+      lazy:,
     )
     |> result.map_error(AloneCompileError),
   )
-  compile_child(child, tree, scope.root_scope_id)
+  compile_child(child, tree, scope.root_scope_id, Unit(bytes:, is_module:))
+}
+
+// the text a compile works from, which a function left for later keeps
+type Unit {
+  Unit(bytes: BitArray, is_module: Bool)
 }
 
 pub fn error_message(err: CompileError) -> String {
@@ -132,6 +132,23 @@ pub fn compile_script(
     scopes,
     scope.LocalLexical,
     deletable_global_vars: False,
+    lazy: False,
+  )
+}
+
+/// compile_script, with each plain function left for its first call to
+/// compile. An error the emitter would raise for such a function's body is
+/// then raised by that call, not here
+pub fn compile_script_lazy(
+  body: List(ast.StmtWithLine),
+  scopes: scope_builder.ScopeBuilder,
+) -> Result(FuncTemplate, CompileError) {
+  compile_top_level(
+    body,
+    scopes,
+    scope.LocalLexical,
+    deletable_global_vars: False,
+    lazy: True,
   )
 }
 
@@ -165,8 +182,14 @@ pub fn compile_module(
       linker_seeded_exports: set.from_list(local_export_names(summary.exports)),
     )
   let tree = scope_analysis.finalize(scopes, opts)
-  use out <- result.map(emit.module(items, tree))
-  let template = finish_top_level(out, lexical.ScriptCode, eval_var_env: None)
+  use out <- result.map(emit.module(items, tree, lazy: False))
+  let template =
+    finish_top_level(
+      out,
+      lexical.ScriptCode,
+      eval_var_env: None,
+      unit: Unit(bytes: scopes.source, is_module: True),
+    )
   let has_tla =
     tuple_array.to_list(template.bytecode)
     |> list.any(fn(op) { op == opcode.Await })
@@ -217,6 +240,7 @@ pub fn compile_repl(
     scopes,
     scope.GlobalLexical,
     deletable_global_vars: False,
+    lazy: False,
   )
 }
 
@@ -230,6 +254,7 @@ pub fn compile_eval(
     scopes,
     scope.LocalLexical,
     deletable_global_vars: True,
+    lazy: False,
   )
 }
 
@@ -256,7 +281,12 @@ pub fn compile_eval_direct(
     True -> Ok(Nil)
     False -> check_param_scope_var_conflict(body, caller.param_scope_names)
   })
-  Ok(finish_top_level(out, caller.code_kind, eval_var_env: Some(caller.var_env)))
+  Ok(finish_top_level(
+    out,
+    caller.code_kind,
+    eval_var_env: Some(caller.var_env),
+    unit: Unit(bytes: scopes.source, is_module: False),
+  ))
 }
 
 fn direct_eval_opts(
@@ -302,20 +332,28 @@ fn compile_top_level(
   scopes: scope_builder.ScopeBuilder,
   top_lex: scope.TopLevelLex,
   deletable_global_vars deletable_global_vars: Bool,
+  lazy lazy: Bool,
 ) -> Result(FuncTemplate, CompileError) {
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
   let tree = scope_analysis.finalize(scopes, opts)
-  use out <- result.map(emit.program(stmts, tree, deletable_global_vars:))
-  finish_top_level(out, lexical.ScriptCode, eval_var_env: Some(GlobalVarEnv))
+  use out <- result.map(emit.program(stmts, tree, deletable_global_vars:, lazy:))
+  finish_top_level(
+    out,
+    lexical.ScriptCode,
+    eval_var_env: Some(GlobalVarEnv),
+    unit: Unit(bytes: scopes.source, is_module: False),
+  )
 }
 
 fn finish_top_level(
   out: emit.EmitOutput,
   code_kind: CodeKind,
   eval_var_env eval_var_env: Option(VarEnvKind),
+  unit unit: Unit,
 ) -> FuncTemplate {
   let info = scope.function_info(out.tree, scope.root_scope_id)
-  let functions = compile_children(out.children, out.tree, scope.root_scope_id)
+  let functions =
+    compile_children(out.children, out.tree, scope.root_scope_id, unit)
   let local_names = case eval_var_env, info.contains_direct_eval {
     Some(var_env), True -> Some(eval_name_table(var_env, info))
     _, _ -> None
@@ -396,6 +434,7 @@ fn compile_child(
   child: emit.CompiledChild,
   tree: scope.ScopeTree,
   parent_fn_scope: scope.ScopeId,
+  unit: Unit,
 ) -> FuncTemplate {
   let info = scope.function_info(tree, child.scope_id)
   let parent_info = scope.function_info(tree, parent_fn_scope)
@@ -403,12 +442,22 @@ fn compile_child(
     list.map(info.captures, fn(c) { c.parent_slot })
     |> list.append(scope.lexical_capture_parent_slots(info, parent_info))
     |> list.map(CaptureLocal)
+  use <- option.lazy_unwrap(
+    option.map(child.lazy, stub_template(
+      child,
+      tree,
+      info,
+      env_descriptors,
+      unit,
+      _,
+    )),
+  )
 
   let local_names = case info.eval_in_subtree {
     True -> Some(eval_name_table(FrameVarEnv, info))
     False -> None
   }
-  let functions = compile_children(child.functions, tree, child.scope_id)
+  let functions = compile_children(child.functions, tree, child.scope_id, unit)
   // coroutine frames park with raw locals, so they never get registers
   let use_registers =
     option.is_none(local_names) && !child.is_generator && !child.is_async
@@ -442,8 +491,65 @@ fn compile_children(
   children: List(emit.CompiledChild),
   tree: scope.ScopeTree,
   parent_fn_scope: scope.ScopeId,
+  unit: Unit,
 ) -> List(FuncTemplate) {
-  list.map(children, compile_child(_, tree, parent_fn_scope))
+  list.map(children, compile_child(_, tree, parent_fn_scope, unit))
+}
+
+// a function whose whole body is "compile me": it has the frame layout the
+// analysis gave it, and carries what its first call needs to compile it
+fn stub_template(
+  child: emit.CompiledChild,
+  tree: scope.ScopeTree,
+  info: scope.FunctionInfo,
+  env_descriptors: List(EnvCapture),
+  unit: Unit,
+  source: scope.FnSource,
+) -> FuncTemplate {
+  let own = scope.get(tree, child.scope_id)
+  let captures =
+    list.map(info.captures, fn(capture) {
+      let assert Ok(binding) = dict.get(own.bindings, capture.name)
+        as "compiler: a captured name is not bound in its function's scope"
+      #(
+        capture.name,
+        capture.parent_slot,
+        scope.CaptureSeed(binding.boxed, binding.declared_kind),
+      )
+    })
+  let function =
+    LazyFunction(
+      bytes: unit.bytes,
+      is_module: unit.is_module,
+      source:,
+      name: child.name,
+      captures:,
+    )
+  FuncTemplate(
+    name: child.name,
+    arity: child.arity,
+    length: child.length,
+    local_count: info.local_count,
+    bytecode: tuple_array.from_list([
+      opcode.CompileSelf(function),
+      opcode.Return,
+    ]),
+    constants: tuple_array.from_list([]),
+    lines: tuple_array.from_list([source.line, source.line]),
+    functions: tuple_array.from_list([]),
+    env_descriptors:,
+    is_strict: child.is_strict,
+    is_arrow: False,
+    is_derived_constructor: False,
+    is_generator: child.is_generator,
+    is_async: child.is_async,
+    is_constructor: child.is_constructor,
+    is_class_constructor: False,
+    local_names: None,
+    lexical: info.lexical,
+    code_kind: child.code_kind,
+    regs: bytecode.NoRegs,
+  )
 }
 
 fn check_param_scope_var_conflict(

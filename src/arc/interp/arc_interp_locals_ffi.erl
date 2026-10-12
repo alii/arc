@@ -1,6 +1,6 @@
 %% frame locals and registers; sloppy_this may answer miss
 -module(arc_interp_locals_ffi).
--export([frame_locals/9, sloppy_this/2, flush_registers/5]).
+-export([frame_locals/9, sloppy_this/2, flush_registers/5, widen/2]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -130,3 +130,9 @@ flush_registers(L, A, B, R0, R1) ->
 
 put_reg(L, S, _) when S < 0 -> L;
 put_reg(L, S, V) -> setelement(S + 1, L, V).
+
+%% a frame laid out for fewer locals, filled out with undefined
+widen(Locals, Count) when tuple_size(Locals) >= Count -> Locals;
+widen(Locals, Count) ->
+    list_to_tuple(tuple_to_list(Locals)
+                  ++ lists:duplicate(Count - tuple_size(Locals), undefined)).

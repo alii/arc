@@ -8,10 +8,10 @@ import arc/bytecode/opcode.{
   BinOpLocalLocal, BinOpLocalLocalPut, BinOpLocalPut, BinOpPut, BoxLocal,
   BoxLocals, Call, CallApply, CallConstructor, CallConstructorApply, CallEval,
   CallMethod, CallMethodApply, CallNew, CmpConstJump, CmpJump, CmpLocalConstJump,
-  CmpLocalLocalJump, CreateArguments, CreateRestArray, DecLocal, DeclareEvalVar,
-  DeclareGlobalFn, DeclareGlobalLex, DeclareGlobalVar, DefineAccessor,
-  DefineAccessorComputed, DefineField, DefineFieldComputed, DefineMethod,
-  DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
+  CmpLocalLocalJump, CompileSelf, CreateArguments, CreateRestArray, DecLocal,
+  DeclareEvalVar, DeclareGlobalFn, DeclareGlobalLex, DeclareGlobalVar,
+  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
+  DefineMethod, DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
   DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup,
   DynamicImport, DynamicImportDefer, DynamicImportSource, ForInNext, ForInStart,
   GetAsyncIterator, GetBoxed, GetDisposer, GetElem, GetElemKeep, GetElemLocals,
@@ -44,6 +44,7 @@ import arc/interp/guard.{
   guarded_unit4, guarded_unit5, guarded_unit6,
 }
 import arc/interp/kernel
+import arc/interp/lazy
 import arc/interp/park
 import arc/interp/safepoint
 import arc/interp/state.{
@@ -3863,6 +3864,8 @@ fn conditional_jump(
 
 fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   case op {
+    CompileSelf(function) -> lazy.first_call(state, function)
+
     // the loop runs these without ever falling back here
     PushConst(_)
     | Jump(_)

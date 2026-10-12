@@ -50,6 +50,8 @@ pub type CompiledChild {
     is_class_constructor: Bool,
     references_arguments: Bool,
     code_kind: lexical.CodeKind,
+    // Some when the body was left for the first call to compile
+    lazy: Option(scope.FnSource),
   )
 }
 
@@ -131,6 +133,8 @@ type Emitter {
     line: Int,
     // child function scope ids in emission order, popped by compile_function_body
     child_fn_cursor: List(ScopeId),
+    // plain functions written in here are left for their first call
+    lazy: Bool,
   )
 }
 
@@ -183,6 +187,7 @@ pub fn program(
   stmts: List(ast.StmtWithLine),
   tree: scope.ScopeTree,
   deletable_global_vars deletable_global_vars: Bool,
+  lazy lazy: Bool,
 ) -> Result(EmitOutput, EmitError) {
   let script_strict = ast_util.has_use_strict_directive(stmts)
   let e =
@@ -190,6 +195,7 @@ pub fn program(
       ..new_emitter(tree, root_scope_id),
       strict: script_strict,
       deletable_global_vars:,
+      lazy:,
     )
   emit_top_level_body(e, stmts, script_strict:, vars_to_global: True)
 }
@@ -228,6 +234,7 @@ pub fn function_alone(
   form: scope.FnForm,
   name: Option(String),
   strict strict: Bool,
+  lazy lazy: Bool,
 ) -> Result(#(CompiledChild, scope.ScopeTree), EmitError) {
   let ast.FunctionLiteral(
     name: written,
@@ -241,8 +248,8 @@ pub fn function_alone(
     scope.FnExpression ->
       FnExpr(self_name: ast.binding_name(written), is_generator:, is_async:)
   }
-  let root = Emitter(..new_emitter(tree, root_scope_id), strict:)
-  use #(child, root) <- result.map(compile_function_body(
+  let root = Emitter(..new_emitter(tree, root_scope_id), strict:, lazy:)
+  use #(child, root) <- result.map(compile_function_now(
     root,
     name,
     params,
@@ -256,10 +263,11 @@ pub fn function_alone(
 pub fn module(
   items: List(ast.ModuleItem),
   tree: scope.ScopeTree,
+  lazy lazy: Bool,
 ) -> Result(EmitOutput, EmitError) {
   let stmts = ast_util.module_items_to_stmts(items)
   let has_module_using = ast_util.has_using_decl(stmts)
-  let e = Emitter(..new_emitter(tree, root_scope_id), strict: True)
+  let e = Emitter(..new_emitter(tree, root_scope_id), strict: True, lazy:)
   let e = enter_root_scope(e)
 
   use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
@@ -888,6 +896,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     current_scope: fn_id,
     scope_cursor: block_child_scopes(tree, fn_id),
     child_fn_cursor: scope.child_function_scopes(tree, fn_id),
+    lazy: False,
     field_init: NoFieldInit,
     in_block: False,
     deletable_global_vars: False,
@@ -2499,6 +2508,64 @@ fn compile_function_body(
   body: FnBody,
   shape shape: FunctionShape,
 ) -> Result(#(CompiledChild, Emitter), EmitError) {
+  case lazy_source(parent, shape) {
+    None -> compile_function_now(parent, name, params, body, shape:)
+    Some(#(source, fn_id, rest)) -> {
+      let FnTraits(is_generator:, is_async:, is_constructor:, ..) =
+        traits_of(shape)
+      let stmts = case body {
+        StmtsBody(stmts:) -> stmts
+        FieldInitsBody(..) -> []
+      }
+      let layout = param_layout(params, False)
+      let child =
+        CompiledChild(
+          scope_id: fn_id,
+          name:,
+          arity: list.length(layout.fixed),
+          length: expected_argument_count(layout.fixed),
+          code: [],
+          constants: [],
+          functions: [],
+          is_strict: parent.strict || ast_util.has_use_strict_directive(stmts),
+          is_arrow: False,
+          is_derived_constructor: False,
+          is_generator:,
+          is_async:,
+          is_constructor:,
+          is_class_constructor: False,
+          references_arguments: False,
+          code_kind: lexical.FunctionCode,
+          lazy: Some(source),
+        )
+      Ok(#(child, Emitter(..parent, child_fn_cursor: rest)))
+    }
+  }
+}
+
+// the next child function, when it is one to leave for its first call
+fn lazy_source(
+  parent: Emitter,
+  shape: FunctionShape,
+) -> Option(#(scope.FnSource, ScopeId, List(ScopeId))) {
+  use <- bool.guard(!parent.lazy, None)
+  case shape, parent.child_fn_cursor {
+    FnDecl(..), [fn_id, ..rest] | FnExpr(..), [fn_id, ..rest] -> {
+      let info = scope.function_info(parent.scope_tree, fn_id)
+      use <- bool.guard(info.eval_in_subtree, None)
+      option.map(info.source, fn(source) { #(source, fn_id, rest) })
+    }
+    _, _ -> None
+  }
+}
+
+fn compile_function_now(
+  parent: Emitter,
+  name: Option(String),
+  params: List(ast.Pattern),
+  body: FnBody,
+  shape shape: FunctionShape,
+) -> Result(#(CompiledChild, Emitter), EmitError) {
   let FnTraits(is_arrow:, is_generator:, is_async:, is_constructor:, self_name:) =
     traits_of(shape)
   // exhausted cursor means analyzer walk-order desync, crash
@@ -2532,6 +2599,7 @@ fn compile_function_body(
   let e =
     Emitter(
       ..new_emitter(parent.scope_tree, fn_id),
+      lazy: parent.lazy,
       next_label: parent.next_label,
       strict: child_strict,
       is_async:,
@@ -2623,6 +2691,7 @@ fn compile_function_body(
       is_class_constructor: False,
       references_arguments: e.references_arguments,
       code_kind:,
+      lazy: None,
     )
   // take the child's tree back: it holds scratch-slot local_count bumps
   Ok(#(child, Emitter(..parent, scope_tree: e.scope_tree)))
