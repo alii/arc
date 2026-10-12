@@ -355,11 +355,12 @@ fn resolve_raw_refs(
       set.new(),
       set.new(),
     ))
+    let seen_before = set.size(seen)
+    let seen = set.insert(seen, ref)
+    use <- bool.guard(set.size(seen) == seen_before, acc)
     // ref.scope may be a pruned tombstone; start from a live ancestor
     let assert Ok(raw) = dict.get(builder.scopes, ref.scope)
       as "scope_analysis.resolve_raw_refs: dangling raw_ref"
-    use <- bool.guard(set.contains(seen, ref), acc)
-    let seen = set.insert(seen, ref)
     let ref_fn = raw.function_scope
     case declaring_scope(tree, builder, ref.scope, ref.name) {
       Some(decl) if decl.function_scope == ref_fn -> #(seen, captured)
@@ -660,7 +661,6 @@ fn collect_subtree_facts(
   let eval_in_subtree =
     own_eval
     || list.any(children, fn(cid) { subtree_facts(acc, cid).eval_in_subtree })
-  let declared = declared_in(own_scopes)
   // a child's free name declared where the child opens is not free here
   let free_in_children = {
     use free, child_id, visible <- fold_child_functions(
@@ -676,7 +676,7 @@ fn collect_subtree_facts(
   let transitive_free =
     own_facts(own_by_fn, fn_id).free_own
     |> set.union(free_in_children)
-    |> set.union(fn_with_stack_free(tree, fn_id, declared))
+    |> set.union(fn_with_stack_free(tree, fn_id, own_scopes))
   dict.insert(
     acc,
     fn_id,
@@ -715,12 +715,14 @@ fn assign_captures(
 ) -> ScopeTree {
   let plan = plan_captures(tree, analysis, fn_id, parent)
   let tree = write_captures(tree, analysis, fn_id, parent, plan)
+  let children = child_function_scopes(tree, fn_id)
+  use <- bool.guard(children == [], tree)
   let capture_slots =
     list.index_map(plan.name_captures.ordered, fn(c, i) { #(c.name, i) })
     |> dict.from_list
   use tree, child_id, view <- fold_child_functions(
     tree,
-    child_function_scopes(tree, fn_id),
+    children,
     init: tree,
     per_site: fn(tree, child_id) {
       ParentView(
@@ -808,33 +810,39 @@ fn derive_name_captures(
   subtree: SubtreeFacts,
   parent: ParentView,
 ) -> NameCaptures {
-  let captured_names = case subtree.eval_in_subtree {
-    True -> parent_names(parent)
-    False ->
-      set.filter(subtree.transitive_free, fn(name) {
-        option.is_some(parent_slot(parent, name))
-      })
+  let slots = case subtree.eval_in_subtree {
+    True -> {
+      use name <- list.map(set.to_list(parent_names(parent)))
+      let assert Some(slot) = parent_slot(parent, name)
+        as "scope_analysis.captures: captured name absent from parent view"
+      #(name, slot)
+    }
+    False -> {
+      use slots, name <- set.fold(subtree.transitive_free, [])
+      case parent_slot(parent, name) {
+        Some(slot) -> [#(name, slot), ..slots]
+        None -> slots
+      }
+    }
   }
-  let ordered = {
-    use name <- list.map(
-      set.to_list(captured_names) |> list.sort(string.compare),
-    )
-    let assert Some(parent_slot) = parent_slot(parent, name)
-      as "scope_analysis.captures: captured name absent from parent view"
-    NameCapture(name:, parent_slot:)
-  }
+  let ordered =
+    list.sort(slots, fn(a, b) { string.compare(a.0, b.0) })
+    |> list.map(fn(slot) { NameCapture(name: slot.0, parent_slot: slot.1) })
   // by declared kind, not kind, so a captured const stays const
-  let declared_as = fn(kind) {
-    set.filter(captured_names, fn(name) {
-      parent_declared_kind(parent, name) == kind
-    })
+  let none = set.new()
+  let #(consts, fn_names, lets) = {
+    use #(consts, fn_names, lets) as kinds, #(name, _slot) <- list.fold(
+      slots,
+      #(none, none, none),
+    )
+    case parent_declared_kind(parent, name) {
+      ConstBinding -> #(set.insert(consts, name), fn_names, lets)
+      FnNameBinding -> #(consts, set.insert(fn_names, name), lets)
+      LetBinding -> #(consts, fn_names, set.insert(lets, name))
+      VarBinding | ParamBinding | CaptureBinding -> kinds
+    }
   }
-  NameCaptures(
-    ordered:,
-    consts: declared_as(ConstBinding),
-    fn_names: declared_as(FnNameBinding),
-    lets: declared_as(LetBinding),
-  )
+  NameCaptures(ordered:, consts:, fn_names:, lets:)
 }
 
 fn visible_binding(
@@ -983,10 +991,10 @@ fn derive_vars_to_box(
 ) -> Set(String) {
   let subtree = subtree_facts(analysis.subtree_by_fn, fn_id)
   let children = child_function_scopes(tree, fn_id)
-  let own_scopes =
+  let own_scopes = fn() {
     fn_member_scopes(analysis.scopes_by_fn, fn_id)
     |> list.map(get(tree, _))
-  let declared = declared_in(own_scopes)
+  }
   let forced_box =
     case fn_id == root_scope_id {
       True -> tree.linker_seeded_exports
@@ -995,10 +1003,14 @@ fn derive_vars_to_box(
     |> set.union(
       dict.get(analysis.try_assigned, fn_id) |> result.unwrap(set.new()),
     )
-  let never_box = never_box_names(analysis, fn_id, own_scopes, children)
-  let vars_to_box = case subtree.eval_in_subtree {
-    True -> declared
-    False -> {
+  let vars_to_box = case subtree.eval_in_subtree, children {
+    True, _ -> declared_in(own_scopes())
+    // nothing below to capture anything
+    False, [] -> set.new()
+    False, _ -> {
+      let own_scopes = own_scopes()
+      let declared = declared_in(own_scopes)
+      let never_box = never_box_names(analysis, fn_id, own_scopes, children)
       let free_in_children = {
         use free, child_id <- list.fold(children, set.new())
         let child = subtree_facts(analysis.subtree_by_fn, child_id)
@@ -1135,13 +1147,13 @@ fn insert_captures(
   let scope_bindings = fn(sid) { scopes_get_or_panic(scopes, sid).bindings }
   let root_bindings = scope_bindings(fn_id)
   let root_shadowed = fn(name) { dict.has_key(root_bindings, name) }
-  let var_boundary_names =
+  let var_boundary_bindings =
     own_scope_ids
     |> list.filter(fn(sid) { scopes_get_or_panic(scopes, sid).is_var_boundary })
-    |> list.flat_map(fn(sid) { dict.keys(scope_bindings(sid)) })
-    |> set.from_list
+    |> list.map(scope_bindings)
   let names_shadowed = fn(name) {
-    root_shadowed(name) || set.contains(var_boundary_names, name)
+    root_shadowed(name)
+    || list.any(var_boundary_bindings, dict.has_key(_, name))
   }
   let root = scopes_get_or_panic(scopes, fn_id)
   let scopes = {
@@ -1261,15 +1273,17 @@ fn declared_in(scopes: List(Scope)) -> Set(String) {
 fn fn_with_stack_free(
   tree: ScopeTree,
   fn_id: ScopeId,
-  declared: Set(String),
+  own_scopes: List(Scope),
 ) -> Set(String) {
-  scope.fold_enclosing_withs(
-    tree,
-    get(tree, fn_id).parent,
-    set.new(),
-    set.insert,
-  )
-  |> set.difference(declared)
+  let withs =
+    scope.fold_enclosing_withs(
+      tree,
+      get(tree, fn_id).parent,
+      set.new(),
+      set.insert,
+    )
+  use <- bool.guard(set.is_empty(withs), withs)
+  set.difference(withs, declared_in(own_scopes))
 }
 
 fn visible_at_creation(
