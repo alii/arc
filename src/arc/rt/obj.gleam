@@ -1069,6 +1069,50 @@ fn set_own_shaped(
   }
 }
 
+// a literal's shape, one step from the empty shape however many keys it has:
+// the step is filed under its keys joined by a byte no property name holds.
+// also called by name from arc_rt_obj_ic_ffi
+pub fn literal_shape(
+  st: Agent,
+  keys: List(BitArray),
+) -> #(Int, Dict(BitArray, Int), Agent) {
+  let store = st.store
+  let assert Ok(ShapeDesc(transitions:, ..) as empty) =
+    dict.get(store.shapes, 0)
+    as "rt_obj: the empty shape is missing (engine invariant)"
+  let step =
+    list.fold(keys, <<>>, fn(joined, key) { <<joined:bits, 255, key:bits>> })
+  let known =
+    dict.get(transitions, step)
+    |> result.try(fn(to) {
+      dict.get(store.shapes, to)
+      |> result.map(fn(desc) { #(to, desc.offsets, st) })
+    })
+  use <- result.lazy_unwrap(known)
+  let to = store.next_shape
+  let offsets =
+    dict.from_list(list.index_map(keys, fn(key, slot) { #(key, slot) }))
+  let shapes =
+    store.shapes
+    |> dict.insert(
+      0,
+      ShapeDesc(..empty, transitions: dict.insert(transitions, step, to)),
+    )
+    |> dict.insert(
+      to,
+      ShapeDesc(
+        slot_count: dict.size(offsets),
+        offsets:,
+        transitions: dict.new(),
+      ),
+    )
+  #(
+    to,
+    offsets,
+    Agent(..st, store: Store(..store, shapes:, next_shape: to + 1)),
+  )
+}
+
 // the shape one appended key away, made on first use; also called by name
 // from arc_rt_obj_ic_ffi
 pub fn shape_after(

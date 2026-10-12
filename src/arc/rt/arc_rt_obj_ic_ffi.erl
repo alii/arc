@@ -370,7 +370,7 @@ new_object_shaped(St, Keys, Vals, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
           when element(?SSHAPEDOBJECT_PROTO, Blank) =:= Proto ->
             alloc_shaped(St, Store, Blank, Vals);
         _ ->
-            {Sid, Offs, St1} = literal_shape(St, 0, #{}, Keys),
+            {Sid, Offs, St1} = 'arc@rt@obj':literal_shape(St, Keys),
             Blank = {?SSHAPEDOBJECT_TAG, Sid, Proto, {}, Offs},
             Store1 = element(?AGENT_STORE, St1),
             Ics = element(?STORE_ICS, Store1),
@@ -379,11 +379,6 @@ new_object_shaped(St, Keys, Vals, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
                                     Ics#{Site => {?IC_LITERAL, Blank}}),
                          Blank, Vals)
     end.
-
-literal_shape(St, Sid, Offs, []) -> {Sid, Offs, St};
-literal_shape(St, Sid, _, [K | Ks]) ->
-    {?SOME, {To, Offs, St1}} = 'arc@rt@obj':shape_after(St, Sid, K),
-    literal_shape(St1, To, Offs, Ks).
 
 alloc_shaped(St, Store, Blank, Vals)
   when tuple_size(Store) =:= ?STORE_SIZE, tuple_size(Blank) =:= ?SSHAPEDOBJECT_SIZE ->
