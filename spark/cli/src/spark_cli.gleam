@@ -36,6 +36,7 @@ import spark/tls.{Certificates}
 import spark/tty
 import spark/url
 import spark/util
+import spark/web_streams
 import spark/zlib
 
 type CliError {
@@ -95,6 +96,7 @@ fn builtins(
     structured_clone.builtin(),
     zlib.builtin(),
     util.types_builtin(),
+    web_streams.builtin(),
     tty.builtin(terminals()),
     // the cli has no roots of its own to ship, so the machine's stand for both
     tls.builtin(

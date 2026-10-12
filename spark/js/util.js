@@ -14,7 +14,7 @@ function optional(specifier) {
   }
 }
 
-internal.addLoader((name) => load(name));
+internal.addLoader(own);
 
 function missing(what) {
   return () => {
@@ -26,7 +26,7 @@ const shims = {
   process: internal.process,
   primordials: internal.primordials,
   internalBinding: internal.internalBinding,
-  fallback: internal.load,
+  fallback: internal.find,
   // until the stream module is here nothing is a stream
   "internal/streams/utils": () => ({
     isReadableStream: () => false,
@@ -3302,8 +3302,8 @@ const files = {
 
 const loaded = new Map();
 
-// node's own module names, resolved inside this file
-function load(name) {
+// a module this file holds, by node's own name for it
+function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
     const made = { exports: shims[name]() };
@@ -3311,7 +3311,6 @@ function load(name) {
     return made.exports;
   }
   if (!Object.hasOwn(files, name)) {
-    if (shims.fallback !== undefined) return shims.fallback(name);
     throw new Error("no module " + name + " in this port");
   }
   const made = { exports: {} };
@@ -3326,6 +3325,20 @@ function load(name) {
   );
   shims.afterLoad?.[name]?.(made.exports);
   return made.exports;
+}
+
+// what the files here call require: this file's own modules first, then
+// wherever else the name can be found
+function load(name) {
+  if (
+    loaded.has(name) ||
+    Object.hasOwn(shims, name) ||
+    Object.hasOwn(files, name) ||
+    shims.fallback === undefined
+  ) {
+    return own(name);
+  }
+  return shims.fallback(name);
 }
 
 module.exports = load("util");

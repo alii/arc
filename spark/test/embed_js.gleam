@@ -38,6 +38,7 @@ const names = [
   "util_types",
   "tty",
   "tls",
+  "web_streams",
 ]
 
 const target = "src/spark/js.gleam"

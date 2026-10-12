@@ -41,6 +41,7 @@ import spark/tls.{Certificates}
 import spark/tty
 import spark/url
 import spark/util
+import spark/web_streams
 import spark/zlib
 
 @external(erlang, "spark_test_ffi", "main")
@@ -60,6 +61,7 @@ fn kept() -> List(#(Want, ReplySlip))
 
 fn builtins() -> List(Builtin(Nil)) {
   [
+    global.builtin(),
     async_hooks.builtin(),
     timers.builtin(),
     fs.builtin(),
@@ -87,6 +89,7 @@ fn builtins() -> List(Builtin(Nil)) {
     structured_clone.builtin(),
     zlib.builtin(),
     util.types_builtin(),
+    web_streams.builtin(),
     tty.builtin([1]),
     tls.builtin(
       Certificates(
@@ -4012,4 +4015,159 @@ pub fn util_types_is_the_types_of_util_test() {
       out.push(String(require('node:util/types').isPromise(Promise.resolve())));",
     )
   assert out_lines(rt) == ["true", "true"]
+}
+
+const web_streams_match_node_script = "
+const web = require(\"stream/web\");
+let seed = 1337;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const show = (v) => { if (v instanceof Uint8Array) return \"u8:\" + Array.from(v).join(\".\"); if (v instanceof Error) return v.name + \":\" + v.code + \":\" + v.message; try { return JSON.stringify(v) ?? String(v); } catch { return String(v); } };
+const call = (f) => { try { return show(f()); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+const pending = [];
+const scenario = (label, run) => pending.push(async () => { const log = []; try { await run((...p) => log.push(p.map((x) => (typeof x === \"string\" ? x : show(x))).join(\":\"))); } catch (e) { log.push(\"rejected \" + e.name + \" \" + e.code + \" \" + e.message); } lines.push(label + \" \" + log.join(\" \")); });
+const tick = () => new Promise((r) => setImmediate(r));
+// ---- generated: a source that enqueues, closes or errors on a plan; a reader that reads, cancels or releases on a plan
+for (let i = 0; i < 60; i++) {
+  const hwm = pick([0, 1, 2, 5]);
+  const steps = Array.from({ length: 1 + rnd(6) }, () => pick([\"chunk\", \"chunk\", \"chunk\", \"wait\", \"close\", \"error\"]));
+  const reads = Array.from({ length: 2 + rnd(6) }, () => pick([\"read\", \"read\", \"read\", \"desired\", \"cancel\", \"release\", \"tee\", \"locked\"]));
+  const sized = rnd(3) === 0;
+  scenario(\"G \" + i + \" \" + [hwm, sized, steps.join(\"/\"), reads.join(\"/\")].join(\" \"), async (log) => {
+    let n = 0, at = 0, controller;
+    const stream = new ReadableStream({ start(c) { controller = c; log(\"start\", c.desiredSize); }, async pull(c) { const step = steps[at++] ?? \"close\"; log(\"pull\", step); if (step === \"chunk\") c.enqueue(\"c\" + n++); else if (step === \"wait\") await tick(); else if (step === \"close\") c.close(); else c.error(new RangeError(\"planned\")); }, cancel(reason) { log(\"cancelled\", String(reason)); } }, sized ? new CountQueuingStrategy({ highWaterMark: hwm }) : { highWaterMark: hwm, size: (chunk) => chunk.length });
+    let reader = stream.getReader(), other;
+    for (const op of reads) {
+      try {
+        if (op === \"read\") { const r = await Promise.race([reader.read(), tick().then(tick).then(tick).then(() => \"slow\")]); log(\"read\", r === \"slow\" ? \"slow\" : r); }
+        else if (op === \"desired\") log(\"desired\", controller.desiredSize);
+        else if (op === \"cancel\") log(\"cancel\", await reader.cancel(\"why\"));
+        else if (op === \"release\") { reader.releaseLock(); log(\"released\", stream.locked); reader = stream.getReader(); }
+        else if (op === \"locked\") log(\"locked\", stream.locked);
+        else if (op === \"tee\" && !other) { reader.releaseLock(); const [a, b] = stream.tee(); reader = a.getReader(); other = b.getReader(); log(\"tee\", stream.locked); }
+      } catch (e) { log(op, \"threw\", e.name, e.message); }
+    }
+    if (other) log(\"other\", await Promise.race([other.read(), tick().then(tick).then(() => \"slow\")]).catch((e) => \"rejected \" + e.name));
+    await tick();
+  });
+}
+// ---- generated: writes into a sink with a plan, with backpressure
+for (let i = 0; i < 40; i++) {
+  const hwm = pick([0, 1, 3]);
+  const ops = Array.from({ length: 2 + rnd(7) }, () => pick([\"write\", \"write\", \"write\", \"ready\", \"desired\", \"close\", \"abort\", \"release\"]));
+  const failAt = rnd(4) === 0 ? rnd(3) : -1;
+  const slow = rnd(2) === 0;
+  scenario(\"W \" + i + \" \" + [hwm, failAt, slow, ops.join(\"/\")].join(\" \"), async (log) => {
+    let seen = 0;
+    const stream = new WritableStream({ start() { log(\"start\"); }, async write(chunk) { if (slow) await tick(); if (seen++ === failAt) throw new TypeError(\"sink failed\"); log(\"sink\", chunk); }, close() { log(\"sink closed\"); }, abort(reason) { log(\"sink aborted\", String(reason)); } }, { highWaterMark: hwm });
+    let writer = stream.getWriter(), n = 0; const waits = [];
+    writer.closed.then(() => log(\"closed\"), (e) => log(\"closed rejected\", e && e.name));
+    for (const op of ops) {
+      try {
+        if (op === \"write\") waits.push(writer.write(\"w\" + n++).then(() => \"ok\", (e) => \"rejected \" + (e && e.name)));
+        else if (op === \"ready\") log(\"ready\", await Promise.race([writer.ready.then(() => \"yes\", (e) => \"rejected \" + (e && e.name)), tick().then(() => \"no\")]));
+        else if (op === \"desired\") log(\"desired\", writer.desiredSize);
+        else if (op === \"close\") waits.push(writer.close().then(() => \"closed ok\", (e) => \"close rejected \" + (e && e.name)));
+        else if (op === \"abort\") waits.push(writer.abort(\"stop\").then(() => \"abort ok\", (e) => \"abort rejected \" + (e && e.name)));
+        else if (op === \"release\") { writer.releaseLock(); log(\"released\", stream.locked); writer = stream.getWriter(); }
+      } catch (e) { log(op, \"threw\", e.name, e.message); }
+    }
+    log(\"results\", await Promise.all(waits));
+    await tick();
+  });
+}
+// ---- one case each
+t(\"exports\", () => Object.keys(web));
+t(\"globals are the exports\", () => Object.keys(web).every((k) => globalThis[k] === web[k]));
+t(\"descriptors\", () => [\"ReadableStream\", \"TextDecoderStream\", \"queueMicrotask\"].map((k) => { const d = Object.getOwnPropertyDescriptor(globalThis, k); return [d.enumerable, d.writable, d.configurable]; }));
+t(\"shape\", () => [ReadableStream.name, ReadableStream.length, Object.getOwnPropertyNames(ReadableStream.prototype).sort(), Object.getOwnPropertyNames(ReadableStream).sort(), Object.prototype.toString.call(new ReadableStream()), Object.getOwnPropertyNames(WritableStream.prototype).sort(), Object.getOwnPropertyNames(TransformStream.prototype).sort()]);
+t(\"without new\", () => ReadableStream());
+t(\"bad source\", () => new ReadableStream(5));
+t(\"bad type\", () => new ReadableStream({ type: \"nope\" }));
+t(\"bad strategy\", () => new ReadableStream({}, { highWaterMark: -1 }));
+t(\"bad size\", () => new ReadableStream({}, { size: 5 }));
+t(\"bytes with size\", () => new ReadableStream({ type: \"bytes\" }, { size: () => 1 }));
+t(\"locked twice\", () => { const s = new ReadableStream(); s.getReader(); return s.getReader(); });
+t(\"byob on a default stream\", () => new ReadableStream().getReader({ mode: \"byob\" }));
+t(\"bad reader mode\", () => new ReadableStream().getReader({ mode: \"x\" }));
+t(\"reader wrong this\", () => ReadableStreamDefaultReader.prototype.read.call({}).catch((e) => e.code).constructor.name);
+t(\"strategies\", () => { const c = new CountQueuingStrategy({ highWaterMark: 4 }), b = new ByteLengthQueuingStrategy({ highWaterMark: 16 }); return [c.highWaterMark, c.size(), c.size.name, b.highWaterMark, b.size(new Uint8Array(3)), b.size.name, call(() => new CountQueuingStrategy()), call(() => new CountQueuingStrategy({}).highWaterMark)]; });
+t(\"inspect\", () => require(\"util\").inspect(new ReadableStream()) + \" | \" + require(\"util\").inspect(new WritableStream()) + \" | \" + require(\"util\").inspect(new TransformStream(), { depth: 0 }) + \" | \" + require(\"util\").inspect(new CountQueuingStrategy({ highWaterMark: 1 })));
+t(\"structuredClone refuses a stream\", () => { try { structuredClone(new ReadableStream()); return \"cloned\"; } catch (e) { return e.name; } });
+t(\"from\", () => typeof ReadableStream.from);
+t(\"encoder streams shape\", () => { const e = new TextEncoderStream(), d = new TextDecoderStream(\"utf-8\", { fatal: true, ignoreBOM: true }); return [e.encoding, d.encoding, d.fatal, d.ignoreBOM, typeof e.readable.getReader, typeof d.writable.getWriter, call(() => new TextDecoderStream(\"nope\"))]; });
+t(\"compression formats\", () => [\"gzip\", \"deflate\", \"deflate-raw\", \"zstd\", \"nope\"].map((f) => { try { new CompressionStream(f); return f + \":ok\"; } catch (e) { return f + \":\" + e.code; } }));
+// ---- behaviours
+scenario(\"S from an iterable\", async (log) => { for await (const c of ReadableStream.from([\"a\", \"b\"])) log(c); for await (const c of ReadableStream.from((async function* () { yield 1; yield 2; })())) log(c); });
+scenario(\"S async iteration with break cancels\", async (log) => { const s = new ReadableStream({ start(c) { c.enqueue(1); c.enqueue(2); }, cancel(r) { log(\"cancel\", String(r)); } }); for await (const c of s) { log(c); break; } log(\"locked\", s.locked); });
+scenario(\"S values preventCancel\", async (log) => { const s = new ReadableStream({ start(c) { c.enqueue(1); c.enqueue(2); c.close(); }, cancel() { log(\"cancel\"); } }); for await (const c of s.values({ preventCancel: true })) { log(c); break; } log(\"locked\", s.locked); log((await s.getReader().read()).value); });
+scenario(\"S byob reads\", async (log) => { let n = 0; const s = new ReadableStream({ type: \"bytes\", pull(c) { if (c.byobRequest) { const v = c.byobRequest.view; v[0] = 65 + n++; c.byobRequest.respond(1); } else c.enqueue(new Uint8Array([90])); if (n > 2) c.close(); }, autoAllocateChunkSize: 4 }); const r = s.getReader({ mode: \"byob\" }); for (let i = 0; i < 4; i++) { const { value, done } = await r.read(new Uint8Array(3)); log(done, value ? Array.from(value) : value, value ? value.byteLength : \"-\"); } });
+scenario(\"S byte stream default reader\", async (log) => { const s = new ReadableStream({ type: \"bytes\", start(c) { c.enqueue(new Uint8Array([1, 2])); c.enqueue(new Uint16Array([513])); c.close(); } }); for await (const c of s) log(c.constructor.name, Array.from(c)); });
+scenario(\"S byte stream bad chunk\", async (log) => { new ReadableStream({ type: \"bytes\", start(c) { try { c.enqueue(\"text\"); } catch (e) { log(e.name, e.code); } try { c.enqueue(new Uint8Array(0)); } catch (e) { log(e.name, e.code); } } }); });
+scenario(\"S pipeTo options\", async (log) => { for (const options of [{}, { preventClose: true }, { preventAbort: true }, { preventCancel: true }]) { const sink = []; const ws = new WritableStream({ write(c) { sink.push(c); }, close() { sink.push(\"closed\"); }, abort(r) { sink.push(\"aborted \" + String(r && r.message)); } }); const fail = options.preventAbort !== undefined; const rs = new ReadableStream({ start(c) { c.enqueue(\"a\"); if (fail) c.error(new Error(\"source broke\")); else c.close(); } }); await rs.pipeTo(ws, options).then(() => log(\"done\"), (e) => log(\"rejected\", e.message)); log(JSON.stringify(options), sink); } });
+scenario(\"S pipeTo a failing sink cancels the source\", async (log) => { const rs = new ReadableStream({ pull(c) { c.enqueue(\"x\"); }, cancel(r) { log(\"source cancelled\", r && r.message); } }); await rs.pipeTo(new WritableStream({ write() { throw new Error(\"sink broke\"); } })).catch((e) => log(\"rejected\", e.message)); });
+scenario(\"S pipeTo with a signal\", async (log) => { const c = new AbortController(); const rs = new ReadableStream({ pull(k) { k.enqueue(\"x\"); return tick(); }, cancel(r) { log(\"cancelled\", r && r.name); } }); const p = rs.pipeTo(new WritableStream({ abort(r) { log(\"aborted\", r && r.name); } }), { signal: c.signal }); await tick(); c.abort(); await p.catch((e) => log(\"rejected\", e.name, e.code)); });
+scenario(\"S pipeTo locked\", async (log) => { const rs = new ReadableStream(); rs.getReader(); await rs.pipeTo(new WritableStream()).catch((e) => log(e.name, e.code)); const ws = new WritableStream(); ws.getWriter(); await new ReadableStream().pipeTo(ws).catch((e) => log(e.name, e.code)); });
+scenario(\"S pipeThrough chain\", async (log) => { const double = () => new TransformStream({ transform(c, k) { k.enqueue(c); k.enqueue(c); } }); const got = []; for await (const c of ReadableStream.from([\"a\", \"b\"]).pipeThrough(double()).pipeThrough(double())) got.push(c); log(got.join(\"\")); });
+scenario(\"S transform flush and errors\", async (log) => { const ts = new TransformStream({ start(c) { c.enqueue(\"first\"); }, transform(c, k) { if (c === \"bad\") throw new RangeError(\"no\"); k.enqueue(c + \"!\"); }, flush(k) { k.enqueue(\"last\"); } }); const w = ts.writable.getWriter(); const r = ts.readable.getReader(); w.write(\"a\"); w.close(); for (;;) { const { value, done } = await r.read(); if (done) break; log(value); } const ts2 = new TransformStream({ transform() { throw new RangeError(\"no\"); } }); const w2 = ts2.writable.getWriter(); w2.write(\"bad\").catch((e) => log(\"write rejected\", e.name)); await ts2.readable.getReader().read().catch((e) => log(\"read rejected\", e.name)); });
+scenario(\"S transform backpressure\", async (log) => { const ts = new TransformStream({}, { highWaterMark: 1 }, { highWaterMark: 0 }); const w = ts.writable.getWriter(); log(\"desired\", w.desiredSize); const first = w.write(\"a\"); log(\"after write\", w.desiredSize); const r = ts.readable.getReader(); log((await r.read()).value); await first; log(\"drained\", w.desiredSize); });
+scenario(\"S transform terminate\", async (log) => { const ts = new TransformStream({ transform(c, k) { k.enqueue(c); k.terminate(); } }); const w = ts.writable.getWriter(); w.write(\"only\").catch(() => {}); w.write(\"never\").catch((e) => log(\"second rejected\", e.name)); const got = []; for await (const c of ts.readable) got.push(c); log(got); await tick(); });
+scenario(\"S tee is independent\", async (log) => { const [a, b] = ReadableStream.from([1, 2, 3]).tee(); const ra = a.getReader(); log((await ra.read()).value); ra.cancel(); const rest = []; for await (const c of b) rest.push(c); log(rest); });
+scenario(\"S tee of bytes\", async (log) => { const [a, b] = new ReadableStream({ type: \"bytes\", start(c) { c.enqueue(new Uint8Array([7, 8])); c.close(); } }).tee(); const x = (await a.getReader().read()).value, y = (await b.getReader().read()).value; log(Array.from(x), Array.from(y), x.buffer !== y.buffer); });
+scenario(\"S writer after error\", async (log) => { const ws = new WritableStream({ write() { throw new Error(\"boom\"); } }); const w = ws.getWriter(); await w.write(\"a\").catch((e) => log(\"write\", e.message)); await w.write(\"b\").catch((e) => log(\"again\", e.message)); await w.closed.catch((e) => log(\"closed\", e.message)); await w.close().catch((e) => log(\"close\", e.name)); });
+scenario(\"S writable signal\", async (log) => { let signal; const ws = new WritableStream({ start(c) { signal = c.signal; }, write() { return new Promise(() => {}); } }); const w = ws.getWriter(); w.write(\"a\").catch(() => {}); await tick(); log(signal.aborted); w.abort(new Error(\"gone\")).catch(() => {}); await tick(); log(signal.aborted, signal.reason && signal.reason.message); });
+scenario(\"S text decoder stream\", async (log) => { const parts = [new Uint8Array([0xf0, 0x9f]), new Uint8Array([0x98]), new Uint8Array([0x80, 0x61])]; const got = []; for await (const s of ReadableStream.from(parts).pipeThrough(new TextDecoderStream())) got.push(s); log(got.map((s) => Buffer.from(s).toString(\"hex\"))); const fatal = ReadableStream.from([new Uint8Array([0xff])]).pipeThrough(new TextDecoderStream(\"utf-8\", { fatal: true })); await fatal.getReader().read().catch((e) => log(\"fatal\", e.name, e.code)); });
+scenario(\"S text encoder stream\", async (log) => { const got = []; for await (const b of ReadableStream.from([\"a\\u20ac\", \"b\"]).pipeThrough(new TextEncoderStream())) got.push(Array.from(b)); log(got); });
+scenario(\"S compression\", async (log) => { for (const format of [\"gzip\", \"deflate\", \"deflate-raw\"]) { const packed = []; for await (const c of ReadableStream.from([new TextEncoder().encode(\"squeeze me \".repeat(30))]).pipeThrough(new CompressionStream(format))) packed.push(Buffer.from(c)); const back = []; for await (const c of ReadableStream.from([Buffer.concat(packed)]).pipeThrough(new DecompressionStream(format))) back.push(Buffer.from(c)); log(format, Buffer.concat(back).toString().length, Buffer.concat(packed).length < 330); } await ReadableStream.from([new Uint8Array([1, 2, 3])]).pipeThrough(new DecompressionStream(\"gzip\")).getReader().read().catch((e) => log(\"bad gzip\", e.name, e.code)); });
+scenario(\"S node stream adapters\", async (log) => { const { Readable, Writable, Duplex } = require(\"stream\"); const viaWeb = []; for await (const c of Readable.toWeb(Readable.from([Buffer.from(\"n1\"), Buffer.from(\"n2\")]))) viaWeb.push(Buffer.from(c).toString()); log(viaWeb); const viaNode = []; for await (const c of Readable.fromWeb(ReadableStream.from([\"w1\", \"w2\"]), { objectMode: true })) viaNode.push(c); log(viaNode); const sink = []; const ww = Writable.toWeb(new Writable({ write(c, e, cb) { sink.push(String(c)); cb(); } })); const w = ww.getWriter(); await w.write(\"in\"); await w.close(); log(sink); const fromWeb = Writable.fromWeb(new WritableStream({ write(c) { sink.push(\"web:\" + String(c)); } })); await new Promise((r) => fromWeb.end(\"x\", r)); log(sink); const pair = Duplex.toWeb(new Duplex({ read() { this.push(\"d\"); this.push(null); }, write(c, e, cb) { cb(); } })); log(typeof pair.readable.getReader, typeof pair.writable.getWriter); });
+scenario(\"S a reader releases and a new one continues\", async (log) => { const s = ReadableStream.from([1, 2]); const a = s.getReader(); log((await a.read()).value); a.releaseLock(); await a.read().catch((e) => log(e.name, e.code)); log((await s.getReader().read()).value); });
+scenario(\"S queueMicrotask\", async (log) => { const order = []; queueMicrotask(() => order.push(\"micro\")); Promise.resolve().then(() => order.push(\"promise\")); order.push(\"sync\"); await tick(); log(order); try { queueMicrotask(5); } catch (e) { log(e.code); } });
+(async () => { for (const start of pending) await start(); const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"G \") ? \"reads generated\" : line.startsWith(\"W \") ? \"writes generated\" : line.startsWith(\"S \") ? \"behaviours\" : line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+globalThis.out.push(\"finished\"); })();
+
+"
+
+// 150 generated plans of a source and a reader (enqueue, wait, close, error
+// against read, cancel, release, tee), 80 generated plans of writes into a
+// sink with backpressure and failures, and about 50 single cases: byte
+// streams, pipeTo and its options, transforms, tee, the text and compression
+// streams, the node stream adapters. Each line is a kind of case, how many,
+// and a hash of what they printed in node 26.11.1
+pub fn web_streams_match_node_test() {
+  let rt =
+    run_to_end(run_commonjs(node_runtime(), web_streams_match_node_script))
+  assert out_lines(rt)
+    == [
+      "exports 1 339852181",
+      "globals 1 1207816678",
+      "descriptors 1 1205999827",
+      "shape 1 2454301418",
+      "without 1 2256888937",
+      "bad 5 1297428313",
+      "bytes 1 2022779013",
+      "locked 1 3700155792",
+      "byob 1 34615815",
+      "reader 1 2862022606",
+      "strategies 1 1622576742",
+      "inspect 1 2640018962",
+      "structuredClone 1 1357471374",
+      "from 1 4105487919",
+      "encoder 1 2641063473",
+      "compression 1 2123825429",
+      "reads generated 60 1777956438",
+      "writes generated 40 3510005093",
+      "behaviours 24 355039172",
+      "finished",
+    ]
 }

@@ -13,7 +13,10 @@ pub fn builtin() -> Builtin(host) {
     dependencies: [
       "spark:internal", "node:events", "node:buffer", "node:string_decoder",
     ],
-    optional: ["spark:dom_events", "spark:encoding", "node:async_hooks"],
+    optional: [
+      "spark:dom_events", "spark:encoding", "node:async_hooks",
+      "node:stream/web",
+    ],
     exports: [
       "Duplex", "PassThrough", "Readable", "Stream", "Transform", "Writable",
       "_isArrayBufferView", "_isUint8Array", "_uint8ArrayToBuffer",
