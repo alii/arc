@@ -108,6 +108,8 @@ pub type ScopeBuilder {
     current_fn: ScopeId,
     raw_refs: List(NameRef),
     assign_refs: List(AssignRef),
+    // the length of assign_refs
+    assign_count: Int,
     try_scopes: List(ScopeId),
     try_assign_refs: List(TryAssignRef),
     own_lexical_refs: Dict(ScopeId, LexicalRefs),
@@ -132,6 +134,7 @@ pub fn init(root_kind: ScopeKind) -> ScopeBuilder {
     current_fn: root_scope_id,
     raw_refs: [],
     assign_refs: [],
+    assign_count: 0,
     try_scopes: [],
     try_assign_refs: [],
     own_lexical_refs: dict.new(),
@@ -299,6 +302,7 @@ pub fn assign_ref(sb: ScopeBuilder, name: String) -> ScopeBuilder {
   ScopeBuilder(
     ..sb,
     assign_refs: [assign_ref, ..sb.assign_refs],
+    assign_count: sb.assign_count + 1,
     try_assign_refs:,
   )
 }
@@ -318,10 +322,7 @@ pub fn reenter_try(
   before_catch: ScopeBuilder,
 ) -> ScopeBuilder {
   let in_catch =
-    list.take(
-      sb.assign_refs,
-      list.length(sb.assign_refs) - list.length(before_catch.assign_refs),
-    )
+    list.take(sb.assign_refs, sb.assign_count - before_catch.assign_count)
   let try_assign_refs =
     list.fold(in_catch, sb.try_assign_refs, fn(refs, write) {
       [TryAssignRef(scope: write.scope, name: write.name, try_scope:), ..refs]
