@@ -4,7 +4,7 @@
 
 -define(COMPILE_TASK_THRESHOLD, 262144).         %% bytes
 -define(COMPILE_HEAP_WORDS_PER_BYTE, 16).
--define(COMPILE_HEAP_MAX_WORDS, 134217728).      %% ~1GB
+-define(COMPILE_HEAP_MAX_WORDS, 268435456).      %% ~2GB
 
 run(SourceBytes, Task) when SourceBytes < ?COMPILE_TASK_THRESHOLD ->
     Task();
