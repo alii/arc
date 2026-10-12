@@ -2,6 +2,7 @@
 -export([access/2, realpath/1, write/2, env/0, cwd/0, platform/0, arch/0, pid/0, is_tty/1]).
 -export([stat/2, readlink/1, readdir/1, read_file/1]).
 -export([user/0, certificates/0, terminals/0]).
+-export([preload/0]).
 -export([os_release/0, os_version/0, machine/0, hostname/0,
          homedir/0, tmpdir/0, little_endian/0, parallelism/0]).
 
@@ -262,3 +263,13 @@ parent(Done) -> lists:droplast(Done).
 
 posix(Reason) when is_atom(Reason) ->
     string:uppercase(atom_to_binary(Reason, utf8)).
+
+%% loads every module of this program now, as a release does when it boots.
+%% Left to load on first use, each one costs the process that first calls it
+%% a full garbage collection, which is slow once a big script is in memory
+preload() ->
+    Packages = filename:dirname(filename:dirname(filename:dirname(code:which(?MODULE)))),
+    Modules = [list_to_atom(filename:basename(Beam, ".beam"))
+               || Beam <- filelib:wildcard(filename:join(Packages, "*/ebin/*.beam"))],
+    _ = code:ensure_modules_loaded(Modules),
+    nil.

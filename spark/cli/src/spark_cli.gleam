@@ -376,7 +376,11 @@ fn run(args: List(String)) -> Result(Nil, CliError) {
 @external(erlang, "erlang", "halt")
 fn halt(code: Int) -> a
 
+@external(erlang, "spark_cli_ffi", "preload")
+fn preload() -> Nil
+
 pub fn main() -> Nil {
+  preload()
   case run(argv.load().arguments) {
     Ok(Nil) -> Nil
     Error(err) -> {
