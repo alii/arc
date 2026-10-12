@@ -6120,7 +6120,12 @@ fn scan_directive_prologue(
     None -> Ok(p)
     Some(seen_directives) -> {
       use Nil <- result.try(check_retroactive_octals(p, seen_directives))
-      let p = Parser(..p, ctx: GrammarContext(..p.ctx, strict: True))
+      let p =
+        Parser(
+          ..p,
+          ctx: GrammarContext(..p.ctx, strict: True),
+          scopes: scope_builder.mark_strict(p.scopes),
+        )
       check_retroactive_params(p)
     }
   }

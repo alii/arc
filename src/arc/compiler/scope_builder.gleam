@@ -619,6 +619,11 @@ pub fn close_block(sb: ScopeBuilder, block_id: ScopeId) -> ScopeBuilder {
   }
 }
 
+// a use strict directive covers the scope it opens and everything inside
+pub fn mark_strict(sb: ScopeBuilder) -> ScopeBuilder {
+  update_current(sb, fn(s) { RawScope(..s, is_strict: True) })
+}
+
 pub fn update_current(
   sb: ScopeBuilder,
   f: fn(RawScope) -> RawScope,
