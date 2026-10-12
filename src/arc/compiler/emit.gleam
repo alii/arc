@@ -2669,7 +2669,11 @@ fn splice_arguments_setup(
   }
   let simple_params = !layout.non_simple_fixed && layout.rest == None
   let forward = uses_args && !e.arguments_escape && !fn_info(e).eval_in_subtree
-  let code = rewrite_apply_arguments(e.code, forward:, simple_params:)
+  // an ApplyArguments site sets references_arguments, so without it there is none
+  let code = case e.references_arguments {
+    True -> rewrite_apply_arguments(e.code, forward:, simple_params:)
+    False -> e.code
+  }
   let args_setup_rev = case uses_args && !forward {
     True -> [put_args, IrFinal(opcode.CreateArguments(simple_params:))]
     False -> []

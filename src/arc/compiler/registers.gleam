@@ -1,6 +1,7 @@
 import arc/bytecode/opcode.{type Op}
 import arc/internal/tuple_array
 import arc/rt/bytecode
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -14,6 +15,8 @@ pub fn assign_regs(
   pinned: Set(Int),
 ) -> #(tuple_array.TupleArray(Op), bytecode.Regs) {
   let ops = tuple_array.to_list(code)
+  // only a slot written inside a loop is ever picked
+  use <- bool.guard(!has_loop(ops, 0), #(code, bytecode.NoRegs))
   let #(scores, pinned) =
     score_slots(ops, loop_depths(ops), 0, cold_pcs(code), dict.new(), pinned)
   let picked =
@@ -52,6 +55,17 @@ pub fn assign_regs(
 }
 
 // nesting depth per pc from backward jumps
+fn has_loop(ops: List(Op), pc: Int) -> Bool {
+  case ops {
+    [] -> False
+    [op, ..rest] ->
+      case opcode.jump_target(op) {
+        Some(target) if target <= pc -> True
+        _ -> has_loop(rest, pc + 1)
+      }
+  }
+}
+
 fn loop_depths(ops: List(Op)) -> List(Int) {
   let deltas =
     list.index_fold(ops, dict.new(), fn(acc, op, pc) {
