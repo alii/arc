@@ -135,6 +135,8 @@ type Emitter {
     child_fn_cursor: List(ScopeId),
     // plain functions written in here are left for their first call
     lazy: Bool,
+    // the next function is called where it is written, so it is compiled now
+    called_now: Bool,
   )
 }
 
@@ -897,6 +899,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     scope_cursor: block_child_scopes(tree, fn_id),
     child_fn_cursor: scope.child_function_scopes(tree, fn_id),
     lazy: False,
+    called_now: False,
     field_init: NoFieldInit,
     in_block: False,
     deletable_global_vars: False,
@@ -2508,7 +2511,13 @@ fn compile_function_body(
   body: FnBody,
   shape shape: FunctionShape,
 ) -> Result(#(CompiledChild, Emitter), EmitError) {
-  case lazy_source(parent, shape) {
+  let called_now = parent.called_now
+  let parent = Emitter(..parent, called_now: False)
+  let source = case called_now {
+    True -> None
+    False -> lazy_source(parent, shape)
+  }
+  case source {
     None -> compile_function_now(parent, name, params, body, shape:)
     Some(#(source, fn_id, rest)) -> {
       let FnTraits(is_generator:, is_async:, is_constructor:, ..) =
@@ -2540,6 +2549,30 @@ fn compile_function_body(
         )
       Ok(#(child, Emitter(..parent, child_fn_cursor: rest)))
     }
+  }
+}
+
+// (function () {})() and (function () {}).call(x): leaving such a function
+// for its first call would only parse it twice
+fn calls_function_expression(callee: ast.Expression) -> Bool {
+  case ast_util.unwrap_parens(callee) {
+    ast.FunctionExpression(..) -> True
+    ast.MemberExpression(object:, property: ast.Dot(name: "call", ..), ..)
+    | ast.MemberExpression(object:, property: ast.Dot(name: "apply", ..), ..) ->
+      case ast_util.unwrap_parens(object) {
+        ast.FunctionExpression(..) -> True
+        _ -> False
+      }
+    _ -> False
+  }
+}
+
+// a function expression wrapped in parentheses is, by long habit, one that
+// is about to be called
+fn hint_called_now(e: Emitter, inner: ast.Expression) -> Emitter {
+  case inner {
+    ast.FunctionExpression(..) -> Emitter(..e, called_now: True)
+    _ -> e
   }
 }
 
@@ -3436,7 +3469,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_op(e, opcode.Await)
     }
 
-    ast.ParenthesizedExpression(_, inner) -> emit_expr(e, inner)
+    ast.ParenthesizedExpression(_, inner) ->
+      emit_expr(hint_called_now(e, inner), inner)
 
     ast.RegExpLiteral(_, pattern, flags) -> {
       let e = push_const(e, mk_string(pattern))
@@ -3706,6 +3740,7 @@ fn emit_call(
   use <- bool.lazy_guard(ast_util.chain_has_optional(callee), fn() {
     emit_chain_root(e, expr)
   })
+  let e = Emitter(..e, called_now: calls_function_expression(callee))
   case callee {
     // §13.3.7.1 super(args): parent ctor, new.target, construct, bind this, field init
     ast.SuperExpression(_) -> {
@@ -3996,7 +4031,8 @@ fn emit_named_expr(
 ) -> Result(Emitter, EmitError) {
   case expr {
     // looks through parens: (function(){}) is still anonymous
-    ast.ParenthesizedExpression(_, inner) -> emit_named_expr(e, inner, name)
+    ast.ParenthesizedExpression(_, inner) ->
+      emit_named_expr(hint_called_now(e, inner), inner, name)
     ast.FunctionExpression(_, None, params, body, is_generator, is_async) ->
       emit_function_closure(
         e,

@@ -102,3 +102,29 @@ pub fn a_throw_from_a_lazy_function_is_caught_test() {
     )
     == Ok(KStr("RangeError:late"))
 }
+
+fn is_stub(template: FuncTemplate) -> Bool {
+  case tuple_array.to_list(template.bytecode) {
+    [opcode.CompileSelf(_), ..] -> True
+    _ -> False
+  }
+}
+
+// a function called where it is written would only be parsed twice
+pub fn a_function_called_where_it_is_written_is_compiled_at_once_test() {
+  let script =
+    compile(
+      "(function () { function inner() { return 1; } return inner(); })();
+       !function () { return 2; }.call(this);
+       var wrapped = (function () { return 3; });
+       var later = function () { return 4; };",
+    )
+  let assert [called, called_with_this, wrapped, later] =
+    tuple_array.to_list(script.functions)
+  assert !is_stub(called)
+  assert !is_stub(called_with_this)
+  assert !is_stub(wrapped)
+  assert is_stub(later)
+  let assert [inner] = tuple_array.to_list(called.functions)
+  assert is_stub(inner)
+}
