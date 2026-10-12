@@ -131,7 +131,6 @@ type Emitter {
     line: Int,
     // child function scope ids in emission order, popped by compile_function_body
     child_fn_cursor: List(ScopeId),
-    next_site: Int,
   )
 }
 
@@ -859,7 +858,6 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     free_ref_slots: [],
     initialized: set.new(),
     line: 0,
-    next_site: 0,
   )
 }
 
@@ -2494,7 +2492,6 @@ fn compile_function_body(
     Emitter(
       ..new_emitter(parent.scope_tree, fn_id),
       next_label: parent.next_label,
-      next_site: parent.next_site,
       strict: child_strict,
       is_async:,
       is_arrow:,
@@ -2587,10 +2584,7 @@ fn compile_function_body(
       code_kind:,
     )
   // take the child's tree back: it holds scratch-slot local_count bumps
-  Ok(#(
-    child,
-    Emitter(..parent, scope_tree: e.scope_tree, next_site: e.next_site),
-  ))
+  Ok(#(child, Emitter(..parent, scope_tree: e.scope_tree)))
 }
 
 // §13.2.5.5 nfe self-name, skipped when shadowed by params/vars/functions
@@ -3358,11 +3352,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // lowered to a call with the site's template object as first argument
     ast.TaggedTemplateExpression(tag:, parts:, span:) -> {
-      let site = e.next_site
-      let e = Emitter(..e, next_site: site + 1)
       let template =
         ast.IntrinsicTemplateObject(
-          site:,
+          // no two tagged templates end at the same offset
+          site: span.end,
           quasis: ast.template_quasis(parts),
           span:,
         )

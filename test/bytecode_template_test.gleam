@@ -112,8 +112,9 @@ pub fn compiling_twice_gives_equal_templates_test() {
     == compile("eval('1'); new Function('return id`x`')")
 }
 
-pub fn template_sites_number_the_unit_in_source_order_test() {
+// a site is the offset its template ends at, so one function compiled alone
+// numbers its sites the same as the whole unit does
+pub fn template_sites_are_distinct_source_offsets_test() {
   let sites = all_template_sites(compile(tagged_source))
-  assert list.length(sites) == 8
-  assert list.sort(sites, int.compare) == [0, 1, 2, 3, 4, 5, 6, 7]
+  assert list.sort(sites, int.compare) == [48, 86, 103, 137, 161, 177, 218, 266]
 }
