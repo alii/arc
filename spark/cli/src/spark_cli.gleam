@@ -34,6 +34,7 @@ import spark/structured_clone
 import spark/timers
 import spark/url
 import spark/util
+import spark/zlib
 
 type CliError {
   Usage
@@ -90,6 +91,7 @@ fn builtins(
     stream.promises_builtin(),
     stream.consumers_builtin(),
     structured_clone.builtin(),
+    zlib.builtin(),
   ]
 }
 

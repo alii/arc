@@ -34,6 +34,7 @@ const names = [
   "stream_promises",
   "stream_consumers",
   "structured_clone",
+  "zlib",
 ]
 
 const target = "src/spark/js.gleam"

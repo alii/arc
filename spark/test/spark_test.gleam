@@ -39,6 +39,7 @@ import spark/structured_clone
 import spark/timers
 import spark/url
 import spark/util
+import spark/zlib
 
 @external(erlang, "spark_test_ffi", "main")
 pub fn main() -> Nil
@@ -82,6 +83,7 @@ fn builtins() -> List(Builtin(Nil)) {
     stream.promises_builtin(),
     stream.consumers_builtin(),
     structured_clone.builtin(),
+    zlib.builtin(),
   ]
 }
 
@@ -3747,4 +3749,170 @@ pub fn a_file_read_is_a_want_the_embedder_answers_test() {
     })
   assert out_lines(run_to_end(rt))
     == ["now: hello", "later: hello", "later: deep,inner.bin"]
+}
+
+const zlib_script = "
+globalThis.__zlibSamples = [[\"deflate text\",\"inflateSync\",\"789c2b4ecc2dc849552849ad28d15128c6c1d1c32933aa6c54d9a8b25165a3ca86993200e6db3457\"],[\"deflate bin\",\"inflateSync\",\"789c6390b78bad99bdebe60f71b3d092c99b2e7ee0d7f3cde95e75f205bb9a6b4af3a2830ffecbd9c654cfda79e3bb986948f1a48d17def3e9fa6477ad3cf19c4dd525b969e181fbff646da2ab66eeb8fe4dd424b868e286f3ef7875bcb33a571c7fc6aae29cd4b860ffbdbf32d6519533b65ffb2a621c543861fdb9b73cda5e991dcb8f3d6551764a6c98bfefee1f69abc88ae9dbae7e11360a2ce85f77f60db7966746fbb2a34f98951c13eae7edbdf35bca32a27cdad62b9f850c03f2fbd69e79cda5e991deb6f4c863264587f8bab97b6eff92b4082f9bbae5f2274103ffbcde35a75f716ab8a7b52e39fc8851c13eae76ceee5b3f25ccc34aa76cbef45140df2fb767f5a9971cea6ea92d8b0f3d6418f5ff90f53f0001995ca6\"],[\"deflate empty\",\"inflateSync\",\"789c030000000001\"],[\"deflate9 text\",\"inflateSync\",\"78da2b4ecc2dc849552849ad28d15128c6c1d1c32933aa6c54d9a8b25165a3ca86993200e6db3457\"],[\"deflate9 bin\",\"inflateSync\",\"78da6390b78bad99bdebe60f71b3d092c99b2e7ee0d7f3cde95e75f205bb9a6b4af3a2830ffecbd9c654cfda79e3bb986948f1a48d17def3e9fa6477ad3cf19c4dd525b969e181fbff646da2ab66eeb8fe4dd424b868e286f3ef7875bcb33a571c7fc6aae29cd4b860ffbdbf32d6519533b65ffb2a621c543861fdb9b73cda5e991dcb8f3d6551764a6c98bfefee1f69abc88ae9dbae7e11360a2ce85f77f60db7966746fbb2a34f98951c13eae7edbdf35bca32a27cdad62b9f850c03f2fbd69e79cda5e991deb6f4c863264587f8bab97b6eff92b4082f9bbae5f2274103ffbcde35a75f716ab8a7b52e39fc8851c13eae76ceee5b3f25ccc34aa76cbef45140df2fb767f5a9971cea6ea92d8b0f3d6418f5ff90f53f0001995ca6\"],[\"deflate9 empty\",\"inflateSync\",\"78da030000000001\"],[\"deflate0 text\",\"inflateSync\",\"7801011806e7f973616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e2073616d706c6520746578742c2073616d706c6520746578742c2073616d706c6520746578742e20e6db3457\"],[\"deflate0 bin\",\"inflateSync\",\"780101bc0243fd001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a501995ca6\"],[\"deflate0 empty\",\"inflateSync\",\"7801010000ffff00000001\"],[\"gzip text\",\"gunzipSync\",\"1f8b08000000000000132b4ecc2dc849552849ad28d15128c6c1d1c32933aa6c54d9a8b25165a3ca869932000f26a63918060000\"],[\"gzip bin\",\"gunzipSync\",\"1f8b08000000000000136390b78bad99bdebe60f71b3d092c99b2e7ee0d7f3cde95e75f205bb9a6b4af3a2830ffecbd9c654cfda79e3bb986948f1a48d17def3e9fa6477ad3cf19c4dd525b969e181fbff646da2ab66eeb8fe4dd424b868e286f3ef7875bcb33a571c7fc6aae29cd4b860ffbdbf32d6519533b65ffb2a621c543861fdb9b73cda5e991dcb8f3d6551764a6c98bfefee1f69abc88ae9dbae7e11360a2ce85f77f60db7966746fbb2a34f98951c13eae7edbdf35bca32a27cdad62b9f850c03f2fbd69e79cda5e991deb6f4c863264587f8bab97b6eff92b4082f9bbae5f2274103ffbcde35a75f716ab8a7b52e39fc8851c13eae76ceee5b3f25ccc34aa76cbef45140df2fb767f5a9971cea6ea92d8b0f3d6418f5ff90f53f007f2f6a1cbc020000\"],[\"gzip empty\",\"gunzipSync\",\"1f8b080000000000001303000000000000000000\"],[\"raw text\",\"inflateRawSync\",\"2b4ecc2dc849552849ad28d15128c6c1d1c32933aa6c54d9a8b25165a3ca86993200\"],[\"raw bin\",\"inflateRawSync\",\"6390b78bad99bdebe60f71b3d092c99b2e7ee0d7f3cde95e75f205bb9a6b4af3a2830ffecbd9c654cfda79e3bb986948f1a48d17def3e9fa6477ad3cf19c4dd525b969e181fbff646da2ab66eeb8fe4dd424b868e286f3ef7875bcb33a571c7fc6aae29cd4b860ffbdbf32d6519533b65ffb2a621c543861fdb9b73cda5e991dcb8f3d6551764a6c98bfefee1f69abc88ae9dbae7e11360a2ce85f77f60db7966746fbb2a34f98951c13eae7edbdf35bca32a27cdad62b9f850c03f2fbd69e79cda5e991deb6f4c863264587f8bab97b6eff92b4082f9bbae5f2274103ffbcde35a75f716ab8a7b52e39fc8851c13eae76ceee5b3f25ccc34aa76cbef45140df2fb767f5a9971cea6ea92d8b0f3d6418f5ff90f53f00\"],[\"raw empty\",\"inflateRawSync\",\"0300\"],[\"wbits9 text\",\"inflateSync\",\"18952b4ecc2dc849552849ad28d15128c6c1d1c32933aa6c54d9a8b25165a3ca86993200e6db3457\"],[\"wbits9 bin\",\"inflateSync\",\"189501bc0243fd001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a501995ca6\"],[\"wbits9 empty\",\"inflateSync\",\"1895030000000001\"],[\"huffman text\",\"inflateSync\",\"780105c1b10d00400802c05518c0fc4e14749a9848c1f87f779c6dc18a0bc7d916acb8709c6dc18a1f8eb32d5871e138db8215178eb32d58f1c371b6052b2e1c675bb0e2c271b6052b7e38ceb660c585e36c0b565c38ceb660c50fc7d916acb8709c6dc18a0bc7d916acf8e138db8215178eb32d5871e138db82153f1c675bb0e2c271b6052b2e1c675bb0e287e36c0b565c38ceb660c585e36c0b56fc709c6dc18a0bc7d916acb8709c6dc18a1f8eb32d5871e138db8215178eb32d58f1c371b6052b2e1c675bb0e2c271b6052b7e38ceb660c585e36c0b565c38ceb660c50fc7d916acb8709c6dc18a0bc7d916acf8e138db8215178eb32d5871e138db82153f1c675bb0e2c271b6052b2e1c675bb0e287e36c0b565c38ceb660c585e36c0b56fc709c6dc18a0bc7d916acb8709c6dc18a1f8eb32d5871e138db8215178eb32d58f1c371b6052b2e1c675bb0e2c271b6052b7e38ceb660c585e36c0b565c38ceb660c50fc7d916acb8709c6dc18a0bc7d916acf8e138db8215178eb32d5871e138db82153f1c675bb0e2c271b6052b2e1c675bb0e287e36c0b565c38ceb660c585e36c0b56fc709c6dc18a0bc7d916acb8709c6dc18a1f8eb32d5871e138db8215178eb32d58f1c371b6052b2e1c675bb0e2c271b6052b7e38ceb660c585e36c0b565c38ceb660c50fc7d916acb8709c6dc18a0bc7d916acf8e138db8215178eb32d5871e138db82153f1c675bb0e2c271b6052b2e1c675bb0e287e36c0b565c38ceb660c585e36c0b56fc709c6dc18a0bc7d916acb8709c6dc18a1f8eb32d5871e138db8215178eb32d58f1c371b6052b2e1c675bb0e2c271b6052b7e38ceb660c585e36c0b565c38ceb660c50fc7d916acb8709c6dc18a0bc7d916acf8e138db8215178eb32d5871e138db82153f1c675bb0e2c271b6052b2e1c675bb0e287e36c0b565c38ceb660c585e36c0b56fcf001e6db3457\"],[\"huffman bin\",\"inflateSync\",\"780101bc0243fd001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a501995ca6\"],[\"huffman empty\",\"inflateSync\",\"7801030000000001\"],[\"zstd text\",\"zstdDecompressSync\",\"28b52ffd6018054d0200d2450a10c025c301c02cc0628afe0f4ae1abc301d2b66ddbb66ddbb66ddbb66ddbb66d93a39821130c0240044fa810f0fb1be0e711bc61f8133ffbffd7fffff5ff7ffdffd7870630a5\"],[\"zstd bin\",\"zstdDecompressSync\",\"28b52ffd60bc015508000410001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1010000b903ea9a02\"],[\"zstd empty\",\"zstdDecompressSync\",\"28b52ffd2000010000\"],[\"zstd19 text\",\"zstdDecompressSync\",\"28b52ffd601805cd00007873616d706c6520746578742c202e200200ee29f56300ce2f\"],[\"zstd19 bin\",\"zstdDecompressSync\",\"28b52ffd60bc015508000410001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1010000b903ea9a02\"],[\"zstd19 empty\",\"zstdDecompressSync\",\"28b52ffd2000010000\"],[\"unzip gzip text\",\"unzipSync\",\"1f8b08000000000000132b4ecc2dc849552849ad28d15128c6c1d1c32933aa6c54d9a8b25165a3ca869932000f26a63918060000\"],[\"unzip gzip bin\",\"unzipSync\",\"1f8b08000000000000136390b78bad99bdebe60f71b3d092c99b2e7ee0d7f3cde95e75f205bb9a6b4af3a2830ffecbd9c654cfda79e3bb986948f1a48d17def3e9fa6477ad3cf19c4dd525b969e181fbff646da2ab66eeb8fe4dd424b868e286f3ef7875bcb33a571c7fc6aae29cd4b860ffbdbf32d6519533b65ffb2a621c543861fdb9b73cda5e991dcb8f3d6551764a6c98bfefee1f69abc88ae9dbae7e11360a2ce85f77f60db7966746fbb2a34f98951c13eae7edbdf35bca32a27cdad62b9f850c03f2fbd69e79cda5e991deb6f4c863264587f8bab97b6eff92b4082f9bbae5f2274103ffbcde35a75f716ab8a7b52e39fc8851c13eae76ceee5b3f25ccc34aa76cbef45140df2fb767f5a9971cea6ea92d8b0f3d6418f5ff90f53f007f2f6a1cbc020000\"],[\"unzip gzip empty\",\"unzipSync\",\"1f8b080000000000001303000000000000000000\"]];
+const zlib = require(\"zlib\");
+const process = require(\"process\");
+let seed = 31337;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const show = (v) => (Buffer.isBuffer(v) ? \"buf:\" + v.length + \":\" + (v.length <= 24 ? v.toString(\"hex\") : zlib.crc32(v)) : JSON.stringify(v) ?? String(v));
+const call = (f) => { try { return show(f()); } catch (e) { return \"threw \" + e.constructor.name + \" \" + e.code + \" \" + e.errno + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+// data that compresses, data that does not, text, and nothing
+function data() {
+  const n = pick([0, 1, 5, 64, 300, 5000, 40000]);
+  const kind = rnd(4);
+  if (kind === 0) return Buffer.alloc(n, rnd(256));
+  if (kind === 1) return Buffer.from(Array.from({ length: n }, () => rnd(256)));
+  if (kind === 2) return Buffer.from(\"the quick brown fox jumps over the lazy dog. \".repeat(Math.ceil(n / 45)).slice(0, n));
+  return Buffer.from(Array.from({ length: n }, (_, i) => (i * 7) % 251));
+}
+const pairs = [[\"deflateSync\", \"inflateSync\"], [\"gzipSync\", \"gunzipSync\"], [\"deflateRawSync\", \"inflateRawSync\"], [\"deflateSync\", \"unzipSync\"], [\"gzipSync\", \"unzipSync\"], [\"zstdCompressSync\", \"zstdDecompressSync\"]];
+// ---- what node compressed, this must read; what this compresses must read back the same
+for (let i = 0; i < 150; i++) {
+  const input = data();
+  const [pack, unpack] = pick(pairs);
+  const zstd = pack.startsWith(\"zstd\");
+  const options = zstd ? pick([undefined, { params: { [zlib.constants.ZSTD_c_compressionLevel]: pick([1, 3, 9, 19]) } }]) : pick([undefined, { level: pick([-1, 0, 1, 6, 9]) }, { memLevel: pick([1, 8, 9]) }, { strategy: pick([0, 1, 2, 3]) }, { windowBits: pick([9, 12, 15]) }, { chunkSize: pick([64, 1024]) }]);
+  lines.push(\"R \" + i + \" \" + pack + \" \" + JSON.stringify(options) + \" \" + input.length + \" \" + call(() => { const packed = zlib[pack](input, options); const back = zlib[unpack](packed, zstd || !options?.windowBits ? undefined : options); return [back.equals(input), back.length, packed.length <= input.length + 64]; }));
+}
+// ---- bytes node made, kept here, so reading them is checked against node's own output
+const samples = process.env.ZLIB_SAMPLES ? JSON.parse(process.env.ZLIB_SAMPLES) : null;
+if (globalThis.__zlibSamples || samples) {
+  for (const [name, unpack, hex, options] of globalThis.__zlibSamples ?? samples) t(\"sample \" + name, () => zlib[unpack](Buffer.from(hex, \"hex\"), options));
+}
+// ---- broken input
+const good = { inflateSync: zlib.deflateSync(\"hello world \".repeat(50)), gunzipSync: zlib.gzipSync(\"hello world \".repeat(50)), inflateRawSync: zlib.deflateRawSync(\"hello world \".repeat(50)), zstdDecompressSync: zlib.zstdCompressSync(\"hello world \".repeat(50)) };
+for (const [name, packed] of Object.entries(good)) {
+  t(\"cut short \" + name, () => zlib[name](packed.subarray(0, packed.length - 6)));
+  t(\"cut to header \" + name, () => zlib[name](packed.subarray(0, 2)));
+  t(\"empty \" + name, () => zlib[name](Buffer.alloc(0)));
+  t(\"not it \" + name, () => zlib[name](Buffer.from([1, 2, 3, 4, 5, 6, 7, 8])));
+  t(\"junk after \" + name, () => zlib[name](Buffer.concat([packed, Buffer.from(\"junk\")])).length);
+  t(\"string in \" + name, () => zlib[name](\"not compressed at all\"));
+}
+t(\"cut short but sync flush\", () => zlib.inflateSync(good.inflateSync.subarray(0, good.inflateSync.length - 6), { finishFlush: zlib.constants.Z_SYNC_FLUSH }).length);
+t(\"gunzip a deflate\", () => zlib.gunzipSync(good.inflateSync));
+t(\"inflate a gzip\", () => zlib.inflateSync(good.gunzipSync));
+t(\"two gzip members\", () => zlib.gunzipSync(Buffer.concat([zlib.gzipSync(\"one\"), zlib.gzipSync(\"two\")])).toString());
+// ---- options and arguments
+t(\"input kinds\", () => [zlib.inflateSync(zlib.deflateSync(\"text\")).toString(), zlib.inflateSync(zlib.deflateSync(new Uint8Array([1, 2]))).toString(\"hex\"), zlib.inflateSync(zlib.deflateSync(new Uint16Array([513]))).toString(\"hex\"), zlib.inflateSync(zlib.deflateSync(new DataView(new ArrayBuffer(2)))).toString(\"hex\"), zlib.inflateSync(zlib.deflateSync(new ArrayBuffer(3))).length]);
+for (const bad of [5, null, undefined, {}, []]) t(\"bad input \" + JSON.stringify(bad), () => zlib.deflateSync(bad));
+for (const [name, value] of [[\"level\", 10], [\"level\", -2], [\"level\", \"9\"], [\"windowBits\", 7], [\"windowBits\", 16], [\"memLevel\", 0], [\"memLevel\", 10], [\"strategy\", 5], [\"chunkSize\", 10], [\"chunkSize\", \"x\"], [\"flush\", 99], [\"finishFlush\", -1], [\"maxOutputLength\", 0], [\"dictionary\", \"text\"]]) t(\"bad option \" + name + \"=\" + value, () => zlib.deflateSync(\"x\", { [name]: value }));
+t(\"windowBits 8 raw\", () => call(() => zlib.deflateRawSync(\"x\", { windowBits: 8 }).length >= 0));
+t(\"gzip windowBits 8\", () => zlib.gzipSync(\"x\", { windowBits: 8 }));
+t(\"maxOutputLength\", () => zlib.inflateSync(zlib.deflateSync(Buffer.alloc(5000)), { maxOutputLength: 100 }));
+t(\"dictionary\", () => { const dictionary = Buffer.from(\"hello world\"); const packed = zlib.deflateSync(\"hello world hello\", { dictionary }); return [zlib.inflateSync(packed, { dictionary }).toString(), call(() => zlib.inflateSync(packed))]; });
+t(\"info option\", () => { const r = zlib.deflateSync(\"x\", { info: true }); return [Object.keys(r), Buffer.isBuffer(r.buffer), r.engine.constructor.name]; });
+t(\"zstd bad param\", () => zlib.zstdCompressSync(\"x\", { params: { 99999: 1 } }));
+t(\"zstd param type\", () => zlib.zstdCompressSync(\"x\", { params: { [zlib.constants.ZSTD_c_compressionLevel]: \"3\" } }));
+t(\"crc32\", () => [zlib.crc32(\"hello\"), zlib.crc32(Buffer.from(\"hello\")), zlib.crc32(\"world\", zlib.crc32(\"hello \")), zlib.crc32(\"hello world\"), zlib.crc32(\"\"), zlib.crc32(new Uint8Array([255]))]);
+t(\"crc32 bad\", () => zlib.crc32(5));
+t(\"crc32 bad value\", () => zlib.crc32(\"x\", -1));
+// ---- shape
+t(\"keys\", () => Object.keys(zlib));
+t(\"constants\", () => [Object.keys(zlib.constants).length, zlib.constants.Z_BEST_COMPRESSION, zlib.constants.Z_SYNC_FLUSH, zlib.constants.ZSTD_c_compressionLevel, zlib.constants.BROTLI_OPERATION_FLUSH, zlib.constants.Z_MAX_CHUNK, Object.isFrozen(zlib.constants), zlib.codes.Z_DATA_ERROR, zlib.codes[\"-3\"]]);
+t(\"classes\", () => [\"Deflate\", \"Inflate\", \"Gzip\", \"Gunzip\", \"DeflateRaw\", \"InflateRaw\", \"Unzip\", \"ZstdCompress\", \"ZstdDecompress\"].map((n) => { const s = n.startsWith(\"Zstd\") ? new zlib[n]() : zlib[\"create\" + n](); return [s instanceof zlib[n], s instanceof require(\"stream\").Transform, s.bytesWritten, typeof s.flush, typeof s.close, typeof s.params, typeof s.reset]; }));
+t(\"without new\", () => { try { return zlib.Deflate() instanceof zlib.Deflate; } catch (e) { return e.name; } });
+// ---- callbacks and streams, in a fixed order
+const later = [];
+const settle = (label, promise) => later.push(promise.then((v) => label + \" \" + show(v), (e) => label + \" threw \" + e.constructor.name + \" \" + e.code + \" \" + e.errno + \" \" + e.message));
+const cb = (run) => new Promise((resolve, reject) => run((err, value) => (err ? reject(err) : resolve(value))));
+for (const [pack, unpack] of [[\"deflate\", \"inflate\"], [\"gzip\", \"gunzip\"], [\"deflateRaw\", \"inflateRaw\"], [\"zstdCompress\", \"zstdDecompress\"]]) {
+  settle(\"callback \" + pack, cb((done) => zlib[pack](\"called back \".repeat(30), done)).then((packed) => cb((done) => zlib[unpack](packed, done))).then((b) => b.toString().length));
+  settle(\"callback bad \" + unpack, cb((done) => zlib[unpack](Buffer.from([9, 9, 9, 9]), done)));
+  settle(\"callback options \" + pack, cb((done) => zlib[pack](\"x\", {}, done)).then((b) => Buffer.isBuffer(b)));
+}
+settle(\"callback missing\", (async () => zlib.gzip(\"x\"))());
+settle(\"promisified\", require(\"util\").promisify(zlib.gzip)(\"promised\").then((b) => zlib.gunzipSync(b).toString()));
+function through(streamOf, chunks, flushAt) {
+  return new Promise((resolve, reject) => {
+    const s = streamOf(); const got = [];
+    s.on(\"data\", (c) => got.push(c)); s.on(\"error\", reject); s.on(\"end\", () => resolve(Buffer.concat(got)));
+    chunks.forEach((c, i) => { s.write(c); if (i === flushAt) s.flush(); });
+    s.end();
+  });
+}
+const big = Buffer.from(\"stream me, \".repeat(3000));
+const cut = (b, n) => Array.from({ length: Math.ceil(b.length / n) }, (_, i) => b.subarray(i * n, i * n + n));
+for (const [make, unmake] of [[\"createDeflate\", \"createInflate\"], [\"createGzip\", \"createGunzip\"], [\"createDeflateRaw\", \"createInflateRaw\"], [\"createGzip\", \"createUnzip\"], [\"createZstdCompress\", \"createZstdDecompress\"]]) {
+  settle(\"stream \" + make, through(() => zlib[make](), cut(big, 1000)).then((packed) => through(() => zlib[unmake](), cut(packed, 17))).then((back) => [back.equals(big), back.length]));
+  settle(\"stream small chunks \" + make, through(() => zlib[make]({ chunkSize: 64 }), cut(big.subarray(0, 4000), 100), 3).then((packed) => zlib[unmake.replace(\"create\", \"\").replace(/^./, (c) => c.toLowerCase()) + \"Sync\"](packed).length));
+}
+settle(\"stream bad data\", through(() => zlib.createGunzip(), [Buffer.from(\"not gzip at all\")]));
+settle(\"stream cut short\", through(() => zlib.createInflate(), [good.inflateSync.subarray(0, 10)]));
+settle(\"stream bytesWritten\", new Promise((resolve) => { const s = zlib.createGzip(); s.on(\"data\", () => {}); s.on(\"end\", () => resolve(s.bytesWritten)); s.end(\"twelve bytes\"); }));
+settle(\"stream pipeline\", new Promise((resolve, reject) => { const { pipeline, Readable, Writable } = require(\"stream\"); const got = []; pipeline(Readable.from([Buffer.from(\"piped \"), Buffer.from(\"through\")]), zlib.createGzip(), zlib.createGunzip(), new Writable({ write(c, e, done) { got.push(c); done(); } }), (err) => (err ? reject(err) : resolve(Buffer.concat(got).toString()))); }));
+settle(\"stream sync flush gives output early\", new Promise((resolve) => { const s = zlib.createDeflate(); const seen = []; s.on(\"data\", (c) => seen.push(c.length)); s.write(\"some text to flush\"); s.flush(zlib.constants.Z_SYNC_FLUSH, () => { const early = seen.length > 0; s.end(); s.on(\"end\", () => resolve([early, seen.length >= 1])); }); }));
+settle(\"inflate gives output before the end\", new Promise((resolve) => { const packed = zlib.deflateSync(Buffer.from(\"x\".repeat(20000) + \"y\".repeat(20000)), { level: 0 }); const s = zlib.createInflate(); let early = 0; s.on(\"data\", (c) => (early += c.length)); s.write(packed.subarray(0, 25000), () => { const before = early; s.end(packed.subarray(25000)); s.on(\"end\", () => resolve([before > 0, early])); }); }));
+Promise.all(later).then((settled) => {
+for (const l of settled) lines.push(l);
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"R \") ? \"round trips generated\" : line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+globalThis.out.push(\"finished\");
+});
+
+"
+
+// 150 generated round trips through deflate, gzip, raw deflate and zstd with
+// generated options; bytes node 26.11.1 compressed, read back; input cut
+// short, wrong, or followed by junk; each option's refusal; the callback
+// forms; and the streams, written in pieces with flushes. Each line is a
+// kind of case, how many, and a hash of what they printed in node
+pub fn zlib_matches_node_test() {
+  let rt = run_to_end(run_commonjs(node_runtime(), zlib_script))
+  assert out_lines(rt)
+    == [
+      "round trips generated 150 3922020097",
+      "sample 30 841759710",
+      "cut 9 727091289",
+      "empty 4 1969415492",
+      "not 4 4113714169",
+      "junk 4 2716881168",
+      "string 4 507665161",
+      "gunzip 1 304146370",
+      "inflate 2 1504577396",
+      "two 1 1881970902",
+      "input 1 4232513262",
+      "bad 19 1218179417",
+      "windowBits 1 444615441",
+      "gzip 1 3719611897",
+      "maxOutputLength 1 120807908",
+      "dictionary 1 1740993089",
+      "info 1 2044062039",
+      "zstd 2 1007315431",
+      "crc32 3 3211120290",
+      "keys 1 3862148594",
+      "constants 1 3905368743",
+      "classes 1 1805346879",
+      "without 1 4242919027",
+      "callback 13 2731326444",
+      "promisified 1 2211623251",
+      "stream 15 1689510410",
+      "finished",
+    ]
+}
+
+pub fn brotli_says_it_is_not_here_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "const zlib = require('zlib');
+      try { zlib.brotliCompressSync('x'); } catch (error) { out.push(error.code); }
+      try { zlib.createBrotliDecompress(); } catch (error) { out.push(error.code); }",
+    )
+  assert out_lines(rt)
+    == ["ERR_METHOD_NOT_IMPLEMENTED", "ERR_METHOD_NOT_IMPLEMENTED"]
 }
