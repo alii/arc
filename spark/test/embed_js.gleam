@@ -39,6 +39,7 @@ const names = [
   "tty",
   "tls",
   "web_streams",
+  "blob",
   "fetch",
   "crypto",
 ]

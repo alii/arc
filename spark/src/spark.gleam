@@ -117,6 +117,7 @@ const shipped_sources = [
   js.tty,
   js.tls,
   js.web_streams,
+  js.blob,
   js.fetch,
   js.crypto,
 ]

@@ -6,9 +6,10 @@
 // body, so a body that never ends (a stream of events) costs nothing extra.
 // Redirects, aborting and unpacking a compressed body are done here
 
-const { codes } = require("spark:errors");
 const { AbortController } = require("spark:dom_events");
 const { TextEncoder, TextDecoder } = require("spark:encoding");
+const blobs = require("spark:blob");
+const { Blob, File } = blobs;
 const { URL, URLSearchParams } = require("node:url");
 const { isDisturbed } = require("node:stream");
 const {
@@ -308,6 +309,285 @@ function iteratorOver(items) {
   return iterator;
 }
 
+// ---- FormData
+
+// text with any half of a surrogate pair replaced, as the web's strings are
+function scalar(value) {
+  return `${value}`.toWellFormed();
+}
+
+class FormData {
+  // [name, text or File] in the order they were added
+  #entries = [];
+
+  constructor(form = undefined) {
+    if (form !== undefined) {
+      throw new TypeError(
+        "FormData constructor: Argument 1 could not be converted to: undefined.",
+      );
+    }
+  }
+
+  static #entry(context, name, value, filename) {
+    name = scalar(name);
+    if (value instanceof Blob) {
+      if (!(value instanceof File) || filename !== undefined) {
+        value = new File([value], filename === undefined ? "blob" : scalar(filename), {
+          type: value.type,
+          lastModified: value instanceof File ? value.lastModified : undefined,
+        });
+      }
+    } else {
+      if (filename !== undefined) {
+        const shown = typeof value === "string" ? `"${value}"` : String(value);
+        throw new TypeError(
+          `FormData.${context}: Expected value ("${shown}") to be an instance of Blob.`,
+        );
+      }
+      value = scalar(value);
+    }
+    return [name, value];
+  }
+
+  append(name, value, filename = undefined) {
+    if (!(#entries in this)) throw illegalInvocation();
+    argumentsRequired("FormData.append", 2, arguments.length);
+    this.#entries.push(FormData.#entry("append", name, value, filename));
+  }
+
+  delete(name) {
+    if (!(#entries in this)) throw illegalInvocation();
+    argumentsRequired("FormData.delete", 1, arguments.length);
+    name = scalar(name);
+    this.#entries = this.#entries.filter((entry) => entry[0] !== name);
+  }
+
+  get(name) {
+    if (!(#entries in this)) throw illegalInvocation();
+    argumentsRequired("FormData.get", 1, arguments.length);
+    name = scalar(name);
+    const found = this.#entries.find((entry) => entry[0] === name);
+    return found === undefined ? null : found[1];
+  }
+
+  getAll(name) {
+    if (!(#entries in this)) throw illegalInvocation();
+    argumentsRequired("FormData.getAll", 1, arguments.length);
+    name = scalar(name);
+    return this.#entries.filter((entry) => entry[0] === name).map((entry) => entry[1]);
+  }
+
+  has(name) {
+    if (!(#entries in this)) throw illegalInvocation();
+    argumentsRequired("FormData.has", 1, arguments.length);
+    name = scalar(name);
+    return this.#entries.some((entry) => entry[0] === name);
+  }
+
+  set(name, value, filename = undefined) {
+    if (!(#entries in this)) throw illegalInvocation();
+    argumentsRequired("FormData.set", 2, arguments.length);
+    const entry = FormData.#entry("set", name, value, filename);
+    const at = this.#entries.findIndex((existing) => existing[0] === entry[0]);
+    if (at === -1) {
+      this.#entries.push(entry);
+    } else {
+      this.#entries[at] = entry;
+      this.#entries = this.#entries.filter(
+        (existing, i) => i <= at || existing[0] !== entry[0],
+      );
+    }
+  }
+
+  entries() {
+    if (!(#entries in this)) throw illegalInvocation();
+    return formIteratorOver(this.#entries.map((entry) => [...entry]));
+  }
+
+  keys() {
+    if (!(#entries in this)) throw illegalInvocation();
+    return formIteratorOver(this.#entries.map((entry) => entry[0]));
+  }
+
+  values() {
+    if (!(#entries in this)) throw illegalInvocation();
+    return formIteratorOver(this.#entries.map((entry) => entry[1]));
+  }
+
+  forEach(callback, thisArg = undefined) {
+    if (!(#entries in this)) throw illegalInvocation();
+    argumentsRequired("FormData.forEach", 1, arguments.length);
+    if (typeof callback !== "function") {
+      throw new TypeError(
+        "Failed to execute 'forEach' on 'FormData': parameter 1 is not of type 'Function'.",
+      );
+    }
+    for (const [name, value] of [...this.#entries]) {
+      callback.call(thisArg, value, name, this);
+    }
+  }
+
+  [kInspect](depth, options, inspect) {
+    const shown = { __proto__: null };
+    for (const [name, value] of this.#entries) {
+      shown[name] = name in shown ? [].concat(shown[name], value) : value;
+    }
+    const text = inspect(shown, { ...options, depth: options.depth ?? depth });
+    return `FormData ${text.slice(text.indexOf("]") + 2)}`;
+  }
+
+  static entriesOf(form) {
+    return form.#entries;
+  }
+
+  static from(entries) {
+    const form = new FormData();
+    form.#entries = entries;
+    return form;
+  }
+}
+
+FormData.prototype[Symbol.iterator] = FormData.prototype.entries;
+Object.defineProperty(FormData.prototype, Symbol.toStringTag, {
+  value: "FormData",
+  configurable: true,
+});
+enumerable(FormData.prototype, [
+  "append",
+  "delete",
+  "get",
+  "getAll",
+  "has",
+  "set",
+  "keys",
+  "values",
+  "entries",
+  "forEach",
+]);
+
+const formIteratorPrototype = Object.setPrototypeOf(
+  {
+    next() {
+      return this.inner.next();
+    },
+    [Symbol.toStringTag]: "FormData Iterator",
+  },
+  Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())),
+);
+
+function formIteratorOver(items) {
+  const iterator = Object.create(formIteratorPrototype);
+  Object.defineProperty(iterator, "inner", { value: items[Symbol.iterator]() });
+  return iterator;
+}
+
+// a form as the bytes of a multipart/form-data body, and the content type
+// that names the line between its parts
+function multipart(form) {
+  const boundary = `----formdata-undici-0${`${Math.floor(Math.random() * 1e11)}`.padStart(11, "0")}`;
+  const prefix = `--${boundary}\r\nContent-Disposition: form-data`;
+  const escape = (text) =>
+    text.replace(/\n/g, "%0A").replace(/\r/g, "%0D").replace(/"/g, "%22");
+  const lineFeeds = (text) => text.replace(/\r?\n|\r/g, "\r\n");
+  const parts = [];
+  for (const [name, value] of FormData.entriesOf(form)) {
+    if (typeof value === "string") {
+      parts.push(
+        encoder.encode(
+          `${prefix}; name="${escape(lineFeeds(name))}"\r\n\r\n${lineFeeds(value)}\r\n`,
+        ),
+      );
+    } else {
+      parts.push(
+        encoder.encode(
+          `${prefix}; name="${escape(lineFeeds(name))}"` +
+            (value.name ? `; filename="${escape(value.name)}"` : "") +
+            `\r\nContent-Type: ${value.type || "application/octet-stream"}\r\n\r\n`,
+        ),
+        blobs.bytesOf(value),
+        encoder.encode("\r\n"),
+      );
+    }
+  }
+  parts.push(encoder.encode(`--${boundary}--\r\n`));
+  let size = 0;
+  for (const part of parts) size += part.byteLength;
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    bytes.set(part, at);
+    at += part.byteLength;
+  }
+  return { bytes, type: `multipart/form-data; boundary=${boundary}` };
+}
+
+function indexOfBytes(bytes, needle, from) {
+  outer: for (let i = from; i <= bytes.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (bytes[i + j] !== needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+// the form a body holds, going by its content type
+function parsedForm(bytes, contentType) {
+  const failed = () => new TypeError("Failed to parse body as FormData.");
+  const type = (contentType ?? "").trim();
+  if (/^application\/x-www-form-urlencoded\s*(;|$)/i.test(type)) {
+    const entries = [];
+    for (const [name, value] of new URLSearchParams(new TextDecoder().decode(bytes))) {
+      entries.push([name, value]);
+    }
+    return FormData.from(entries);
+  }
+  if (!/^multipart\/form-data\s*(;|$)/i.test(type)) {
+    throw new TypeError(
+      'Content-Type was not one of "multipart/form-data" or "application/x-www-form-urlencoded".',
+    );
+  }
+  const boundary = /;.*?boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(type);
+  if (boundary === null) throw failed();
+  const line = encoder.encode(`--${boundary[1] ?? boundary[2]}`);
+  const entries = [];
+  let at = indexOfBytes(bytes, line, 0);
+  if (at === -1) throw failed();
+  for (;;) {
+    at += line.length;
+    // the last line between parts ends with two dashes
+    if (bytes[at] === 0x2d && bytes[at + 1] === 0x2d) break;
+    if (bytes[at] !== 0x0d || bytes[at + 1] !== 0x0a) throw failed();
+    at += 2;
+    const headEnd = indexOfBytes(bytes, encoder.encode("\r\n\r\n"), at);
+    if (headEnd === -1) throw failed();
+    const head = new TextDecoder().decode(bytes.subarray(at, headEnd));
+    const next = indexOfBytes(bytes, encoder.encode(`\r\n--${boundary[1] ?? boundary[2]}`), headEnd + 4);
+    if (next === -1) throw failed();
+    const content = bytes.slice(headEnd + 4, next);
+    const disposition = /^content-disposition:\s*form-data(.*)$/im.exec(head);
+    if (disposition === null) throw failed();
+    const name = /;\s*name="([^"]*)"/i.exec(disposition[1]);
+    const filename = /;\s*filename="([^"]*)"/i.exec(disposition[1]);
+    if (name === null) throw failed();
+    const unescape = (text) =>
+      text.replace(/%0A/g, "\n").replace(/%0D/g, "\r").replace(/%22/g, '"');
+    if (filename === null) {
+      entries.push([unescape(name[1]), new TextDecoder().decode(content)]);
+    } else {
+      const partType = /^content-type:\s*(.*)$/im.exec(head);
+      entries.push([
+        unescape(name[1]),
+        new File([content], unescape(filename[1]), {
+          type: partType === null ? "" : partType[1].trim(),
+        }),
+      ]);
+    }
+    at = next + 2;
+  }
+  return FormData.from(entries);
+}
+
 // ---- bodies
 
 function bytesOf(view) {
@@ -337,7 +617,12 @@ function extractBody(object) {
   }
   let source;
   let type = null;
-  if (object instanceof URLSearchParams) {
+  if (object instanceof Blob) {
+    source = blobs.bytesOf(object).slice();
+    type = object.type === "" ? null : object.type;
+  } else if (object instanceof FormData) {
+    ({ bytes: source, type } = multipart(object));
+  } else if (object instanceof URLSearchParams) {
     source = encoder.encode(object.toString());
     type = "application/x-www-form-urlencoded;charset=UTF-8";
   } else if (object instanceof ArrayBuffer) {
@@ -397,6 +682,31 @@ function textStream(body) {
   return stream.pipeThrough(new TextDecoderStream());
 }
 
+// a content type as the web writes one out: the kind in lower case, then each
+// parameter after a semicolon with no space; nothing if it is not a type
+function mimeOf(contentType) {
+  if (contentType === null || contentType === undefined) return "";
+  const [essence, ...parameters] = contentType.split(";");
+  const kind = essence.trim().toLowerCase();
+  if (!/^[!#$%&'*+\-.^_`|~0-9a-z]+\/[!#$%&'*+\-.^_`|~0-9a-z]+$/.test(kind)) return "";
+  let text = kind;
+  const seen = new Set();
+  for (const parameter of parameters) {
+    const at = parameter.indexOf("=");
+    if (at === -1) continue;
+    const name = parameter.slice(0, at).trim().toLowerCase();
+    let value = parameter.slice(at + 1).trim();
+    if (name === "" || seen.has(name)) continue;
+    if (value.startsWith('"')) value = value.slice(1, value.endsWith('"') && value.length > 1 ? -1 : undefined);
+    if (value === "" && !parameter.slice(at + 1).trim().startsWith('"')) continue;
+    seen.add(name);
+    text += /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(value)
+      ? `;${name}=${value}`
+      : `;${name}="${value.replace(/(["\\])/g, "\\$1")}"`;
+  }
+  return text;
+}
+
 const bodyMethods = {
   async arrayBuffer(body) {
     return (await allBytes(body)).buffer;
@@ -410,11 +720,11 @@ const bodyMethods = {
   async json(body) {
     return JSON.parse(new TextDecoder().decode(await allBytes(body)));
   },
-  async blob() {
-    throw new codes.ERR_METHOD_NOT_IMPLEMENTED("blob");
+  async blob(body, contentType) {
+    return new Blob([await allBytes(body)], { type: mimeOf(contentType) });
   },
-  async formData() {
-    throw new codes.ERR_METHOD_NOT_IMPLEMENTED("formData");
+  async formData(body, contentType) {
+    return parsedForm(await allBytes(body), contentType);
   },
 };
 
@@ -599,7 +909,7 @@ class Response {
 
   blob() {
     if (!(#status in this)) return Promise.reject(illegalInvocation());
-    return bodyMethods.blob(this.#body);
+    return bodyMethods.blob(this.#body, this.#headers.get("content-type"));
   }
 
   bytes() {
@@ -609,7 +919,7 @@ class Response {
 
   formData() {
     if (!(#status in this)) return Promise.reject(illegalInvocation());
-    return bodyMethods.formData(this.#body);
+    return bodyMethods.formData(this.#body, this.#headers.get("content-type"));
   }
 
   json() {
@@ -989,7 +1299,7 @@ class Request {
 
   blob() {
     if (!(#url in this)) return Promise.reject(illegalInvocation());
-    return bodyMethods.blob(this.#body);
+    return bodyMethods.blob(this.#body, this.#headers.get("content-type"));
   }
 
   bytes() {
@@ -999,7 +1309,7 @@ class Request {
 
   formData() {
     if (!(#url in this)) return Promise.reject(illegalInvocation());
-    return bodyMethods.formData(this.#body);
+    return bodyMethods.formData(this.#body, this.#headers.get("content-type"));
   }
 
   json() {
@@ -1331,4 +1641,4 @@ function fetch(input, init = undefined) {
   });
 }
 
-module.exports = { fetch, Headers, Request, Response };
+module.exports = { fetch, Headers, Request, Response, FormData };

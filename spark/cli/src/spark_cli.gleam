@@ -9,6 +9,7 @@ import gleam/string
 import simplifile
 import spark.{type Runtime, Finished, WakeIn}
 import spark/async_hooks
+import spark/blob
 import spark/buffer
 import spark/builtin.{type Builtin}
 import spark/crypto
@@ -100,6 +101,7 @@ fn builtins(
     zlib.builtin(),
     util.types_builtin(),
     web_streams.builtin(),
+    blob.builtin(),
     fetch.builtin(),
     crypto.builtin(),
     tty.builtin(terminals()),

@@ -13,6 +13,7 @@ import spark.{
   type Runtime, DuplicateBuiltin, Finished, MissingDependency, WakeIn,
 }
 import spark/async_hooks
+import spark/blob
 import spark/buffer
 import spark/builtin.{type Builtin, Builtin}
 import spark/crypto
@@ -99,6 +100,7 @@ fn builtins() -> List(Builtin(Nil)) {
     zlib.builtin(),
     util.types_builtin(),
     web_streams.builtin(),
+    blob.builtin(),
     fetch.builtin(),
     crypto.builtin(),
     tty.builtin([1]),
@@ -4582,6 +4584,93 @@ pub fn crypto_matches_node_test() {
       "shape 1 3818673648",
       "subtle 8 260331021",
       "hmac 1 4214654828",
+      "finished",
+    ]
+}
+
+const blob_file_formdata_match_node_script = "
+const lines = [];
+const show = (v) => { if (v instanceof Uint8Array) return \"u8:\" + Array.from(v).join(\".\"); if (v instanceof ArrayBuffer) return \"ab:\" + Array.from(new Uint8Array(v)).join(\".\"); try { return JSON.stringify(v) ?? String(v); } catch { return String(v); } };
+const call = (f) => { try { return show(f()); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+const later = [];
+const settle = (label, f) => later.push(async () => { try { lines.push(label + \" \" + show(await f())); } catch (e) { lines.push(label + \" rejected \" + e.name + \" \" + e.code + \" \" + e.message); } });
+const boundaryless = (text) => text.replace(/formdata-undici-0\\d{11}/g, \"BOUNDARY\");
+// ---- Blob
+t(\"blob shape\", () => [typeof Blob, Blob.name, Blob.length, Object.prototype.toString.call(new Blob()), Object.getOwnPropertyNames(Blob.prototype).sort(), new Blob() instanceof Blob, call(() => Blob())]);
+for (const [label, parts, options] of [[\"nothing\", undefined], [\"empty\", []], [\"strings\", [\"ab\", \"c\\u20ac\"]], [\"bytes\", [new Uint8Array([1, 2]), new Uint8Array([3]).buffer, new DataView(new Uint8Array([4, 5]).buffer)]], [\"u16\", [new Uint16Array([258])]], [\"blobs\", [new Blob([\"in\"]), \"side\"]], [\"numbers and objects\", [1, {}, null, undefined, true]], [\"type\", [\"x\"], { type: \"Text/Plain;Charset=UTF-8\" }], [\"bad type\", [\"x\"], { type: \"t\\u00e9xt\" }], [\"type with control\", [\"x\"], { type: \"a\\tb\" }], [\"endings native\", [\"a\\r\\nb\\rc\\nd\"], { endings: \"native\" }], [\"endings transparent\", [\"a\\r\\nb\"], { endings: \"transparent\" }], [\"endings bad\", [\"a\"], { endings: \"nope\" }], [\"not a sequence\", 5], [\"a string as parts\", \"abc\"], [\"options number\", [], 5], [\"options null\", [\"a\"], null], [\"lone surrogate\", [\"\\ud800x\"]], [\"a set\", new Set([\"a\", \"b\"])], [\"type number\", [\"x\"], { type: 5 }]]) {
+  t(\"blob \" + label, () => { const b = new Blob(parts, options); return [b.size, b.type]; });
+  settle(\"blob text \" + label, () => new Blob(parts, options).text());
+}
+settle(\"blob readers\", async () => { const b = new Blob([\"h\\u20ac\", new Uint8Array([0, 255])], { type: \"a/b\" }); const chunks = []; for await (const c of b.stream()) chunks.push(Array.from(c)); return [await b.text(), await b.arrayBuffer(), await b.bytes(), chunks.flat(), Object.prototype.toString.call(b.stream())]; });
+for (const [label, args] of [[\"none\", []], [\"start\", [2]], [\"range\", [1, 4]], [\"negative\", [-3]], [\"negative end\", [0, -2]], [\"past\", [2, 99]], [\"backwards\", [4, 2]], [\"type\", [0, 2, \"X/Y\"]], [\"bad type\", [0, 2, \"\\u00e9\"]], [\"floats\", [1.7, 3.2]], [\"strings\", [\"1\", \"3\"]], [\"nan\", [NaN, 3]]]) settle(\"blob slice \" + label, async () => { const s = new Blob([\"0123456\"], { type: \"orig/type\" }).slice(...args); return [s.size, s.type, await s.text(), s instanceof Blob]; });
+settle(\"blob slice of slice\", async () => new Blob([\"abcdefgh\"]).slice(2, 7).slice(1, 3).text());
+settle(\"blob wrong this\", () => Blob.prototype.text.call({}));
+t(\"blob wrong this getters\", () => [call(() => Object.getOwnPropertyDescriptor(Blob.prototype, \"size\").get.call({})), call(() => Blob.prototype.slice.call({})), call(() => Blob.prototype.stream.call({}))]);
+t(\"blob inspect\", () => require(\"util\").inspect(new Blob([\"abc\"], { type: \"t/x\" })));
+t(\"blob is not changed by its source\", () => { const bytes = new Uint8Array([1, 2, 3]); const b = new Blob([bytes]); bytes[0] = 9; return b.size; });
+settle(\"blob keeps a copy\", async () => { const bytes = new Uint8Array([1, 2, 3]); const b = new Blob([bytes]); bytes[0] = 9; return b.bytes(); });
+// ---- File
+t(\"file shape\", () => [typeof File, File.name, File.length, Object.prototype.toString.call(new File([], \"n\")), Object.getOwnPropertyNames(File.prototype).sort(), new File([], \"n\") instanceof Blob, Object.getPrototypeOf(File) === Blob]);
+for (const [label, make] of [[\"plain\", () => new File([\"abc\"], \"a.txt\")], [\"type\", () => new File([\"abc\"], \"a.txt\", { type: \"Text/Plain\" })], [\"lastModified\", () => new File([], \"n\", { lastModified: 12345 })], [\"lastModified text\", () => new File([], \"n\", { lastModified: \"77\" })], [\"lastModified bad\", () => new File([], \"n\", { lastModified: \"x\" })], [\"name number\", () => new File([], 5)], [\"name with slash\", () => new File([], \"a/b:c\")], [\"no arguments\", () => new File()], [\"one argument\", () => new File([])], [\"bits not a sequence\", () => new File(5, \"n\")], [\"options number\", () => new File([], \"n\", 5)], [\"from a blob\", () => new File([new Blob([\"xy\"])], \"b\")]]) t(\"file \" + label, () => { const f = make(); return [f.name, f.size, f.type, label.startsWith(\"lastModified\") ? f.lastModified : typeof f.lastModified]; });
+t(\"file inspect\", () => require(\"util\").inspect(new File([\"abc\"], \"a.txt\", { type: \"t/x\", lastModified: 5 })));
+settle(\"file text\", () => new File([\"one \", \"two\"], \"f\").text());
+settle(\"file slice is a blob\", async () => { const s = new File([\"abcdef\"], \"f\", { type: \"a/b\" }).slice(1, 3); return [s instanceof File, s instanceof Blob, s.type, await s.text()]; });
+// ---- FormData
+t(\"form shape\", () => [typeof FormData, FormData.name, FormData.length, Object.prototype.toString.call(new FormData()), Object.keys(FormData.prototype), FormData.prototype[Symbol.iterator] === FormData.prototype.entries, call(() => FormData()), call(() => new FormData(5)), call(() => new FormData(undefined) instanceof FormData)]);
+t(\"form values\", () => { const f = new FormData(); f.append(\"a\", \"1\"); f.append(\"a\", 2); f.append(\"b\", null); f.append(\"c\", undefined); f.append(\"d\", { toString: () => \"obj\" }); f.append(\"e\", \"\\ud800\"); return [[...f], f.get(\"a\"), f.getAll(\"a\"), f.get(\"zz\"), f.getAll(\"zz\"), f.has(\"b\"), f.has(\"zz\"), [...f.keys()], [...f.values()]]; });
+t(\"form set and delete\", () => { const f = new FormData(); f.append(\"a\", \"1\"); f.append(\"b\", \"2\"); f.append(\"a\", \"3\"); f.set(\"a\", \"9\"); const afterSet = [...f]; f.set(\"new\", \"n\"); f.delete(\"b\"); f.delete(\"zz\"); return [afterSet, [...f]]; });
+t(\"form files\", () => { const f = new FormData(); f.append(\"blob\", new Blob([\"b\"], { type: \"t/b\" })); f.append(\"named\", new Blob([\"n\"]), \"given.txt\"); f.append(\"file\", new File([\"f\"], \"orig.txt\", { type: \"t/f\", lastModified: 7 })); f.append(\"renamed\", new File([\"r\"], \"orig.txt\", { lastModified: 7 }), \"new.txt\"); return [...f].map(([k, v]) => [k, v instanceof File, v.name, v.type, v.size, k === \"file\" || k === \"renamed\" ? v.lastModified : typeof v.lastModified]); });
+t(\"form same file kept\", () => { const file = new File([\"f\"], \"x\"); const f = new FormData(); f.append(\"a\", file); return [f.get(\"a\") === file, f.getAll(\"a\")[0] === file]; });
+t(\"form refusals\", () => [call(() => new FormData().append(\"a\")), call(() => new FormData().append()), call(() => new FormData().append(\"a\", \"b\", \"c\")), call(() => new FormData().set(\"a\")), call(() => new FormData().set(\"a\", \"b\", \"c\")), call(() => new FormData().get()), call(() => new FormData().getAll()), call(() => new FormData().has()), call(() => new FormData().delete()), call(() => new FormData().forEach()), call(() => new FormData().forEach(5)), call(() => FormData.prototype.append.call({}, \"a\", \"b\")), call(() => FormData.prototype.get.call({}, \"a\"))]);
+t(\"form forEach\", () => { const f = new FormData(); f.append(\"a\", \"1\"); f.append(\"b\", \"2\"); const seen = []; const self = {}; f.forEach(function (value, name, parent) { seen.push([value, name, parent === f, this === self]); }, self); return seen; });
+t(\"form iterator\", () => { const f = new FormData(); f.append(\"a\", \"1\"); const it = f.entries(); return [Object.prototype.toString.call(it), JSON.stringify(it.next()), JSON.stringify(it.next()), it[Symbol.iterator]() === it]; });
+t(\"form inspect\", () => { const f = new FormData(); f.append(\"a\", \"1\"); f.append(\"b\", \"2\"); return require(\"util\").inspect(f); });
+// ---- bodies made of them
+settle(\"response of a blob\", async () => { const r = new Response(new Blob([\"blob body\"], { type: \"x/y\" })); return [r.headers.get(\"content-type\"), await r.text()]; });
+settle(\"response of a typeless blob\", async () => { const r = new Response(new Blob([\"b\"])); return [r.headers.get(\"content-type\"), await r.text()]; });
+settle(\"response blob()\", async () => { const b = await new Response(\"text\", { headers: { \"content-type\": \"Text/Thing; charset=x\" } }).blob(); return [b instanceof Blob, b.size, b.type, await b.text()]; });
+settle(\"response blob() with no type\", async () => { const b = await new Response(new Uint8Array([1, 2])).blob(); return [b.size, b.type]; });
+settle(\"response of a form\", async () => { const f = new FormData(); f.append(\"field\", \"value \\u20ac\\r\\nline\"); f.append('na\"me\\n', \"v\"); f.append(\"file\", new File([\"file bytes\"], 'fi\"le.txt', { type: \"text/x\" })); f.append(\"blob\", new Blob([new Uint8Array([0, 255])])); const r = new Response(f); return [boundaryless(r.headers.get(\"content-type\")), boundaryless(Buffer.from(await r.arrayBuffer()).toString(\"latin1\"))]; });
+settle(\"request of a form\", async () => { const f = new FormData(); f.append(\"a\", \"1\"); const r = new Request(\"http://h/\", { method: \"POST\", body: f }); return [boundaryless(r.headers.get(\"content-type\")), boundaryless(await r.text())]; });
+settle(\"form round trip\", async () => { const f = new FormData(); f.append(\"text\", \"plain \\u20ac\"); f.append(\"text\", \"second\"); f.append(\"file\", new File([new Uint8Array([1, 2, 3])], \"bin.dat\", { type: \"application/x-thing\" })); f.append(\"empty\", \"\"); const back = await new Response(f).formData(); return [...back].map(([k, v]) => (typeof v === \"string\" ? [k, v] : [k, v.name, v.type, v.size, v instanceof File])); });
+settle(\"formData from urlencoded\", async () => [...(await new Response(\"a=1&b=x+y&a=%E2%82%AC\", { headers: { \"content-type\": \"application/x-www-form-urlencoded\" } }).formData())]);
+settle(\"formData from params\", async () => [...(await new Response(new URLSearchParams({ q: \"search me\" })).formData())]);
+settle(\"formData from text\", () => new Response(\"just text\").formData());
+settle(\"formData from nothing\", () => new Response(null).formData());
+settle(\"formData bad multipart\", () => new Response(\"garbage\", { headers: { \"content-type\": \"multipart/form-data; boundary=x\" } }).formData());
+(async () => { for (const run of later) await run(); const groups = new Map();
+for (const line of lines) {
+  const kind = line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+globalThis.out.push(\"finished\"); })();
+
+"
+
+// one case each for how a Blob, a File and a FormData are made, read, sliced
+// and refused, and for bodies made of them: a blob or a form given to a
+// Response or Request, a form read back out of one. Each line is a kind of
+// case, how many, and a hash of what they printed in node 26.11.1
+pub fn blob_file_formdata_match_node_test() {
+  let rt =
+    run_to_end(run_commonjs(
+      node_runtime(),
+      blob_file_formdata_match_node_script,
+    ))
+  assert out_lines(rt)
+    == [
+      "blob 60 1446611450",
+      "file 16 2962295322",
+      "form 10 73467444",
+      "response 5 870965734",
+      "request 1 3621229751",
+      "formData 5 2041032211",
       "finished",
     ]
 }

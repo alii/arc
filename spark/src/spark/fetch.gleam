@@ -9,8 +9,8 @@ import spark/js
 /// network is the embedder's: a request is a Fetch want, answered with the
 /// status and headers, and the body then comes one ReadBody want at a time,
 /// so a body that never ends costs nothing extra. Redirects, aborting and
-/// unpacking a gzip or deflate body are done in the javascript. There is no
-/// Blob or FormData yet, so blob() and formData() are refused
+/// unpacking a gzip or deflate body are done in the javascript. FormData is
+/// here too, sent and read as multipart/form-data
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "spark:fetch",
@@ -51,12 +51,12 @@ pub fn builtin() -> Builtin(host) {
       ]
     },
     dependencies: [
-      "spark:errors", "spark:dom_events", "spark:encoding", "node:buffer",
-      "node:url", "node:stream", "node:stream/web",
+      "spark:errors", "spark:dom_events", "spark:encoding", "spark:blob",
+      "node:buffer", "node:url", "node:stream", "node:stream/web",
     ],
     optional: [],
-    exports: ["fetch", "Headers", "Request", "Response"],
-    globals: ["fetch", "Headers", "Request", "Response"],
+    exports: ["fetch", "Headers", "Request", "Response", "FormData"],
+    globals: ["fetch", "Headers", "Request", "Response", "FormData"],
   )
 }
 
