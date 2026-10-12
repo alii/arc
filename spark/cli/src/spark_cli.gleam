@@ -19,7 +19,7 @@ import spark/fs
 import spark/global
 import spark/io.{
   type Answer, type Failure, type Io, type ReplySlip, type Stream, type Want,
-  Access, Io, Realpath, Stderr, Stdout, Write,
+  Access, Io, ReadFile, Readdir, Readlink, Realpath, Stat, Stderr, Stdout, Write,
 } as _
 import spark/net
 import spark/os.{type Os, BigEndian, LittleEndian, Os}
@@ -181,6 +181,18 @@ type Message {
 @external(erlang, "spark_cli_ffi", "access")
 fn access(path: String, mode: Int) -> Result(Answer, Failure)
 
+@external(erlang, "spark_cli_ffi", "stat")
+fn stat(path: String, follow: Bool) -> Result(Answer, Failure)
+
+@external(erlang, "spark_cli_ffi", "readlink")
+fn readlink(path: String) -> Result(Answer, Failure)
+
+@external(erlang, "spark_cli_ffi", "readdir")
+fn readdir(path: String) -> Result(Answer, Failure)
+
+@external(erlang, "spark_cli_ffi", "read_file")
+fn read_file(path: String) -> Result(Answer, Failure)
+
 @external(erlang, "spark_cli_ffi", "realpath")
 fn realpath(path: String) -> Result(Answer, Failure)
 
@@ -192,6 +204,10 @@ fn perform(want: Want) -> Result(Answer, Failure) {
   case want {
     Access(path:, mode:) -> access(path, mode)
     Realpath(path:) -> realpath(path)
+    Stat(path:, follow:) -> stat(path, follow)
+    Readlink(path:) -> readlink(path)
+    Readdir(path:) -> readdir(path)
+    ReadFile(path:) -> read_file(path)
     Write(stream:, data:) -> write(stream, data)
   }
 }

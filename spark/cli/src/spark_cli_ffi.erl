@@ -1,5 +1,6 @@
 -module(spark_cli_ffi).
 -export([access/2, realpath/1, write/2, env/0, cwd/0, platform/0, arch/0, pid/0, is_tty/1]).
+-export([stat/2, readlink/1, readdir/1, read_file/1]).
 -export([os_release/0, os_version/0, machine/0, hostname/0,
          homedir/0, tmpdir/0, little_endian/0, parallelism/0]).
 
@@ -24,6 +25,67 @@ allowed(#file_info{access = Access, mode = Bits}, Mode) ->
         (Mode band 2 =:= 0 orelse Access =:= write orelse Access =:= read_write)
         andalso
         (Mode band 1 =:= 0 orelse Bits band 8#111 =/= 0).
+
+failure(Reason) when is_atom(Reason) ->
+    {error, {failure, string:uppercase(atom_to_binary(Reason, utf8))}}.
+
+%% erlang reports times in whole seconds and has no block counts or birth
+%% time, so those are filled in: blocks from the size, birth as the change time
+stat(Path, Follow) ->
+    Read = case Follow of
+        true -> fun file:read_file_info/2;
+        false -> fun file:read_link_info/2
+    end,
+    case Read(Path, [{time, posix}]) of
+        {ok, #file_info{size = Size, mode = Mode, links = Links,
+                        major_device = Dev, minor_device = Rdev, inode = Ino,
+                        uid = Uid, gid = Gid,
+                        atime = Atime, mtime = Mtime, ctime = Ctime}} ->
+            Second = 1000000000,
+            {ok, {info, {file_info, kind(Mode), Mode band 8#7777, Size, Dev,
+                         Ino, Links, Uid, Gid, Rdev, 4096, (Size + 511) div 512,
+                         Atime * Second, Mtime * Second, Ctime * Second,
+                         Ctime * Second}}};
+        {error, Reason} -> failure(Reason)
+    end.
+
+kind(Mode) ->
+    case Mode band 8#170000 of
+        8#040000 -> directory;
+        8#120000 -> symlink;
+        8#010000 -> fifo;
+        8#140000 -> socket;
+        8#020000 -> char_device;
+        8#060000 -> block_device;
+        _ -> file
+    end.
+
+readlink(Path) ->
+    case file:read_link_all(Path) of
+        {ok, Target} -> {ok, {text, unicode:characters_to_binary(Target)}};
+        {error, Reason} -> failure(Reason)
+    end.
+
+readdir(Path) ->
+    case file:list_dir_all(Path) of
+        {ok, Names} ->
+            {ok, {entries, [entry(Path, Name) || Name <- Names]}};
+        {error, Reason} -> failure(Reason)
+    end.
+
+entry(Dir, Name) ->
+    Text = unicode:characters_to_binary(Name),
+    Kind = case file:read_link_info(filename:join(Dir, Name)) of
+        {ok, #file_info{mode = Mode}} -> kind(Mode);
+        {error, _} -> file
+    end,
+    {entry, Text, Kind}.
+
+read_file(Path) ->
+    case file:read_file(Path) of
+        {ok, Bytes} -> {ok, {bytes, Bytes}};
+        {error, Reason} -> failure(Reason)
+    end.
 
 write(Stream, Data) ->
     try io:put_chars(device(Stream), Data) of

@@ -6,6 +6,7 @@ import arc/rt/types.{KStr, classify}
 import gleam/bit_array
 import gleam/list
 import gleam/option
+import gleam/result
 import gleam/string
 import spark.{
   type Runtime, DuplicateBuiltin, Finished, MissingDependency, WakeIn,
@@ -20,8 +21,10 @@ import spark/events
 import spark/fs
 import spark/global
 import spark/io.{
-  type Io, type ReplySlip, type Want, Access, Done, Failure, Io, Realpath,
-  Stderr, Stdout, Text, Write,
+  type Answer, type Failure, type FileInfo, type Io, type ReplySlip, type Want,
+  Access, Bytes, Directory, Done, Entries, Entry, Failure, File, FileInfo, Info,
+  Io, ReadFile, Readdir, Readlink, Realpath, Stat, Stderr, Stdout, Symlink, Text,
+  Write,
 }
 import spark/net
 import spark/os.{BigEndian, Os}
@@ -113,31 +116,187 @@ fn made_up_process() -> process.Process {
   )
 }
 
-// a made-up disk: /there exists, /secret is refused, nothing else exists;
-// wants through the later door are kept until the test answers them
+// a made-up disk: /there exists, /secret is refused, /tree is the small
+// tree below, nothing else exists; wants through the later door are kept
+// until the test answers them
 fn fake_io() -> Io {
-  Io(
-    now: fn(want) {
-      case want {
-        Access(path: "/there", ..) -> Ok(Done)
-        Access(path: "/secret", ..) -> Error(Failure("EACCES"))
-        Access(..) -> Error(Failure("ENOENT"))
-        Realpath(path: "/link") -> Ok(Text("/real/place"))
-        Realpath(..) -> Error(Failure("ENOENT"))
-        Write(stream: Stdout, data:) -> {
-          note("stdout " <> text(data))
-          Ok(Done)
-        }
-        Write(stream: Stderr, data: <<"refuse":utf8, _:bits>>) ->
-          Error(Failure("EPIPE"))
-        Write(stream: Stderr, data:) -> {
-          note("stderr " <> text(data))
-          Ok(Done)
-        }
+  Io(now: fake_answer, later: fn(want, slip) { keep(#(want, slip)) })
+}
+
+fn fake_answer(want: Want) -> Result(Answer, Failure) {
+  case want {
+    Access(path: "/there", ..) -> Ok(Done)
+    Access(path: "/secret", ..) -> Error(Failure("EACCES"))
+    Access(path: "/tree" <> _ as path, ..) -> {
+      use real <- result.try(made_real(parts(path), "", True, 0))
+      use _ <- result.map(made_at(real))
+      Done
+    }
+    Access(..) -> Error(Failure("ENOENT"))
+    Realpath(path: "/link") -> Ok(Text("/real/place"))
+    Realpath(path: "/tree" <> _ as path) -> {
+      use real <- result.try(made_real(parts(path), "", True, 0))
+      use _ <- result.map(made_at(real))
+      Text(real)
+    }
+    Realpath(..) -> Error(Failure("ENOENT"))
+    Stat(path:, follow:) -> {
+      use real <- result.try(made_real(parts(path), "", follow, 0))
+      use made <- result.map(made_at(real))
+      Info(made_info(made))
+    }
+    Readlink(path:) -> {
+      use real <- result.try(made_real(parts(path), "", False, 0))
+      case made_at(real) {
+        Ok(MadeLink(target)) -> Ok(Text(target))
+        Ok(_) -> Error(Failure("EINVAL"))
+        Error(failure) -> Error(failure)
       }
-    },
-    later: fn(want, slip) { keep(#(want, slip)) },
+    }
+    Readdir(path:) -> {
+      use real <- result.try(made_real(parts(path), "", True, 0))
+      case made_at(real) {
+        Ok(MadeDir) ->
+          Ok(
+            Entries(
+              list.filter_map(made_tree(), fn(item) {
+                case string.split_once(item.0, real <> "/") {
+                  Ok(#("", name)) ->
+                    case string.contains(name, "/") {
+                      True -> Error(Nil)
+                      False -> Ok(Entry(name:, kind: made_info(item.1).kind))
+                    }
+                  _ -> Error(Nil)
+                }
+              }),
+            ),
+          )
+        Ok(_) -> Error(Failure("ENOTDIR"))
+        Error(failure) -> Error(failure)
+      }
+    }
+    ReadFile(path:) -> {
+      use real <- result.try(made_real(parts(path), "", True, 0))
+      case made_at(real) {
+        Ok(MadeFile(bytes)) -> Ok(Bytes(bytes))
+        Ok(_) -> Error(Failure("EISDIR"))
+        Error(failure) -> Error(failure)
+      }
+    }
+    Write(stream: Stdout, data:) -> {
+      note("stdout " <> text(data))
+      Ok(Done)
+    }
+    Write(stream: Stderr, data: <<"refuse":utf8, _:bits>>) ->
+      Error(Failure("EPIPE"))
+    Write(stream: Stderr, data:) -> {
+      note("stderr " <> text(data))
+      Ok(Done)
+    }
+  }
+}
+
+type Made {
+  MadeDir
+  MadeFile(BitArray)
+  MadeLink(String)
+}
+
+// the same tree as the real one the expected output of the file tests was
+// made from in node
+fn made_tree() -> List(#(String, Made)) {
+  [
+    #("/tree", MadeDir),
+    #("/tree/a.txt", MadeFile(<<"hello\n":utf8>>)),
+    #("/tree/empty", MadeFile(<<>>)),
+    #("/tree/caf\u{e9}.txt", MadeFile(<<"\u{e9}t\u{e9}":utf8>>)),
+    #("/tree/sub", MadeDir),
+    #("/tree/sub/inner.bin", MadeFile(<<0, 1, 2, 255>>)),
+    #("/tree/sub/deep", MadeDir),
+    #("/tree/sub/deep/leaf.txt", MadeFile(<<"leaf":utf8>>)),
+    #("/tree/link", MadeLink("a.txt")),
+    #("/tree/dirlink", MadeLink("sub")),
+    #("/tree/broken", MadeLink("nowhere")),
+  ]
+}
+
+fn made_at(path: String) -> Result(Made, Failure) {
+  list.key_find(made_tree(), path) |> result.replace_error(Failure("ENOENT"))
+}
+
+fn parts(path: String) -> List(String) {
+  string.split(path, "/") |> list.filter(fn(part) { part != "" })
+}
+
+// the path with its symlinks followed, one part at a time; the last part
+// only when `follow_last`
+fn made_real(
+  left: List(String),
+  done: String,
+  follow_last: Bool,
+  hops: Int,
+) -> Result(String, Failure) {
+  case left, hops > 20 {
+    _, True -> Error(Failure("ELOOP"))
+    [], False -> Ok(done)
+    [part, ..rest], False -> {
+      let here = done <> "/" <> part
+      case made_at(here), rest {
+        Ok(MadeLink(_)), [] if !follow_last -> Ok(here)
+        Ok(MadeLink(target)), _ ->
+          made_real(
+            list.append(parts(target), rest),
+            done,
+            follow_last,
+            hops + 1,
+          )
+        Ok(MadeFile(_)), [_, ..] -> Error(Failure("ENOTDIR"))
+        Ok(_), _ -> made_real(rest, here, follow_last, hops)
+        Error(failure), _ -> Error(failure)
+      }
+    }
+  }
+}
+
+fn made_info(made: Made) -> FileInfo {
+  let #(kind, permissions, size) = case made {
+    MadeDir -> #(Directory, 0o755, 96)
+    MadeFile(bytes) -> #(File, 0o644, bit_array.byte_size(bytes))
+    MadeLink(target) -> #(Symlink, 0o755, string.byte_size(target))
+  }
+  let time = 1_700_000_000_123_456_789
+  FileInfo(
+    kind:,
+    permissions:,
+    size:,
+    dev: 1,
+    ino: 7,
+    nlink: 1,
+    uid: 501,
+    gid: 20,
+    rdev: 0,
+    blksize: 4096,
+    blocks: 8,
+    atime: time,
+    mtime: time,
+    ctime: time,
+    birthtime: time,
   )
+}
+
+// answers every want that went through the later door from the made-up
+// disk, until the script has nothing left to do
+fn run_answering(rt: Runtime(Nil)) -> Runtime(Nil) {
+  let rt = run_to_end(rt)
+  case kept() {
+    [] -> rt
+    asked ->
+      run_answering(
+        list.fold(asked, rt, fn(rt, one) {
+          spark.answer(rt, one.1, fake_answer(one.0)).1
+        }),
+      )
+  }
 }
 
 fn text(data: BitArray) -> String {
@@ -834,7 +993,7 @@ pub fn realpath_asks_the_embedder_test() {
       "-2,ENOENT,realpath,/nope",
       "TypeError [ERR_INVALID_ARG_TYPE]: " <> path <> "type number (5) code",
       "Error: ENOENT: no such file or directory, realpath '5' errno,code,syscall,path",
-      "Error: fs: only the utf8 encoding is supported, got buffer ",
+      "ok /real/place",
     ]
   let assert [#(a, slip_a), #(b, slip_b), #(c, slip_c)] = kept()
   assert [a, b, c] == [Realpath("/a"), Realpath("/b"), Realpath("/c")]
@@ -3398,4 +3557,194 @@ pub fn structured_clone_matches_node_test() {
       "deep 1 1352721305",
       "big 1 2764326404",
     ]
+}
+
+const fs_reads_script = "
+globalThis.__fsBase = '/tree';
+const fs = require(\"fs\");
+const fsp = require(\"fs/promises\");
+const process = require(\"process\");
+const { pathToFileURL } = require(\"url\");
+const base = globalThis.__fsBase ?? process.env.FS_BASE;
+// the cli's disk answers in whole seconds; the tests' made-up disk and node do not
+const coarse = Boolean(process.env.FS_COARSE);
+const lines = [];
+const norm = (s) => String(s).split(base).join(\"<base>\");
+const show = (v) => norm(JSON.stringify(v, (k, x) => (typeof x === \"bigint\" ? x + \"n\" : x)) ?? String(v));
+const fail = (e) => (e && e.name ? [\"threw\", e.name, e.code, e.errno, e.syscall, e.path === undefined ? undefined : norm(e.path), norm(e.message)] : [\"threw\", String(e)]);
+const call = (f) => { try { return show(f()); } catch (e) { return show(fail(e)); } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+const at = (name) => (name === \"\" ? base : base + \"/\" + name);
+const kinds = (s) => [\"isFile\", \"isDirectory\", \"isSymbolicLink\", \"isFIFO\", \"isSocket\", \"isBlockDevice\", \"isCharacterDevice\"].filter((m) => s[m]()).join(\"+\");
+const time = (ms) => (coarse ? Math.floor(Number(ms) / 1000) : ms);
+const statLine = (s) => (s === undefined ? \"undefined\" : [kinds(s), (Number(s.mode) & 0o777).toString(8), s.isDirectory() ? \"-\" : s.size, time(s.mtimeMs), s.mtime instanceof Date, coarse ? \"-\" : s.mtime.getTime(), s.constructor.name]);
+const names = [\"\", \"a.txt\", \"empty\", \"caf\\u00e9.txt\", \"sub\", \"sub/inner.bin\", \"sub/deep/leaf.txt\", \"link\", \"dirlink\", \"dirlink/inner.bin\", \"broken\", \"nope\", \"a.txt/under\", \"sub/nope/deeper\"];
+for (const name of names) {
+  t(\"statSync \" + name, () => statLine(fs.statSync(at(name))));
+  t(\"lstatSync \" + name, () => statLine(fs.lstatSync(at(name))));
+  t(\"statSync quiet \" + name, () => statLine(fs.statSync(at(name), { throwIfNoEntry: false })));
+  t(\"lstatSync quiet \" + name, () => statLine(fs.lstatSync(at(name), { throwIfNoEntry: false })));
+  t(\"readlinkSync \" + name, () => fs.readlinkSync(at(name)));
+  t(\"readdirSync \" + name, () => fs.readdirSync(at(name)).sort());
+  t(\"readFileSync \" + name, () => fs.readFileSync(at(name)).toString(\"hex\"));
+  t(\"existsSync \" + name, () => fs.existsSync(at(name)));
+}
+// ---- stats
+t(\"stats keys\", () => Object.keys(fs.statSync(at(\"a.txt\"))));
+t(\"stats shape\", () => { const s = fs.statSync(at(\"a.txt\")); return [s instanceof fs.Stats, typeof s.dev, typeof s.ino, typeof s.nlink, typeof s.uid, typeof s.gid, typeof s.blksize, typeof s.blocks, typeof s.atimeMs, typeof s.birthtimeMs, Object.getOwnPropertyNames(Object.getPrototypeOf(s)).sort(), Object.getOwnPropertyNames(Object.getPrototypeOf(Object.getPrototypeOf(s))).sort()]; });
+t(\"stats dates are made on first read\", () => { const s = fs.statSync(at(\"a.txt\")); const before = Object.hasOwn(s, \"mtime\"); const d = s.mtime; return [before, Object.hasOwn(s, \"mtime\"), s.mtime === d, Object.keys(s).includes(\"mtime\")]; });
+t(\"stats date can be set\", () => { const s = fs.statSync(at(\"a.txt\")); s.atime = 5; return s.atime; });
+t(\"stats bigint\", () => { const s = fs.statSync(at(\"a.txt\"), { bigint: true }); return [s.constructor.name, typeof s.size, s.size, typeof s.mode, kinds(s), typeof s.mtimeMs, typeof s.mtimeNs, coarse ? \"-\" : s.mtimeNs, coarse ? \"-\" : s.mtimeMs, s.mtime instanceof Date, Object.keys(s)]; });
+t(\"stats instants\", () => { const s = fs.statSync(at(\"a.txt\")); return [typeof s.mtimeInstant, coarse ? \"-\" : String(s.mtimeInstant), coarse ? \"-\" : String(fs.statSync(at(\"a.txt\"), { bigint: true }).mtimeInstant)]; });
+t(\"lstat bigint link\", () => { const s = fs.lstatSync(at(\"link\"), { bigint: true }); return [kinds(s), s.size]; });
+t(\"stat options null\", () => { try { return statLine(fs.statSync(at(\"a.txt\"), null)); } catch (e) { return e.name; } });
+t(\"stat bad path\", () => fs.statSync(5));
+t(\"stat null byte\", () => fs.statSync(\"a\\u0000b\"));
+t(\"stat URL path\", () => statLine(fs.statSync(pathToFileURL(at(\"a.txt\")))));
+t(\"stat Buffer path\", () => statLine(fs.statSync(Buffer.from(at(\"a.txt\")))));
+t(\"stat Uint8Array path\", () => statLine(fs.statSync(new TextEncoder().encode(at(\"sub\")))));
+t(\"stat no path\", () => fs.statSync());
+// ---- readlink
+t(\"readlink buffer\", () => { const b = fs.readlinkSync(at(\"link\"), \"buffer\"); return [Buffer.isBuffer(b), b.toString(\"hex\")]; });
+t(\"readlink hex\", () => fs.readlinkSync(at(\"dirlink\"), { encoding: \"hex\" }));
+t(\"readlink base64\", () => fs.readlinkSync(at(\"broken\"), \"base64\"));
+t(\"readlink bad encoding\", () => fs.readlinkSync(at(\"link\"), \"nope\"));
+t(\"readlink bad options\", () => fs.readlinkSync(at(\"link\"), 5));
+t(\"readlink bad path\", () => fs.readlinkSync({}));
+// ---- readdir
+const dirent = (d) => [d.name, norm(d.parentPath), kinds(d), d.constructor.name, Object.keys(d)];
+const byName = (a, b) => (a[1] + \"/\" + a[0] < b[1] + \"/\" + b[0] ? -1 : 1);
+t(\"readdir withFileTypes\", () => fs.readdirSync(at(\"\"), { withFileTypes: true }).map(dirent).sort(byName));
+t(\"readdir sub withFileTypes\", () => fs.readdirSync(at(\"sub\"), { withFileTypes: true }).map(dirent).sort(byName));
+t(\"readdir through a link\", () => fs.readdirSync(at(\"dirlink\")).sort());
+t(\"readdir recursive\", () => fs.readdirSync(at(\"\"), { recursive: true }).sort());
+t(\"readdir recursive withFileTypes\", () => fs.readdirSync(at(\"\"), { recursive: true, withFileTypes: true }).map(dirent).sort(byName));
+t(\"readdir recursive sub\", () => fs.readdirSync(at(\"sub\"), { recursive: true }).sort());
+t(\"readdir buffer\", () => fs.readdirSync(at(\"sub\"), \"buffer\").map((b) => [Buffer.isBuffer(b), b.toString(\"hex\")]).sort());
+t(\"readdir hex\", () => fs.readdirSync(at(\"sub\"), { encoding: \"hex\" }).sort());
+t(\"readdir buffer withFileTypes\", () => fs.readdirSync(at(\"sub\"), { encoding: \"buffer\", withFileTypes: true }).map((d) => [Buffer.isBuffer(d.name), d.name.toString(), kinds(d)]).sort());
+t(\"readdir recursive not boolean\", () => fs.readdirSync(at(\"\"), { recursive: \"yes\" }));
+t(\"readdir bad encoding\", () => fs.readdirSync(at(\"\"), { encoding: \"nope\" }));
+t(\"readdir dirent is a Dirent\", () => { const d = fs.readdirSync(at(\"sub\"), { withFileTypes: true })[0]; return [d instanceof fs.Dirent, Object.getOwnPropertyNames(fs.Dirent.prototype).sort()]; });
+// ---- readFile
+t(\"readFile utf8\", () => fs.readFileSync(at(\"a.txt\"), \"utf8\"));
+t(\"readFile utf8 option\", () => fs.readFileSync(at(\"caf\\u00e9.txt\"), { encoding: \"utf8\" }));
+t(\"readFile latin1\", () => fs.readFileSync(at(\"caf\\u00e9.txt\"), \"latin1\"));
+t(\"readFile hex\", () => fs.readFileSync(at(\"sub/inner.bin\"), \"hex\"));
+t(\"readFile base64\", () => fs.readFileSync(at(\"sub/inner.bin\"), { encoding: \"base64\" }));
+t(\"readFile is a Buffer\", () => { const b = fs.readFileSync(at(\"sub/inner.bin\")); return [Buffer.isBuffer(b), b.length, b[3]]; });
+t(\"readFile empty\", () => [fs.readFileSync(at(\"empty\")).length, fs.readFileSync(at(\"empty\"), \"utf8\")]);
+t(\"readFile through a link\", () => fs.readFileSync(at(\"link\"), \"utf8\"));
+t(\"readFile through a dir link\", () => fs.readFileSync(at(\"dirlink/deep/leaf.txt\"), \"utf8\"));
+t(\"readFile URL\", () => fs.readFileSync(pathToFileURL(at(\"a.txt\")), \"utf8\"));
+t(\"readFile Buffer path\", () => fs.readFileSync(Buffer.from(at(\"a.txt\")), \"utf8\"));
+t(\"readFile flag r\", () => fs.readFileSync(at(\"a.txt\"), { encoding: \"utf8\", flag: \"r\" }));
+t(\"readFile bad flag\", () => fs.readFileSync(at(\"a.txt\"), { flag: \"zz\" }));
+t(\"readFile bad encoding\", () => fs.readFileSync(at(\"a.txt\"), \"nope\"));
+t(\"readFile bad options\", () => fs.readFileSync(at(\"a.txt\"), 5));
+t(\"readFile bad path\", () => fs.readFileSync({}));
+t(\"readFile null path\", () => fs.readFileSync(null));
+t(\"readFile null byte\", () => fs.readFileSync(\"a\\u0000b\"));
+// ---- realpath, now with encodings
+t(\"realpath\", () => [fs.realpathSync(at(\"dirlink/deep\")), fs.realpathSync(at(\"link\")), fs.realpathSync.native(at(\"dirlink\"))]);
+t(\"realpath buffer\", () => { const b = fs.realpathSync(at(\"link\"), \"buffer\"); return [Buffer.isBuffer(b), norm(b.toString())]; });
+t(\"realpath bad encoding\", () => fs.realpathSync(at(\"link\"), \"nope\"));
+// ---- callbacks need a function
+for (const name of [\"stat\", \"lstat\", \"readlink\", \"readdir\", \"readFile\"]) t(name + \" without a callback\", () => fs[name](at(\"a.txt\")));
+t(\"shape\", () => [fs.promises === fsp, [\"stat\", \"statSync\", \"lstat\", \"lstatSync\", \"readlink\", \"readlinkSync\", \"readdir\", \"readdirSync\", \"readFile\", \"readFileSync\", \"Stats\", \"Dirent\"].map((k) => typeof fs[k]), [\"stat\", \"lstat\", \"readlink\", \"readdir\", \"readFile\"].map((k) => typeof fsp[k]), fs.constants.S_IFMT, fs.constants.S_IFDIR, fs.constants.UV_DIRENT_DIR, fs.statSync.length, fs.lstat.length, fs.readFile.length, fs.readdirSync.length]);
+// ---- the callback and promise forms
+const later = [];
+const settle = (label, promise) => later.push(promise.then((v) => label + \" \" + show(v), (e) => label + \" \" + show(fail(e))));
+const cb = (run) => new Promise((resolve, reject) => run((err, value) => (err ? reject(err) : resolve(value))));
+for (const name of [\"a.txt\", \"sub\", \"link\", \"broken\", \"nope\"]) {
+  settle(\"stat cb \" + name, cb((done) => fs.stat(at(name), done)).then(statLine));
+  settle(\"lstat cb \" + name, cb((done) => fs.lstat(at(name), done)).then(statLine));
+  settle(\"stat promise \" + name, fsp.stat(at(name)).then(statLine));
+  settle(\"lstat promise \" + name, fsp.lstat(at(name)).then(statLine));
+  settle(\"readlink cb \" + name, cb((done) => fs.readlink(at(name), done)));
+  settle(\"readlink promise \" + name, fsp.readlink(at(name)));
+  settle(\"readdir cb \" + name, cb((done) => fs.readdir(at(name), done)).then((l) => l.sort()));
+  settle(\"readdir promise \" + name, fsp.readdir(at(name)).then((l) => l.sort()));
+  settle(\"readFile cb \" + name, cb((done) => fs.readFile(at(name), done)).then((b) => b.toString(\"hex\")));
+  settle(\"readFile promise \" + name, fsp.readFile(at(name), \"utf8\"));
+}
+settle(\"stat cb options\", cb((done) => fs.stat(at(\"a.txt\"), { bigint: true }, done)).then((s) => [s.constructor.name, s.size]));
+settle(\"stat cb quiet\", cb((done) => fs.stat(at(\"nope\"), { throwIfNoEntry: false }, done)).then((s) => String(s)));
+settle(\"stat promise bigint\", fsp.stat(at(\"a.txt\"), { bigint: true }).then((s) => [s.constructor.name, s.size]));
+settle(\"stat promise bad options\", (async () => fsp.stat(at(\"a.txt\"), 5))());
+settle(\"readlink cb buffer\", cb((done) => fs.readlink(at(\"link\"), \"buffer\", done)).then((b) => b.toString(\"hex\")));
+settle(\"readdir cb withFileTypes\", cb((done) => fs.readdir(at(\"sub\"), { withFileTypes: true }, done)).then((l) => l.map(dirent).sort(byName)));
+settle(\"readdir cb recursive\", cb((done) => fs.readdir(at(\"\"), { recursive: true }, done)).then((l) => l.sort()));
+settle(\"readdir promise recursive withFileTypes\", fsp.readdir(at(\"sub\"), { recursive: true, withFileTypes: true }).then((l) => l.map(dirent).sort(byName)));
+settle(\"readFile cb utf8\", cb((done) => fs.readFile(at(\"a.txt\"), \"utf8\", done)));
+settle(\"readFile cb options\", cb((done) => fs.readFile(at(\"sub/inner.bin\"), { encoding: \"base64\" }, done)));
+settle(\"readFile cb dir\", cb((done) => fs.readFile(at(\"sub\"), done)));
+settle(\"readFile promise dir\", fsp.readFile(at(\"sub\")));
+settle(\"readFile promise buffer\", fsp.readFile(at(\"sub/inner.bin\")).then((b) => [Buffer.isBuffer(b), b.toString(\"hex\")]));
+settle(\"readFile cb aborted\", cb((done) => fs.readFile(at(\"a.txt\"), { signal: AbortSignal.abort() }, done)).catch((e) => [e.name, e.code]));
+settle(\"readFile promise aborted\", fsp.readFile(at(\"a.txt\"), { signal: AbortSignal.abort() }).catch((e) => [e.name, e.code]));
+settle(\"stat cb aborted\", cb((done) => fs.stat(at(\"a.txt\"), { signal: AbortSignal.abort() }, done)).catch((e) => [e.name, e.code]));
+settle(\"readFile cb bad signal\", (async () => cb((done) => fs.readFile(at(\"a.txt\"), { signal: 5 }, done)))());
+Promise.all(later).then((settled) => {
+for (const l of settled) lines.push(l);
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+globalThis.out.push(\"finished\");
+});
+
+"
+
+// stat, lstat, readlink, readdir and readFile in their sync, callback and
+// promise forms over the made-up tree: every path in it, missing ones, paths
+// through links and through files, each option and each refusal. Each line
+// is a kind of case, how many, and a hash of what they printed in node
+// 26.11.1 reading a real folder of the same shape
+pub fn fs_reads_match_node_test() {
+  let rt = run_answering(run_commonjs(node_runtime(), fs_reads_script))
+  assert out_lines(rt)
+    == [
+      "statSync 28 969246112",
+      "lstatSync 28 1107365029",
+      "readlinkSync 14 2318279608",
+      "readdirSync 14 2262184512",
+      "readFileSync 14 4202652315",
+      "existsSync 14 2071884175",
+      "stats 6 4010812161",
+      "lstat 12 133708780",
+      "stat 23 2665285904",
+      "readlink 18 3735817974",
+      "readdir 26 3852217585",
+      "readFile 37 3387705820",
+      "realpath 3 414019862",
+      "shape 1 2156372516",
+      "finished",
+    ]
+}
+
+pub fn a_file_read_is_a_want_the_embedder_answers_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "const fs = require('fs');
+      fs.readFile('/tree/a.txt', 'utf8', (error, text) => out.push('later: ' + text.trim()));
+      fs.promises.readdir('/tree/sub').then((names) => out.push('later: ' + names.sort()));
+      out.push('now: ' + fs.readFileSync('/tree/a.txt', 'utf8').trim());",
+    )
+  assert out_lines(rt) == ["now: hello"]
+  let assert [#(first, _), #(second, _)] as asked = kept()
+  assert [first, second] == [ReadFile("/tree/a.txt"), Readdir("/tree/sub")]
+  let rt =
+    list.fold(asked, rt, fn(rt, one) {
+      spark.answer(rt, one.1, fake_answer(one.0)).1
+    })
+  assert out_lines(run_to_end(rt))
+    == ["now: hello", "later: hello", "later: deep,inner.bin"]
 }

@@ -362,6 +362,12 @@ const codes = {
       `Value of "this" must be of type ${type}`,
     );
   },
+  ERR_METHOD_NOT_IMPLEMENTED: function (method) {
+    return error(
+      "ERR_METHOD_NOT_IMPLEMENTED",
+      `The ${method} method is not implemented`,
+    );
+  },
   ERR_UNKNOWN_ENCODING: function (encoding) {
     return typeError("ERR_UNKNOWN_ENCODING", `Unknown encoding: ${encoding}`);
   },
