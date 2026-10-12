@@ -32,6 +32,7 @@ import spark/process.{Process}
 import spark/querystring
 import spark/stream
 import spark/string_decoder
+import spark/structured_clone
 import spark/timers
 import spark/url
 import spark/util
@@ -77,6 +78,7 @@ fn builtins() -> List(Builtin(Nil)) {
     stream.builtin(),
     stream.promises_builtin(),
     stream.consumers_builtin(),
+    structured_clone.builtin(),
   ]
 }
 
@@ -1348,16 +1350,20 @@ pub fn a_throwing_listener_does_not_break_the_dispatch_test() {
 
 pub fn a_mark_detail_needs_structured_clone_test() {
   let rt = run_commonjs(node_runtime(), describe <> "
+        const given = globalThis.structuredClone;
+        delete globalThis.structuredClone;
         out.push(performance.mark('plain').detail);
         out.push(describe(() => performance.mark('with detail', { detail: { n: 1 } })));
-        globalThis.structuredClone = (value) => ({ ...value, copied: true });
-        out.push(JSON.stringify(performance.mark('with detail', { detail: { n: 1 } }).detail));
+        globalThis.structuredClone = given;
+        const detail = { n: 1 };
+        const kept = performance.mark('with detail', { detail }).detail;
+        out.push(JSON.stringify(kept) + ' ' + (kept !== detail));
         ")
   assert out_lines(rt)
     == [
       "",
       "Error [ERR_METHOD_NOT_IMPLEMENTED]: The structuredClone method is not implemented code",
-      "{\"n\":1,\"copied\":true}",
+      "{\"n\":1} true",
     ]
 }
 
@@ -3242,5 +3248,154 @@ pub fn process_is_an_event_emitter_test() {
       "error event with no listener throws threw Error undefined boom",
       "once resolved [\"a\",1]",
       "emitted from a tick 7",
+    ]
+}
+
+const structured_clone_script = "
+const util = require(\"util\");
+let seed = 9001;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const show = (v) => util.inspect(v, { depth: 12, breakLength: Infinity, showHidden: false, sorted: false });
+const call = (f) => { try { const v = f(); return typeof v === \"string\" ? v : show(v); } catch (e) { return \"threw \" + (e && e.constructor && e.constructor.name) + \" \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f).replace(/\\n/g, \"\\\\n\"));
+// ---- generated values: clone, print, and check it is a deep copy
+const shared = () => ({ shared: true });
+const fixed = (e) => { e.stack = e.name + \": \" + e.message + \"\\n    at fixed\"; return e; };
+function leaf(pool) {
+  return pick([
+    () => rnd(1000) - 500, () => -0, () => NaN, () => Infinity, () => 12345678901234567890n, () => \"str\", () => \"\", () => true, () => null, () => undefined,
+    () => new Date(86400000 * rnd(20000)), () => new Date(NaN), () => /re+g/gi, () => { const r = /a/y; r.lastIndex = 3; return r; },
+    () => new Boolean(false), () => new Number(-0), () => new String(\"boxed\"), () => Object(5n),
+    () => new Uint8Array([1, 2, 3]), () => new Float64Array([1.5, NaN]), () => new ArrayBuffer(3), () => new DataView(new ArrayBuffer(4), 1, 2), () => Buffer.from(\"hi\"), () => new Uint16Array(new ArrayBuffer(8), 2, 2), () => new BigInt64Array([1n, -1n]),
+    () => fixed(new RangeError(\"range\")), () => fixed(Object.assign(new Error(\"with cause\", { cause: { why: 1 } }), { extra: \"dropped\" })), () => { const e = fixed(new TypeError(\"named\")); e.name = \"CustomName\"; return e; }, () => fixed(new Error(\"stack\")),
+    () => new (class Point { constructor() { this.x = 1; } get y() { return 2; } })(), () => Object.create(null), () => Object.create({ inherited: 1 }, { own: { value: 2, enumerable: true }, hidden: { value: 3, enumerable: false } }),
+    () => ({ [Symbol(\"s\")]: 1, kept: 2 }), () => ({ get g() { return \"from getter\"; } }), () => [, 1, , ], () => Object.assign([1, 2], { extra: \"x\" }), () => new Array(3), () => Object.freeze({ frozen: 1 }),
+    () => pool[rnd(pool.length)] ?? (pool.push(shared()), pool[0]),
+  ])();
+}
+function value(depth, pool) {
+  if (depth <= 0 || rnd(3) === 0) return leaf(pool);
+  switch (rnd(4)) {
+    case 0: return Array.from({ length: rnd(6) }, () => value(depth - 1, pool));
+    case 1: { const o = {}; for (let i = 0; i < rnd(6); i++) o[pick([\"a\", \"b\", \"k\" + i, \"10\", \"x y\"])] = value(depth - 1, pool); if (rnd(4) === 0) o.self = o; return o; }
+    case 2: return new Map(Array.from({ length: rnd(4) }, () => [value(depth - 1, pool), value(depth - 1, pool)]));
+    default: return new Set(Array.from({ length: rnd(4) }, () => value(depth - 1, pool)));
+  }
+}
+function sameShape(a, b, seen = new Map()) {
+  if (a === null || (typeof a !== \"object\" && typeof a !== \"function\")) return Object.is(a, b) ? \"\" : \"primitive differs\";
+  if (a === b) return \"same object, not a copy\";
+  if (seen.has(a)) return seen.get(a) === b ? \"\" : \"identity not kept\";
+  seen.set(a, b);
+  if (Object.prototype.toString.call(a) !== Object.prototype.toString.call(b) && !Buffer.isBuffer(a)) return \"tag differs\";
+  if (a instanceof Map) { const ae = [...a], be = [...b]; if (ae.length !== be.length) return \"map size\"; for (let i = 0; i < ae.length; i++) { const r = sameShape(ae[i][0], be[i][0], seen) || sameShape(ae[i][1], be[i][1], seen); if (r) return r; } return \"\"; }
+  if (a instanceof Set) { const ae = [...a], be = [...b]; if (ae.length !== be.length) return \"set size\"; for (let i = 0; i < ae.length; i++) { const r = sameShape(ae[i], be[i], seen); if (r) return r; } return \"\"; }
+  if (a instanceof Error || ArrayBuffer.isView(a) || a instanceof ArrayBuffer || a instanceof Date || a instanceof RegExp) return \"\";
+  for (const k of Object.keys(a)) { const r = sameShape(a[k], b[k], seen); if (r) return k + \": \" + r; }
+  return \"\";
+}
+for (let i = 0; i < 300; i++) {
+  const v = value(3, []);
+  lines.push(\"G \" + i + \" \" + call(() => { const c = structuredClone(v); return show(c) + \" | \" + (sameShape(v, c) || \"deep copy\") + \" | \" + (c !== null && typeof c === \"object\" ? Object.getPrototypeOf(c)?.constructor?.name : typeof c); }).replace(/\\n/g, \"\\\\n\"));
+}
+// ---- one case each
+t(\"shape\", () => [typeof structuredClone, structuredClone.name, structuredClone.length, Object.getOwnPropertyDescriptor(globalThis, \"structuredClone\").enumerable, Object.getOwnPropertyDescriptor(globalThis, \"structuredClone\").writable]);
+t(\"no arguments\", () => structuredClone());
+t(\"undefined\", () => [structuredClone(undefined), structuredClone(null)]);
+t(\"shared reference kept\", () => { const s = { n: 1 }; const c = structuredClone({ a: s, b: s, list: [s] }); return [c.a === c.b, c.list[0] === c.a, c.a !== s]; });
+t(\"cycle\", () => { const a = { name: \"a\" }; a.self = a; const m = new Map(); m.set(\"me\", m); const c = structuredClone({ a, m }); return [c.a.self === c.a, c.m.get(\"me\") === c.m]; });
+t(\"class instance loses its class\", () => { class P { constructor() { this.x = 1; } m() {} } const c = structuredClone(new P()); return [Object.getPrototypeOf(c) === Object.prototype, c.x, c.m]; });
+t(\"getter is read once, becomes data\", () => { let reads = 0; const c = structuredClone({ get g() { reads++; return 7; } }); return [reads, Object.getOwnPropertyDescriptor(c, \"g\")]; });
+t(\"getter throws\", () => structuredClone({ get g() { throw new RangeError(\"from getter\"); } }));
+t(\"key order\", () => Object.keys(structuredClone({ b: 1, 2: 1, a: 1, 1: 1 })));
+t(\"non-enumerable and symbol keys dropped\", () => { const o = { kept: 1, [Symbol(\"s\")]: 2 }; Object.defineProperty(o, \"hidden\", { value: 3 }); return Reflect.ownKeys(structuredClone(o)); });
+t(\"array holes and extras\", () => { const a = [1, , 3]; a.extra = \"x\"; const c = structuredClone(a); return [c.length, 1 in c, c.extra, Array.isArray(c)]; });
+t(\"date\", () => { const c = structuredClone(new Date(5)); return [c instanceof Date, c.getTime(), structuredClone(new Date(NaN)).getTime()]; });
+t(\"regexp\", () => { const r = /a(b)/giy; r.lastIndex = 2; const c = structuredClone(r); return [c.source, c.flags, c.lastIndex, c instanceof RegExp]; });
+t(\"boxed\", () => [new Number(1), new String(\"s\"), new Boolean(true), Object(1n)].map((b) => { const c = structuredClone(b); return [typeof c, Object.prototype.toString.call(c), c.valueOf() === b.valueOf() || typeof c.valueOf()]; }));
+t(\"boxed symbol\", () => structuredClone(Object(Symbol(\"s\"))));
+t(\"array buffer\", () => { const b = new Uint8Array([1, 2, 3]).buffer; const c = structuredClone(b); new Uint8Array(c)[0] = 9; return [c instanceof ArrayBuffer, c.byteLength, new Uint8Array(b)[0], new Uint8Array(c)[0]]; });
+t(\"resizable array buffer\", () => { const b = new ArrayBuffer(2, { maxByteLength: 8 }); const c = structuredClone(b); return [c.resizable, c.byteLength, c.maxByteLength]; });
+t(\"shared array buffer\", () => { const s = new SharedArrayBuffer(2); const c = structuredClone(s); new Uint8Array(c)[0] = 5; return [c instanceof SharedArrayBuffer, new Uint8Array(s)[0]]; });
+t(\"views share one cloned buffer\", () => { const b = new ArrayBuffer(8); const c = structuredClone({ a: new Uint8Array(b, 1, 3), d: new DataView(b, 2), b }); return [c.a.buffer === c.b, c.d.buffer === c.b, c.a.byteOffset, c.a.length, c.d.byteOffset, c.d.byteLength, c.b !== b]; });
+t(\"buffer becomes Uint8Array\", () => { const c = structuredClone(Buffer.from(\"hi\")); return [Buffer.isBuffer(c), c.constructor.name, [...c]]; });
+t(\"length-tracking view\", () => { const b = new ArrayBuffer(4, { maxByteLength: 8 }); const c = structuredClone(new Uint8Array(b)); c.buffer.resize(6); return c.length; });
+t(\"map and set\", () => { const k = { key: 1 }; const c = structuredClone(new Map([[k, new Set([k])]])); const [ck, cs] = [...c][0]; return [c instanceof Map, cs instanceof Set, cs.has(ck), ck !== k]; });
+t(\"map subclass and extras\", () => { class M extends Map {} const m = new M([[1, 2]]); m.extra = 1; const c = structuredClone(m); return [c.constructor.name, c.extra, c.get(1)]; });
+for (const E of [Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError]) t(\"error \" + E.name, () => { const e = new E(\"m\"); e.stack = \"S\"; e.extra = 1; const c = structuredClone(e); return [c instanceof E, Object.getPrototypeOf(c) === E.prototype, c.name, c.message, c.stack, c.extra, Object.keys(c)]; });
+t(\"error name\", () => [\"CustomName\", \"TypeError\", 5, undefined].map((n) => { const e = new RangeError(\"m\"); e.name = n; e.stack = \"S\"; const c = structuredClone(e); return [c.name, Object.getPrototypeOf(c).constructor.name]; }));
+t(\"error without message\", () => { const e = new Error(); e.stack = \"S\"; const c = structuredClone(e); return [Object.hasOwn(c, \"message\"), c.message]; });
+t(\"error cause\", () => { const e = new Error(\"m\", { cause: { deep: [1] } }); e.stack = \"S\"; const c = structuredClone(e); return [c.cause, c.cause !== e.cause]; });
+t(\"aggregate error\", () => { const e = new AggregateError([1], \"agg\"); e.stack = \"S\"; const c = structuredClone(e); return [c.constructor.name, c.message, c.errors]; });
+t(\"error subclass\", () => { class My extends TypeError {} const e = new My(\"m\"); e.stack = \"S\"; const c = structuredClone(e); return [c.constructor.name, c.name]; });
+t(\"DOMException\", () => { const c = structuredClone(new DOMException(\"gone\", \"AbortError\")); return [c instanceof DOMException, c.name, c.message, c.code]; });
+for (const [label, make] of [[\"symbol\", () => Symbol(\"s\")], [\"promise\", () => Promise.resolve()], [\"weakmap\", () => new WeakMap()], [\"weakset\", () => new WeakSet()], [\"weakref\", () => new WeakRef({})], [\"proxy\", () => new Proxy({}, {})], [\"generator\", () => (function* () {})()], [\"map iterator\", () => new Map().keys()], [\"nested symbol\", () => ({ a: [Symbol(\"in\")] })], [\"event target\", () => new EventTarget()], [\"abort signal\", () => new AbortController().signal], [\"url\", () => new URL(\"http://a/\")], [\"text encoder\", () => new TextEncoder()], [\"arguments\", () => (function () { return arguments; })(1, 2)], [\"global\", () => globalThis], [\"math\", () => Math], [\"json\", () => JSON], [\"detached buffer\", () => { const b = new ArrayBuffer(2); b.transfer(); return b; }], [\"view on detached\", () => { const b = new ArrayBuffer(2); const v = new Uint8Array(b); b.transfer(); return v; }]]) t(\"refuses \" + label, () => { try { return [\"cloned\", structuredClone(make())]; } catch (e) { return [e.constructor.name, e.name, e.code, e instanceof DOMException]; } });
+for (const [label, make] of [[\"function\", () => function named() {}], [\"arrow\", () => () => 1], [\"class\", () => class K {}], [\"native function\", () => Math.max], [\"bound\", () => (() => 1).bind(null)]]) t(\"refuses \" + label, () => { try { return [\"cloned\", structuredClone(make())]; } catch (e) { return [e.constructor.name, e.name, e.code]; } });
+t(\"messages\", () => [Symbol(\"s\"), new WeakMap(), Promise.resolve(), new Proxy({}, {}), new (class Foo { constructor() { return new Proxy(this, {}); } })()].map((v) => { try { structuredClone(v); return \"cloned\"; } catch (e) { return e.message; } }));
+t(\"transfer\", () => { const b = new Uint8Array([1, 2, 3]).buffer; const c = structuredClone({ b, v: new Uint8Array(b, 1) }, { transfer: [b] }); return [b.byteLength, b.detached, c.b.byteLength, [...c.v], c.v.buffer === c.b]; });
+t(\"transfer not in the value\", () => { const b = new ArrayBuffer(2); const c = structuredClone(1, { transfer: [b] }); return [c, b.detached]; });
+t(\"transfer twice\", () => { const b = new ArrayBuffer(2); try { structuredClone(b, { transfer: [b, b] }); } catch (e) { return [e.name, b.detached]; } });
+t(\"transfer a detached buffer\", () => { const b = new ArrayBuffer(2); b.transfer(); try { structuredClone(1, { transfer: [b] }); } catch (e) { return e.name; } });
+t(\"transfer a shared buffer\", () => { try { structuredClone(1, { transfer: [new SharedArrayBuffer(1)] }); } catch (e) { return e.name; } });
+t(\"transfer a plain object\", () => { try { structuredClone(1, { transfer: [{}] }); } catch (e) { return e.name; } });
+t(\"transfer not a list\", () => { try { return structuredClone(1, { transfer: 5 }); } catch (e) { return [e.constructor.name, e.name, e.code]; } });
+t(\"options not an object\", () => { try { return structuredClone(1, 5); } catch (e) { return [e.constructor.name, e.name, e.code]; } });
+t(\"options null and empty\", () => [structuredClone(1, null), structuredClone(2, {}), structuredClone(3, undefined), structuredClone(4, { transfer: undefined })]);
+t(\"failed clone transfers nothing\", () => { const b = new ArrayBuffer(2); try { structuredClone({ b, f() {} }, { transfer: [b] }); } catch (e) { return [e.name, b.detached]; } });
+t(\"deep nesting\", () => { let v = 1; for (let i = 0; i < 400; i++) v = [v]; let c = structuredClone(v), depth = 0; while (Array.isArray(c)) { c = c[0]; depth++; } return depth; });
+t(\"big array\", () => { const c = structuredClone(Array.from({ length: 5000 }, (_, i) => ({ i }))); return [c.length, c[4999].i]; });
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"G \") ? \"generated\" : line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+
+"
+
+// 300 generated values (nested arrays, objects, maps and sets holding dates,
+// regexps, buffers, views, errors, shared and circular references) cloned
+// and checked to be deep copies, then one case for each kind, each refusal
+// and each transfer rule. Each line is a kind of case, how many, and a hash
+// of what they printed in node 26.11.1
+pub fn structured_clone_matches_node_test() {
+  let rt = run_commonjs(node_runtime(), structured_clone_script)
+  assert out_lines(rt)
+    == [
+      "generated 300 3531375872",
+      "shape 1 1902906066",
+      "no 1 1612814149",
+      "undefined 1 3039114596",
+      "shared 2 3303679564",
+      "cycle 1 201779211",
+      "class 1 2523920055",
+      "getter 2 471174620",
+      "key 1 2299253694",
+      "non-enumerable 1 22970972",
+      "array 2 328745305",
+      "date 1 3772044935",
+      "regexp 1 2543213309",
+      "boxed 2 3204686228",
+      "resizable 1 3945033435",
+      "views 1 786687885",
+      "buffer 1 3119321695",
+      "length-tracking 1 364435268",
+      "map 2 1663906942",
+      "error 11 3580913138",
+      "aggregate 1 3495156515",
+      "DOMException 1 2342203299",
+      "refuses 24 2773901605",
+      "messages 1 2691342779",
+      "transfer 7 182286258",
+      "options 2 4021613208",
+      "failed 1 2645989278",
+      "deep 1 1352721305",
+      "big 1 2764326404",
     ]
 }

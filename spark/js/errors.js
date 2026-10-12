@@ -48,39 +48,36 @@ const systemErrors = {
   ETXTBSY: ["text file is busy", -26],
 };
 
-function nodeErrorClass(Base) {
-  return class NodeError extends Base {
-    constructor(code, message) {
-      super(message);
-      this.code = code;
-    }
-
-    toString() {
-      return `${this.name} [${this.code}]: ${this.message}`;
-    }
-  };
+// as node makes its coded errors: a plain error of the base class, with the
+// code on it and a toString that shows the code
+function coded(Base, code, message) {
+  const made = new Base(message);
+  Object.defineProperty(made, "toString", {
+    value() {
+      return `${this.name} [${code}]: ${this.message}`;
+    },
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+  made.code = code;
+  return made;
 }
 
-const NodeError = nodeErrorClass(Error);
-const NodeTypeError = nodeErrorClass(TypeError);
-const NodeRangeError = nodeErrorClass(RangeError);
-
 function error(code, message) {
-  return new NodeError(code, message);
+  return coded(Error, code, message);
 }
 
 function typeError(code, message) {
-  return new NodeTypeError(code, message);
+  return coded(TypeError, code, message);
 }
 
 function rangeError(code, message) {
-  return new NodeRangeError(code, message);
+  return coded(RangeError, code, message);
 }
 
-const NodeURIError = nodeErrorClass(URIError);
-
 function uriError(code, message) {
-  return new NodeURIError(code, message);
+  return coded(URIError, code, message);
 }
 
 function formatList(array, type) {
@@ -336,6 +333,17 @@ function genericNodeError(message, errorProperties) {
 
 const kEnhanceStackBeforeInspector = Symbol("kEnhanceStackBeforeInspector");
 
+// objects that structuredClone must refuse, as node marks its URL
+const uncloneable = new WeakSet();
+
+function markUncloneable(object) {
+  uncloneable.add(object);
+}
+
+function isUncloneable(object) {
+  return uncloneable.has(object);
+}
+
 // node's error classes by code, for code ported from node that says
 // `new ERR_X(...)`; each returns the error, which `new` then hands back
 const codes = {
@@ -396,6 +404,8 @@ module.exports = {
   kEnhanceStackBeforeInspector,
   validateAbortSignal,
   validateBoolean,
+  markUncloneable,
+  isUncloneable,
   invalidArgType,
   invalidArgValue,
   outOfRange,

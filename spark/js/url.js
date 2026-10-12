@@ -9,6 +9,7 @@ const {
   invalidArgType,
   invalidArgValue,
   inspect: describe,
+  markUncloneable,
   validateFunction,
   validateString,
 } = require("spark:errors");
@@ -78,7 +79,9 @@ function getConstructorOf(obj) {
   return null;
 }
 
-function markTransferMode() {}
+function markTransferMode(object, cloneable) {
+  if (!cloneable) markUncloneable(object);
+}
 
 function spliceOne(list, index) {
   for (; index + 1 < list.length; index++) list[index] = list[index + 1];

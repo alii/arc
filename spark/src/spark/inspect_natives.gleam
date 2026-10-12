@@ -1,20 +1,23 @@
-//// what node's util.inspect and util.types ask of the engine: a look inside
-//// values that javascript itself cannot take
+//// what node's util.inspect and util.types, and structuredClone, ask of the
+//// engine: a look inside values that javascript itself cannot take
 
 import arc/host.{type Context, type HostMethod, HostMethod}
 import arc/internal/ordered_entries
 import arc/rt/bytecode.{type FnFlags}
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type JsVal, type WeakKey, ArgumentsObj, ArrayBufferObj, ArrayObj,
-  AsyncGeneratorObj, BigIntObj, BooleanObj, BoundFn, BytecodeFn, CompiledFn,
-  DataViewObj, DateObj, ErrorObj, GeneratorObj, Handle, MapIterEntries,
-  MapIterKeys, MapIterValues, MapIterator, MapObj, ModuleNamespace, NativeFn,
-  NumberObj, PromiseFulfilled, PromiseObj, PromisePending, PromiseRejected,
-  ProxyObj, RegExpObj, SObject, SPromiseData, SetIterEntries, SetIterValues,
-  SetIterator, SetObj, Shared, StringObj, SymbolObj, TypedArrayObj, WeakMapObj,
-  WeakObjKey, WeakSetObj, WeakSymKey, map_key_to_js, mk_bool, mk_int, mk_null,
-  mk_object, mk_string, mk_symbol, mk_undefined,
+  type JsVal, type WeakKey, ArgumentsObj, ArrayBufferObj, ArrayIterator,
+  ArrayObj, AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj, BooleanObj,
+  BoundFn, BytecodeFn, CompiledFn, DataViewObj, DateObj, DisposableStackObj,
+  ErrorObj, FinalizationRegistryObj, GeneratorObj, GlobalObj, Handle, HostObj,
+  IntlObj, IteratorHelperObj, MapIterEntries, MapIterKeys, MapIterValues,
+  MapIterator, MapObj, ModuleNamespace, NativeFn, NumberObj, PromiseFulfilled,
+  PromiseObj, PromisePending, PromiseRejected, ProxyObj, RawJsonObj, RegExpObj,
+  SObject, SPromiseData, SetIterEntries, SetIterValues, SetIterator, SetObj,
+  ShadowRealmObj, Shared, StringIterator, StringObj, SymbolObj, TemporalObj,
+  TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
+  WrapForValidIteratorObj, map_key_to_js, mk_bool, mk_int, mk_null, mk_object,
+  mk_string, mk_symbol, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -59,6 +62,16 @@ pub fn natives() -> List(HostMethod(host)) {
           pair(ctx, entries, mk_bool(keyed))
         }
       }
+    }),
+    // whether a typed array or data view was made with no length, so that
+    // it follows its buffer as the buffer is resized
+    HostMethod("tracksLength", 1, fn(ctx, args, _this) {
+      let tracks = case object_kind(ctx, host.first_arg(args)) {
+        Some(TypedArrayObj(length: None, ..)) -> True
+        Some(DataViewObj(byte_length: None, ..)) -> True
+        _ -> False
+      }
+      #(Ok(mk_bool(tracks)), ctx)
     }),
   ]
 }
@@ -132,6 +145,20 @@ fn kind_name(kind: types.ObjKind) -> String {
     SetIterator(..) -> "set_iterator"
     PromiseObj(..) -> "promise"
     GeneratorObj(..) | AsyncGeneratorObj(..) -> "generator_object"
+    ArrayIterator(..) -> "array_iterator"
+    StringIterator(..) -> "string_iterator"
+    AsyncFromSyncIterator(..)
+    | IteratorHelperObj(..)
+    | WrapForValidIteratorObj(..) -> "iterator_helper"
+    WeakRefObj(..) -> "weak_ref"
+    FinalizationRegistryObj(..) -> "finalization_registry"
+    GlobalObj -> "global"
+    IntlObj(..) -> "intl"
+    TemporalObj(..) -> "temporal"
+    DisposableStackObj(..) -> "disposable_stack"
+    ShadowRealmObj(..) -> "shadow_realm"
+    RawJsonObj(..) -> "raw_json"
+    HostObj(..) -> "host"
     _ -> "object"
   }
 }

@@ -33,6 +33,7 @@ const names = [
   "stream",
   "stream_promises",
   "stream_consumers",
+  "structured_clone",
 ]
 
 const target = "src/spark/js.gleam"

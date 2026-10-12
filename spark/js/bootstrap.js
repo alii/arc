@@ -139,7 +139,8 @@
       Object.defineProperty(globalThis, names[i], {
         value: exports[names[i]],
         writable: true,
-        enumerable: false,
+        // as in node: a class is not listed, a function or an object is
+        enumerable: names[i][0] === names[i][0].toLowerCase(),
         configurable: true,
       });
     }

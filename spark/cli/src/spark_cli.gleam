@@ -30,6 +30,7 @@ import spark/process.{type Process, Process}
 import spark/querystring
 import spark/stream
 import spark/string_decoder
+import spark/structured_clone
 import spark/timers
 import spark/url
 import spark/util
@@ -88,6 +89,7 @@ fn builtins(
     stream.builtin(),
     stream.promises_builtin(),
     stream.consumers_builtin(),
+    structured_clone.builtin(),
   ]
 }
 
