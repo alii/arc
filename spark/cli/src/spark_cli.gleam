@@ -243,7 +243,7 @@ fn perform(want: Want) -> Result(Answer, Failure) {
   }
 }
 
-@external(erlang, "spark_cli_ffi", "fetch")
+@external(erlang, "spark_cli_http_ffi", "fetch")
 fn fetch(
   method: String,
   url: String,
@@ -254,10 +254,10 @@ fn fetch(
 @external(erlang, "crypto", "strong_rand_bytes")
 fn strong_random(bytes: Int) -> BitArray
 
-@external(erlang, "spark_cli_ffi", "read_body")
+@external(erlang, "spark_cli_http_ffi", "read_body")
 fn read_body(body: Int) -> Result(Answer, Failure)
 
-@external(erlang, "spark_cli_ffi", "drop_body")
+@external(erlang, "spark_cli_http_ffi", "drop_body")
 fn drop_body(body: Int) -> Result(Answer, Failure)
 
 fn real_io(inbox: Subject(Message)) -> Io {
