@@ -1,5 +1,5 @@
 -module(spark_test_ffi).
--export([main/0, note/1, notes/0, keep/1, kept/0]).
+-export([main/0, note/1, notes/0, keep/1, kept/0, stash/2, unstash/1]).
 
 main() ->
     Modules = [list_to_atom(filename:rootname(F))
@@ -39,4 +39,14 @@ keep(Term) ->
 kept() ->
     receive {spark_test_keep, Term} -> [Term | kept()]
     after 0 -> []
+    end.
+
+%% things put by for a key, taken back one at a time in the order they went in
+stash(Key, Term) ->
+    self() ! {spark_test_stash, Key, Term},
+    nil.
+
+unstash(Key) ->
+    receive {spark_test_stash, Key, Term} -> {ok, Term}
+    after 0 -> {error, nil}
     end.

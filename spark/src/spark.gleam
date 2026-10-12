@@ -117,6 +117,7 @@ const shipped_sources = [
   js.tty,
   js.tls,
   js.web_streams,
+  js.fetch,
 ]
 
 /// compiles the js of every builtin spark ships; installs and runs nothing

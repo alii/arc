@@ -27,6 +27,23 @@ pub type Want {
   /// every byte of the file at `path`; answered with Bytes; behind node:fs
   /// readFile
   ReadFile(path: String)
+  /// make this http request and say what came back, once the status and the
+  /// headers are in and however long the body is. `url` is an absolute http:
+  /// or https: url, `headers` are sent as given, `body` is the bytes to send
+  /// (none when empty). A redirect is not followed and a packed body is not
+  /// unpacked: fetch does both itself. Answered with Head; behind fetch
+  Fetch(
+    method: String,
+    url: String,
+    headers: List(#(String, String)),
+    body: BitArray,
+  )
+  /// the next piece, of any size, of the body a Head named with this number;
+  /// answered with Bytes, or with Done once the body has ended
+  ReadBody(body: Int)
+  /// the script will read no more of this body, so what is left of it can be
+  /// let go; answered with Done
+  DropBody(body: Int)
   /// write these bytes to the process's standard output or error; behind
   /// process.stdout.write and process.stderr.write
   Write(stream: Stream, data: BitArray)
@@ -43,6 +60,10 @@ pub type Answer {
   Bytes(BitArray)
   Info(FileInfo)
   Entries(List(Entry))
+  /// how a Fetch was answered: the status line's number and words, the
+  /// headers in the order they came, and a number of the embedder's choosing
+  /// by which the body is then asked for
+  Head(status: Int, reason: String, headers: List(#(String, String)), body: Int)
 }
 
 pub type FileKind {
@@ -155,6 +176,21 @@ fn encode(
         })
       let #(array, ctx) = host.array(ctx, flat)
       #(Ok(array), ctx)
+    }
+    Ok(Head(status:, reason:, headers:, body:)) -> {
+      let flat =
+        list.flat_map(headers, fn(header) {
+          [mk_string(header.0), mk_string(header.1)]
+        })
+      let #(headers, ctx) = host.array(ctx, flat)
+      let #(head, ctx) =
+        host.array(ctx, [
+          mk_int(status),
+          mk_string(reason),
+          headers,
+          mk_int(body),
+        ])
+      #(Ok(head), ctx)
     }
     Error(Failure(code:)) -> #(Error(mk_string(code)), ctx)
   }

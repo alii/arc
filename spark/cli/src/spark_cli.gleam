@@ -15,11 +15,13 @@ import spark/dom_events
 import spark/domexception
 import spark/encoding
 import spark/events
+import spark/fetch
 import spark/fs
 import spark/global
 import spark/io.{
   type Answer, type Failure, type Io, type ReplySlip, type Stream, type Want,
-  Access, Io, ReadFile, Readdir, Readlink, Realpath, Stat, Stderr, Stdout, Write,
+  Access, DropBody, Fetch, Io, ReadBody, ReadFile, Readdir, Readlink, Realpath,
+  Stat, Stderr, Stdout, Write,
 } as _
 import spark/net
 import spark/os.{type Os, type User, BigEndian, LittleEndian, Os}
@@ -97,6 +99,7 @@ fn builtins(
     zlib.builtin(),
     util.types_builtin(),
     web_streams.builtin(),
+    fetch.builtin(),
     tty.builtin(terminals()),
     // the cli has no roots of its own to ship, so the machine's stand for both
     tls.builtin(
@@ -230,9 +233,26 @@ fn perform(want: Want) -> Result(Answer, Failure) {
     Readlink(path:) -> readlink(path)
     Readdir(path:) -> readdir(path)
     ReadFile(path:) -> read_file(path)
+    Fetch(method:, url:, headers:, body:) -> fetch(method, url, headers, body)
+    ReadBody(body:) -> read_body(body)
+    DropBody(body:) -> drop_body(body)
     Write(stream:, data:) -> write(stream, data)
   }
 }
+
+@external(erlang, "spark_cli_ffi", "fetch")
+fn fetch(
+  method: String,
+  url: String,
+  headers: List(#(String, String)),
+  body: BitArray,
+) -> Result(Answer, Failure)
+
+@external(erlang, "spark_cli_ffi", "read_body")
+fn read_body(body: Int) -> Result(Answer, Failure)
+
+@external(erlang, "spark_cli_ffi", "drop_body")
+fn drop_body(body: Int) -> Result(Answer, Failure)
 
 fn real_io(inbox: Subject(Message)) -> Io {
   Io(now: perform, later: fn(want, slip) {

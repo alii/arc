@@ -4,6 +4,7 @@ import arc/host_hooks.{HostHooks}
 import arc/module/loader
 import arc/rt/types.{KStr, classify}
 import gleam/bit_array
+import gleam/int
 import gleam/list
 import gleam/option
 import gleam/result
@@ -18,13 +19,14 @@ import spark/dom_events
 import spark/domexception
 import spark/encoding
 import spark/events
+import spark/fetch
 import spark/fs
 import spark/global
 import spark/io.{
   type Answer, type Failure, type FileInfo, type Io, type ReplySlip, type Want,
-  Access, Bytes, Directory, Done, Entries, Entry, Failure, File, FileInfo, Info,
-  Io, ReadFile, Readdir, Readlink, Realpath, Stat, Stderr, Stdout, Symlink, Text,
-  Write,
+  Access, Bytes, Directory, Done, DropBody, Entries, Entry, Failure, Fetch, File,
+  FileInfo, Head, Info, Io, ReadBody, ReadFile, Readdir, Readlink, Realpath,
+  Stat, Stderr, Stdout, Symlink, Text, Write,
 }
 import spark/net
 import spark/os.{BigEndian, Os, User}
@@ -59,6 +61,12 @@ fn keep(asked: #(Want, ReplySlip)) -> Nil
 @external(erlang, "spark_test_ffi", "kept")
 fn kept() -> List(#(Want, ReplySlip))
 
+@external(erlang, "spark_test_ffi", "stash")
+fn stash(key: Int, piece: BitArray) -> Nil
+
+@external(erlang, "spark_test_ffi", "unstash")
+fn unstash(key: Int) -> Result(BitArray, Nil)
+
 fn builtins() -> List(Builtin(Nil)) {
   [
     global.builtin(),
@@ -90,6 +98,7 @@ fn builtins() -> List(Builtin(Nil)) {
     zlib.builtin(),
     util.types_builtin(),
     web_streams.builtin(),
+    fetch.builtin(),
     tty.builtin([1]),
     tls.builtin(
       Certificates(
@@ -210,6 +219,84 @@ fn fake_answer(want: Want) -> Result(Answer, Failure) {
         Ok(_) -> Error(Failure("EISDIR"))
         Error(failure) -> Error(failure)
       }
+    }
+    // a made-up network: one host, a few pages, each body a numbered list of
+    // pieces put by when the page is asked for
+    Fetch(url: "http://made.up/" <> page, method:, headers:, body:) -> {
+      note("fetch " <> method <> " /" <> page)
+      case page {
+        "hello" -> {
+          stash(1, <<"hel":utf8>>)
+          stash(1, <<"lo":utf8>>)
+          Ok(Head(
+            status: 200,
+            reason: "OK",
+            headers: [
+              #("Content-Type", "text/plain"),
+              #("Set-Cookie", "a=1"),
+              #("Set-Cookie", "b=2"),
+            ],
+            body: 1,
+          ))
+        }
+        "moved" ->
+          Ok(Head(
+            status: 302,
+            reason: "Found",
+            headers: [#("Location", "/hello")],
+            body: 2,
+          ))
+        "echo" ->
+          Ok(Head(
+            status: 200,
+            reason: "OK",
+            headers: [
+              #("x-method", method),
+              #("x-body", text(body)),
+              #(
+                "x-sent",
+                string.join(
+                  list.map(headers, fn(header) { header.0 <> "=" <> header.1 }),
+                  "; ",
+                ),
+              ),
+            ],
+            body: 3,
+          ))
+        "packed" -> {
+          stash(4, <<
+            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x2b,
+            0xcd, 0x2b, 0x48, 0x4c, 0xce, 0x4e, 0x4d, 0x51, 0x28, 0x49, 0xad,
+          >>)
+          stash(4, <<
+            0x28, 0xd1, 0x51, 0x28, 0x45, 0xe6, 0x02, 0x00, 0x59, 0xed, 0xdf,
+            0xbf, 0x1c, 0x00, 0x00, 0x00,
+          >>)
+          Ok(Head(
+            status: 200,
+            reason: "OK",
+            headers: [#("Content-Encoding", "gzip")],
+            body: 4,
+          ))
+        }
+        "missing" -> {
+          stash(5, <<"no such page":utf8>>)
+          Ok(Head(status: 404, reason: "Not Found", headers: [], body: 5))
+        }
+        "endless" -> Ok(Head(status: 200, reason: "OK", headers: [], body: 6))
+        _ -> Error(Failure("ECONNRESET"))
+      }
+    }
+    Fetch(..) -> Error(Failure("ECONNREFUSED"))
+    ReadBody(body: 6) -> Ok(Bytes(<<"tick\n":utf8>>))
+    ReadBody(body:) ->
+      case unstash(body) {
+        Ok(piece) -> Ok(Bytes(piece))
+        Error(Nil) -> Ok(Done)
+      }
+    DropBody(body:) -> {
+      note("drop " <> int.to_string(body))
+      Ok(Done)
     }
     Write(stream: Stdout, data:) -> {
       note("stdout " <> text(data))
@@ -4169,5 +4256,224 @@ pub fn web_streams_match_node_test() {
       "writes generated 40 3510005093",
       "behaviours 24 355039172",
       "finished",
+    ]
+}
+
+const fetch_matches_node_script = "
+let seed = 4242;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const show = (v) => { if (v instanceof Uint8Array) return \"u8:\" + Array.from(v).join(\".\"); if (v instanceof ArrayBuffer) return \"ab:\" + Array.from(new Uint8Array(v)).join(\".\"); if (v instanceof Error) return v.name + \":\" + v.message; try { return JSON.stringify(v) ?? String(v); } catch { return String(v); } };
+const call = (f) => { try { return show(f()); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+const later = [];
+const settle = (label, f) => later.push(async () => { try { lines.push(label + \" \" + show(await f())); } catch (e) { lines.push(label + \" rejected \" + e.name + \" \" + e.code + \" \" + (e instanceof SyntaxError ? \"\" : e.message)); } });
+// ---- generated: a run of operations on one Headers, then everything it can say
+const names = [\"Accept\", \"accept\", \"X-One\", \"x-one\", \"Set-Cookie\", \"set-cookie\", \"Content-Type\", \"b\", \"A\", \"a b\", \"\", \"x:y\", \"caf\\u00e9\", \"x-\\u20ac\"];
+const values = [\"1\", \" padded \", \"a, b\", \"\", \"tab\\there\", \"new\\nline\", \"\\u00e9\", \"\\u20ac\", \"nul\\0\", \"\\r\\n trimmed \\t\"];
+for (let i = 0; i < 100; i++) {
+  const ops = Array.from({ length: 1 + rnd(7) }, () => [pick([\"append\", \"append\", \"set\", \"delete\", \"get\", \"has\", \"getSetCookie\"]), pick(names), pick(values)]);
+  const init = pick([undefined, undefined, { \"X-Init\": \"i\" }, [[\"x-init\", \"1\"], [\"X-INIT\", \"2\"]], new Headers({ z: \"9\" })]);
+  lines.push(\"H \" + i + \" \" + JSON.stringify(ops) + \" \" + call(() => { const h = new Headers(init); const log = []; for (const [op, name, value] of ops) { try { const r = op === \"append\" || op === \"set\" ? h[op](name, value) : op === \"getSetCookie\" ? h.getSetCookie() : h[op](name); log.push(r === undefined ? \"-\" : r); } catch (e) { log.push(\"threw \" + e.name + \": \" + e.message); } } return [log, [...h], [...h.keys()], [...h.values()]]; }));
+}
+// ---- Headers, one case each
+for (const [label, make] of [[\"number\", () => new Headers(5)], [\"null\", () => new Headers(null)], [\"string\", () => new Headers(\"a\")], [\"pair short\", () => new Headers([[\"a\"]])], [\"pair long\", () => new Headers([[\"a\", \"b\", \"c\"]])], [\"pair not a list\", () => new Headers([5])], [\"bad name\", () => new Headers({ \"a b\": \"1\" })], [\"bad value\", () => new Headers({ a: \"x\\ny\" })], [\"map\", () => [...new Headers(new Map([[\"m\", \"1\"]]))]], [\"symbol key\", () => [...new Headers({ [Symbol(\"s\")]: \"1\", a: \"2\" })]], [\"non-enumerable\", () => [...new Headers(Object.defineProperty({ a: \"1\" }, \"hidden\", { value: \"2\", enumerable: false }))]], [\"numbers\", () => [...new Headers({ n: 5, t: true, u: undefined, z: null })]], [\"wide value\", () => new Headers({ a: \"\\u0100\" })], [\"undefined\", () => [...new Headers(undefined)]], [\"function\", () => [...new Headers(Object.assign(() => {}, { f: \"1\" }))]]]) t(\"headers init \" + label, make);
+t(\"headers argument counts\", () => [\"append\", \"delete\", \"get\", \"has\", \"set\", \"forEach\"].map((m) => call(() => new Headers()[m]())).concat(call(() => new Headers().append(\"a\")), call(() => new Headers().set(\"a\"))));
+t(\"headers wrong this\", () => [\"append\", \"delete\", \"get\", \"has\", \"set\", \"keys\", \"values\", \"entries\", \"forEach\", \"getSetCookie\"].map((m) => call(() => Headers.prototype[m].call({}, \"a\", \"b\"))));
+t(\"headers order and joining\", () => { const h = new Headers([[\"b\", \"2\"], [\"a\", \"1\"], [\"B\", \"3\"], [\"set-cookie\", \"x=1\"], [\"Set-Cookie\", \"y=2\"], [\"c\", \"\"]]); return [[...h], h.get(\"b\"), h.get(\"set-cookie\"), h.getSetCookie(), h.get(\"c\"), h.get(\"nope\"), h.has(\"C\")]; });
+t(\"headers forEach\", () => { const seen = []; const h = new Headers({ b: \"2\", a: \"1\" }); const self = {}; h.forEach(function (value, name, parent) { seen.push([value, name, parent === h, this === self]); }, self); return [seen, call(() => h.forEach(5))]; });
+t(\"headers iterator\", () => { const it = new Headers({ a: \"1\" }).entries(); return [Object.prototype.toString.call(it), typeof it.next, typeof it[Symbol.iterator], it[Symbol.iterator]() === it, JSON.stringify(it.next()), JSON.stringify(it.next())]; });
+t(\"headers shape\", () => [Headers.name, Headers.length, Object.prototype.toString.call(new Headers()), Object.keys(Headers.prototype), Headers.prototype[Symbol.iterator] === Headers.prototype.entries, typeof Headers.prototype.getSetCookie]);
+t(\"headers inspect\", () => require(\"util\").inspect(new Headers({ b: \"2\", a: \"1\" })));
+// ---- Response
+t(\"response defaults\", () => { const r = new Response(); return [r.status, r.statusText, r.ok, r.type, r.url, r.redirected, r.body, r.bodyUsed, [...r.headers]]; });
+for (const [label, body] of [[\"string\", \"text \\u20ac\"], [\"empty string\", \"\"], [\"u8\", new Uint8Array([1, 2, 3])], [\"u16\", new Uint16Array([258])], [\"dataview\", new DataView(new Uint8Array([7, 8]).buffer)], [\"arraybuffer\", new Uint8Array([9]).buffer], [\"params\", new URLSearchParams({ a: \"1\", b: \"x y\" })], [\"number\", 5], [\"object\", { a: 1 }], [\"null\", null], [\"undefined\", undefined], [\"boolean\", false]]) {
+  t(\"response body \" + label, () => { const r = new Response(body); return [r.headers.get(\"content-type\"), r.body === null ? null : Object.prototype.toString.call(r.body), r.bodyUsed]; });
+  settle(\"response text of \" + label, () => new Response(body).text());
+  settle(\"response bytes of \" + label, () => new Response(body).bytes());
+  settle(\"response arrayBuffer of \" + label, () => new Response(body).arrayBuffer());
+}
+for (const [label, init] of [[\"status 99\", { status: 99 }], [\"status 600\", { status: 600 }], [\"status 200.9\", { status: 200.9 }], [\"status '201'\", { status: \"201\" }], [\"status NaN\", { status: NaN }], [\"status 204 with body\", { status: 204 }], [\"status 304 with body\", { status: 304 }], [\"statusText ok\", { statusText: \"Fine by me\" }], [\"statusText newline\", { statusText: \"a\\nb\" }], [\"statusText wide\", { statusText: \"\\u20ac\" }], [\"headers\", { headers: { \"X-A\": \"1\" } }], [\"headers bad\", { headers: { \"a b\": \"1\" } }], [\"init number\", 5], [\"init null\", null], [\"content-type kept\", { headers: { \"content-type\": \"x/y\" } }]]) t(\"response init \" + label, () => { const r = new Response(\"body\", init); return [r.status, r.statusText, r.ok, [...r.headers]]; });
+t(\"response null body statuses\", () => [101, 103, 204, 205, 304].map((s) => call(() => new Response(null, { status: s }).status)));
+t(\"response error\", () => { const r = Response.error(); return [r.type, r.status, r.ok, r.body, r.statusText, call(() => r.headers.set(\"a\", \"b\"))]; });
+t(\"response redirect\", () => [301, 302, 303, 307, 308, 200, 300, undefined].map((s) => call(() => { const r = Response.redirect(\"http://example.test/a b?q#h\", s); return [r.status, r.headers.get(\"location\"), r.type, call(() => r.headers.append(\"a\", \"b\"))]; })).concat(call(() => Response.redirect(\"not a url\")), call(() => Response.redirect())));
+t(\"response json\", () => [call(() => { const r = Response.json({ a: [1] }); return [r.status, r.headers.get(\"content-type\")]; }), call(() => Response.json({}, { status: 201, headers: { \"content-type\": \"x/y\", extra: \"1\" } }).headers.get(\"content-type\")), call(() => Response.json(undefined)), call(() => Response.json()), call(() => Response.json(Symbol(\"s\")))]);
+settle(\"response json text\", () => Response.json({ a: \"\\u20ac\", b: [1, null] }).text());
+t(\"response shape\", () => [Response.name, Response.length, Object.prototype.toString.call(new Response()), Object.keys(Response.prototype), Object.keys(Response), call(() => Response()), call(() => Object.getOwnPropertyDescriptor(Response.prototype, \"status\").get.call({}))]);
+t(\"response inspect\", () => require(\"util\").inspect(new Response(\"x\", { status: 201, headers: { a: \"1\" } })).replace(/ReadableStream \\{[^}]*\\}/, \"ReadableStream\"));
+settle(\"response json parse\", () => new Response('{\"a\":[1,2]}').json());
+settle(\"response bad json\", () => new Response(\"{\").json());
+settle(\"response empty json\", () => new Response(\"\").json());
+settle(\"response bom\", () => new Response(new Uint8Array([0xef, 0xbb, 0xbf, 104, 105])).text());
+settle(\"response bad utf8\", () => new Response(new Uint8Array([104, 0xff, 105])).text());
+settle(\"response read twice\", async () => { const r = new Response(\"x\"); await r.text(); return [r.bodyUsed, await r.text().catch((e) => e.name + \": \" + e.message), await r.json().catch((e) => e.name + \": \" + e.message), await r.arrayBuffer().catch((e) => e.name + \": \" + e.message)]; });
+settle(\"response locked\", async () => { const r = new Response(\"x\"); r.body.getReader(); return [r.bodyUsed, await r.text().catch((e) => e.name + \": \" + e.message), call(() => r.clone())]; });
+settle(\"response clone\", async () => { const r = new Response(\"cloned\", { status: 203, statusText: \"S\", headers: { a: \"1\" } }); const c = r.clone(); c.headers.set(\"b\", \"2\"); return [c.status, c.statusText, [...c.headers], [...r.headers], await r.text(), await c.text(), r.bodyUsed, c.bodyUsed, call(() => r.clone())]; });
+settle(\"response stream body\", async () => { const r = new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array([104])); c.enqueue(new Uint8Array([105])); c.close(); } })); return [r.headers.get(\"content-type\"), await r.text()]; });
+settle(\"response stream of strings\", () => new Response(new ReadableStream({ start(c) { c.enqueue(\"text\"); c.close(); } })).text());
+settle(\"response used stream\", async () => { const s = new ReadableStream({ start(c) { c.close(); } }); s.getReader(); return call(() => new Response(s)); });
+settle(\"response body is the stream\", async () => { const r = new Response(\"abc\"); const parts = []; for await (const c of r.body) parts.push(Array.from(c)); return [parts, r.bodyUsed, r.body.locked]; });
+settle(\"response wrong this\", () => Response.prototype.text.call({}));
+// ---- Request
+t(\"request defaults\", () => { const r = new Request(\"http://example.test/p?q#h\"); return [r.method, r.url, [...r.headers], r.destination, r.referrer, r.referrerPolicy, r.mode, r.credentials, r.cache, r.redirect, r.integrity, r.keepalive, r.isReloadNavigation, r.isHistoryNavigation, r.signal.aborted, r.body, r.bodyUsed, r.duplex]; });
+for (const [label, input, init] of [[\"no argument\"], [\"relative\", \"/x\"], [\"credentials\", \"http://u:p@h/\"], [\"url object\", new URL(\"http://example.test/u\")], [\"number\", 5], [\"method lower\", \"http://h/\", { method: \"post\" }], [\"method patch lower\", \"http://h/\", { method: \"patch\" }], [\"method custom\", \"http://h/\", { method: \"Purge\" }], [\"method bad\", \"http://h/\", { method: \"a b\" }], [\"method trace\", \"http://h/\", { method: \"trace\" }], [\"method connect\", \"http://h/\", { method: \"CONNECT\" }], [\"get with body\", \"http://h/\", { body: \"x\" }], [\"head with body\", \"http://h/\", { method: \"HEAD\", body: \"x\" }], [\"post body\", \"http://h/\", { method: \"POST\", body: \"x\" }], [\"post params\", \"http://h/\", { method: \"POST\", body: new URLSearchParams(\"a=1\") }], [\"post bytes\", \"http://h/\", { method: \"POST\", body: new Uint8Array(2) }], [\"stream no duplex\", \"http://h/\", { method: \"POST\", body: new ReadableStream() }], [\"stream half\", \"http://h/\", { method: \"POST\", body: new ReadableStream(), duplex: \"half\" }], [\"mode bad\", \"http://h/\", { mode: \"nope\" }], [\"mode navigate\", \"http://h/\", { mode: \"navigate\" }], [\"mode ok\", \"http://h/\", { mode: \"same-origin\" }], [\"credentials bad\", \"http://h/\", { credentials: \"nope\" }], [\"cache bad\", \"http://h/\", { cache: \"nope\" }], [\"redirect bad\", \"http://h/\", { redirect: \"nope\" }], [\"redirect manual\", \"http://h/\", { redirect: \"manual\" }], [\"signal bad\", \"http://h/\", { signal: 5 }], [\"signal null\", \"http://h/\", { signal: null }], [\"window\", \"http://h/\", { window: 1 }], [\"window null\", \"http://h/\", { window: null }], [\"referrer bad\", \"http://h/\", { referrer: \"::\" }], [\"referrer empty\", \"http://h/\", { referrer: \"\" }], [\"referrer url\", \"http://h/\", { referrer: \"http://r.test/x\" }], [\"policy\", \"http://h/\", { referrerPolicy: \"origin\" }], [\"policy bad\", \"http://h/\", { referrerPolicy: \"nope\" }], [\"integrity keepalive\", \"http://h/\", { integrity: \"sha256-x\", keepalive: true }], [\"headers\", \"http://h/\", { headers: [[\"X-A\", \"1\"], [\"x-a\", \"2\"]] }], [\"init number\", \"http://h/\", 5], [\"data url\", \"data:text/plain,hi\"], [\"file url\", \"file:///tmp/x\"]]) t(\"request \" + label, () => { const r = label === \"no argument\" ? new Request() : new Request(input, init); return [r.method, r.url, [...r.headers], r.mode, r.credentials, r.cache, r.redirect, r.referrer, r.referrerPolicy, r.integrity, r.keepalive, r.body === null ? null : \"stream\"]; });
+t(\"request from request\", () => { const a = new Request(\"http://h/a\", { method: \"POST\", headers: { x: \"1\" }, body: \"payload\", redirect: \"manual\", cache: \"no-store\" }); const b = new Request(a); const c = new Request(a.url, { method: \"PUT\", headers: { y: \"2\" }, body: \"z\" }); return [b.method, b.url, [...b.headers], b.redirect, b.cache, a.bodyUsed, call(() => new Request(a)), c.method, [...c.headers]]; });
+t(\"request override\", () => { const a = new Request(\"http://h/a\", { method: \"POST\", headers: { x: \"1\" }, body: \"payload\" }); const b = new Request(a, { method: \"PUT\", headers: { y: \"2\" }, body: \"other\" }); return [b.method, [...b.headers], a.bodyUsed]; });
+t(\"request signal follows\", () => { const c = new AbortController(); const r = new Request(\"http://h/\", { signal: c.signal }); const before = [r.signal === c.signal, r.signal.aborted]; c.abort(new Error(\"why\")); return before.concat(r.signal.aborted, r.signal.reason.message, new Request(\"http://h/\", { signal: AbortSignal.abort(\"early\") }).signal.reason); });
+t(\"request shape\", () => [Request.name, Request.length, Object.prototype.toString.call(new Request(\"http://h/\")), Object.keys(Request.prototype), call(() => Request(\"http://h/\"))]);
+settle(\"request body\", async () => { const r = new Request(\"http://h/\", { method: \"POST\", body: \"the body\" }); return [r.headers.get(\"content-type\"), r.bodyUsed, await r.text(), r.bodyUsed, await r.text().catch((e) => e.message)]; });
+settle(\"request clone\", async () => { const r = new Request(\"http://h/\", { method: \"POST\", body: \"twice\", headers: { a: \"1\" } }); const c = r.clone(); return [c.method, c.url, [...c.headers], await r.text(), await c.text(), call(() => r.clone())]; });
+settle(\"request json\", () => new Request(\"http://h/\", { method: \"PUT\", body: '{\"a\":1}' }).json());
+// ---- fetch, without the network
+for (const [label, input, init] of [[\"no argument\"], [\"relative\", \"/x\"], [\"ftp\", \"ftp://example.test/\"], [\"about\", \"about:blank\"], [\"bad port\", \"http://127.0.0.1:1/\"], [\"get with body\", \"http://h/\", { method: \"GET\", body: \"x\" }], [\"aborted already\", \"http://127.0.0.1:9/\", { signal: AbortSignal.abort() }], [\"aborted with reason\", \"http://127.0.0.1:9/\", { signal: AbortSignal.abort(new RangeError(\"mine\")) }], [\"bad method\", \"http://h/\", { method: \"a b\" }], [\"data text\", \"data:text/plain,hello%20there\"], [\"data base64\", \"data:text/plain;base64,aGkgdGhlcmU=\"], [\"data no type\", \"data:,plain\"], [\"data json\", \"data:application/json,%7B%22a%22%3A1%7D\"]]) settle(\"fetch \" + label, async () => { const r = await (label === \"no argument\" ? fetch() : fetch(input, init)); return [r.status, r.statusText, r.ok, r.type, r.url.slice(0, 30), r.headers.get(\"content-type\"), await r.text()]; });
+settle(\"fetch failure causes\", async () => { const got = []; for (const u of [\"ftp://h/\", \"about:blank\", \"http://127.0.0.1:1/\"]) await fetch(u).catch((e) => got.push([e.name, e.message, e.cause && e.cause.name, e.cause && e.cause.message])); return got; });
+t(\"fetch shape\", () => [fetch.name, fetch.length, typeof fetch(\"data:,x\").then, [\"fetch\", \"Headers\", \"Request\", \"Response\"].map((k) => { const d = Object.getOwnPropertyDescriptor(globalThis, k); return [d.enumerable, d.writable, d.configurable]; })]);
+(async () => { for (const run of later) await run(); const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"H \") ? \"headers generated\" : line.split(\" \").slice(0, 2).join(\" \");
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+globalThis.out.push(\"finished\"); })();
+
+"
+
+// 100 generated runs of operations on a Headers, then one case each for how
+// Headers, Response and Request are made, read, cloned and refused, and for
+// what fetch does without a network (bad urls, schemes, ports, data: urls,
+// a signal already aborted). Each line is a kind of case, how many, and a
+// hash of what they printed in node 26.11.1
+pub fn fetch_matches_node_test() {
+  let rt = run_to_end(run_commonjs(node_runtime(), fetch_matches_node_script))
+  assert out_lines(rt)
+    == [
+      "headers generated 100 731410379",
+      "headers init 15 715682464",
+      "headers argument 1 245457837",
+      "headers wrong 1 3041442646",
+      "headers order 1 1055220960",
+      "headers forEach 1 1620045",
+      "headers iterator 1 3227185568",
+      "headers shape 1 722948104",
+      "headers inspect 1 4150275369",
+      "response defaults 1 3946628934",
+      "response body 13 206542772",
+      "response init 15 496581980",
+      "response null 1 1906099823",
+      "response error 1 3972387116",
+      "response redirect 1 3646935498",
+      "response json 3 1557017881",
+      "response shape 1 405164925",
+      "response inspect 1 1741473177",
+      "request defaults 1 1849505541",
+      "request no 1 2818303001",
+      "request relative 1 1590429209",
+      "request credentials 2 3548676665",
+      "request url 1 3793449636",
+      "request number 1 1625617778",
+      "request method 6 781969255",
+      "request get 1 596986272",
+      "request head 1 1684172202",
+      "request post 3 513131287",
+      "request stream 2 3669092505",
+      "request mode 3 3553245103",
+      "request cache 1 2462306745",
+      "request redirect 2 1569645793",
+      "request signal 3 971020308",
+      "request window 2 2962849810",
+      "request referrer 3 1417987093",
+      "request policy 2 246053563",
+      "request integrity 1 2196596251",
+      "request headers 1 915040732",
+      "request init 1 3868682803",
+      "request data 1 1910325676",
+      "request file 1 226351212",
+      "request from 1 2920417464",
+      "request override 1 2459487697",
+      "request shape 1 2161787438",
+      "fetch shape 1 2265728610",
+      "response text 12 988344555",
+      "response bytes 12 590826521",
+      "response arrayBuffer 12 157458773",
+      "response bad 2 698163209",
+      "response empty 1 552734100",
+      "response bom 1 3030648809",
+      "response read 1 2785008253",
+      "response locked 1 449462756",
+      "response clone 1 1854156145",
+      "response stream 2 646289661",
+      "response used 1 1885718071",
+      "response wrong 1 3687331907",
+      "request body 1 3904558999",
+      "request clone 1 1684122491",
+      "request json 1 1264796254",
+      "fetch no 1 136108937",
+      "fetch relative 1 265445952",
+      "fetch ftp 1 3632102552",
+      "fetch about 1 1212866631",
+      "fetch bad 2 2055975444",
+      "fetch get 1 466436593",
+      "fetch aborted 2 1046782644",
+      "fetch data 4 2852212154",
+      "fetch failure 1 2897928826",
+      "finished",
+    ]
+}
+
+// the made-up network in `fake_answer`: nothing here opens a connection
+pub fn a_fetch_is_wants_the_embedder_answers_test() {
+  let rt =
+    run_answering(run_commonjs(
+      node_runtime(),
+      "(async () => {
+        const hello = await fetch('http://made.up/hello');
+        out.push([hello.status, hello.statusText, hello.ok, hello.type, hello.url, hello.headers.get('content-type'), hello.headers.getSetCookie().join('+')].join(' '));
+        const pieces = [];
+        for await (const piece of hello.body) pieces.push(Buffer.from(piece).toString());
+        out.push(pieces.join('|'));
+        const moved = await fetch('http://made.up/moved');
+        out.push([moved.status, moved.redirected, moved.url, await moved.text()].join(' '));
+        const kept = await fetch('http://made.up/moved', { redirect: 'manual' });
+        out.push([kept.status, kept.headers.get('location')].join(' '));
+        const echo = await fetch('http://made.up/echo', { method: 'post', body: 'sent', headers: { 'X-Mine': 'yes' } });
+        out.push([echo.headers.get('x-method'), echo.headers.get('x-body'), echo.headers.get('x-sent')].join(' | '));
+        out.push(await (await fetch('http://made.up/packed')).text());
+        const missing = await fetch('http://made.up/missing');
+        out.push([missing.status, missing.ok, await missing.text()].join(' '));
+        const endless = await fetch('http://made.up/endless');
+        const reader = endless.body.getReader();
+        out.push(Buffer.from((await reader.read()).value).toString().trim());
+        await reader.cancel();
+        for (const url of ['http://made.up/broken', 'http://elsewhere.test/']) {
+          await fetch(url).catch((error) => out.push([error.name, error.message, error.cause.code].join(' ')));
+        }
+      })().catch((error) => out.push('failed ' + error.stack));",
+    ))
+  assert out_lines(rt)
+    == [
+      "200 OK true basic http://made.up/hello text/plain a=1+b=2",
+      "hel|lo",
+      "200 true http://made.up/hello hello",
+      "302 /hello",
+      "POST | sent | x-mine=yes; content-type=text/plain;charset=UTF-8; accept=*/*; accept-language=*; sec-fetch-mode=cors; user-agent=node; accept-encoding=gzip, deflate",
+      "unpacked text, unpacked text",
+      "404 false no such page",
+      "tick",
+      "TypeError fetch failed ECONNRESET",
+      "TypeError fetch failed ECONNREFUSED",
+    ]
+  // what the embedder was asked for, and which bodies it was told to let go
+  assert list.filter(notes(), fn(note) {
+      string.starts_with(note, "fetch ") || string.starts_with(note, "drop ")
+    })
+    == [
+      "fetch GET /hello", "fetch GET /moved", "drop 2", "fetch GET /hello",
+      "fetch GET /moved", "fetch POST /echo", "fetch GET /packed",
+      "fetch GET /missing", "fetch GET /endless", "drop 6", "fetch GET /broken",
     ]
 }
