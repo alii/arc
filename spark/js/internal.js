@@ -517,7 +517,11 @@ const bindings = {
   constants: () => ({ os: { signals: {}, errno: {} }, fs: {}, crypto: {}, zlib: zlibConstants, trace: {} }),
   config: () => ({ hasIntl: false, hasInspector: false, noBrowserGlobals: false }),
   icu: () => ({}),
-  messaging: () => ({}),
+  messaging: () => ({
+    get DOMException() {
+      return optional("spark:domexception")?.DOMException;
+    },
+  }),
   profiler: () => ({}),
   string_decoder: () => ({
     encodings: ["ascii", "utf8", "base64", "utf16le", "latin1", "hex", "buffer", "base64url"],

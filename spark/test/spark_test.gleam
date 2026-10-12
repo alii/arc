@@ -15,6 +15,7 @@ import spark.{
 import spark/async_hooks
 import spark/buffer
 import spark/builtin.{type Builtin, Builtin}
+import spark/crypto
 import spark/dom_events
 import spark/domexception
 import spark/encoding
@@ -25,8 +26,8 @@ import spark/global
 import spark/io.{
   type Answer, type Failure, type FileInfo, type Io, type ReplySlip, type Want,
   Access, Bytes, Directory, Done, DropBody, Entries, Entry, Failure, Fetch, File,
-  FileInfo, Head, Info, Io, ReadBody, ReadFile, Readdir, Readlink, Realpath,
-  Stat, Stderr, Stdout, Symlink, Text, Write,
+  FileInfo, Head, Info, Io, Random, ReadBody, ReadFile, Readdir, Readlink,
+  Realpath, Stat, Stderr, Stdout, Symlink, Text, Write,
 }
 import spark/net
 import spark/os.{BigEndian, Os, User}
@@ -99,6 +100,7 @@ fn builtins() -> List(Builtin(Nil)) {
     util.types_builtin(),
     web_streams.builtin(),
     fetch.builtin(),
+    crypto.builtin(),
     tty.builtin([1]),
     tls.builtin(
       Certificates(
@@ -298,6 +300,16 @@ fn fake_answer(want: Want) -> Result(Answer, Failure) {
       note("drop " <> int.to_string(body))
       Ok(Done)
     }
+    // not random at all, so a test sees the same bytes every time
+    Random(bytes:) -> {
+      let seed = case unstash(random_seed) {
+        Ok(<<seed:32>>) -> seed
+        _ -> 20_261_011
+      }
+      let #(made, seed) = scrambled(bytes, seed, <<>>)
+      stash(random_seed, <<seed:32>>)
+      Ok(Bytes(made))
+    }
     Write(stream: Stdout, data:) -> {
       note("stdout " <> text(data))
       Ok(Done)
@@ -307,6 +319,21 @@ fn fake_answer(want: Want) -> Result(Answer, Failure) {
     Write(stream: Stderr, data:) -> {
       note("stderr " <> text(data))
       Ok(Done)
+    }
+  }
+}
+
+// where the made-up random source keeps its place between asks
+const random_seed = 999
+
+// bytes that look random and are the same on every run: each is the top of
+// the next step of a small generator
+fn scrambled(left: Int, seed: Int, acc: BitArray) -> #(BitArray, Int) {
+  case left {
+    0 -> #(acc, seed)
+    _ -> {
+      let seed = { seed * 1_103_515_245 + 12_345 } % 2_147_483_648
+      scrambled(left - 1, seed, <<acc:bits, { seed / 65_536 % 256 }:8>>)
     }
   }
 }
@@ -4475,5 +4502,86 @@ pub fn a_fetch_is_wants_the_embedder_answers_test() {
       "fetch GET /hello", "fetch GET /moved", "drop 2", "fetch GET /hello",
       "fetch GET /moved", "fetch POST /echo", "fetch GET /packed",
       "fetch GET /missing", "fetch GET /endless", "drop 6", "fetch GET /broken",
+    ]
+}
+
+const crypto_matches_node_script = "
+const crypto = require(\"crypto\");
+let seed = 2718;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const show = (v) => { if (Buffer.isBuffer(v)) return \"buf:\" + v.toString(\"hex\"); if (v instanceof Uint8Array) return \"u8:\" + Array.from(v).join(\".\"); try { return JSON.stringify(v) ?? String(v); } catch { return String(v); } };
+const call = (f) => { try { return show(f()); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+const t = (label, f) => lines.push(label + \" \" + call(f));
+const later = [];
+const settle = (label, f) => later.push(async () => { try { lines.push(label + \" \" + show(await f())); } catch (e) { lines.push(label + \" rejected \" + e.name + \" \" + e.code + \" \" + e.message); } });
+const algorithms = [\"md5\", \"sha1\", \"sha224\", \"sha256\", \"sha384\", \"sha512\", \"sha512-224\", \"sha512-256\", \"sha3-224\", \"sha3-256\", \"sha3-384\", \"sha3-512\", \"blake2b512\", \"blake2s256\", \"ripemd160\", \"sm3\", \"SHA256\", \"RSA-SHA256\", \"sha-256\", \"sha2-512\", \"rmd160\", \"sha1WithRSAEncryption\"];
+const encodings = [undefined, \"hex\", \"base64\", \"base64url\", \"latin1\", \"binary\", \"buffer\", \"ascii\"];
+function data() { const n = pick([0, 1, 3, 55, 56, 64, 65, 200, 5000]); const kind = rnd(3); if (kind === 0) return Buffer.alloc(n, rnd(256)); if (kind === 1) return \"text \\u20ac \".repeat(Math.ceil(n / 8)).slice(0, n); return new Uint8Array(Array.from({ length: n }, (_, i) => (i * 13 + 7) % 256)); }
+// ---- generated: digests of generated data, in pieces, in every encoding
+for (let i = 0; i < 120; i++) {
+  const algorithm = pick(algorithms), encoding = pick(encodings), pieces = Array.from({ length: 1 + rnd(3) }, data), input = pick([undefined, undefined, \"utf8\", \"latin1\", \"hex\", \"base64\"]);
+  lines.push(\"D \" + i + \" \" + algorithm + \" \" + encoding + \" \" + input + \" \" + pieces.map((p) => p.length).join(\"+\") + \" \" + call(() => { const h = crypto.createHash(algorithm); for (const p of pieces) h.update(p, typeof p === \"string\" ? input : undefined); return h.digest(encoding); }));
+}
+for (let i = 0; i < 60; i++) {
+  const algorithm = pick(algorithms), encoding = pick(encodings), key = pick([\"\", \"key\", \"k\".repeat(200), Buffer.from([0, 1, 255]), new Uint8Array(64).fill(9), \"\\u20ac\"]), pieces = Array.from({ length: 1 + rnd(3) }, data);
+  lines.push(\"M \" + i + \" \" + algorithm + \" \" + encoding + \" \" + (typeof key === \"string\" ? key.length : \"bytes\" + key.length) + \" \" + call(() => { const h = crypto.createHmac(algorithm, key); for (const p of pieces) h.update(p); return h.digest(encoding); }));
+}
+// ---- one case each
+t(\"known answers\", () => [crypto.createHash(\"md5\").update(\"\").digest(\"hex\"), crypto.createHash(\"sha1\").update(\"abc\").digest(\"hex\"), crypto.createHash(\"sha256\").update(\"abc\").digest(\"hex\"), crypto.createHmac(\"sha256\", \"key\").update(\"The quick brown fox jumps over the lazy dog\").digest(\"hex\")]);
+t(\"shake\", () => [crypto.createHash(\"shake128\", { outputLength: 8 }).update(\"a\").digest(\"hex\"), crypto.createHash(\"shake256\", { outputLength: 40 }).update(\"a\").digest(\"hex\"), crypto.createHash(\"shake128\", { outputLength: 0 }).update(\"a\").digest(\"hex\")]);
+for (const [label, f] of [[\"unknown hash\", () => crypto.createHash(\"nope\")], [\"hash not a string\", () => crypto.createHash(5)], [\"unknown hmac\", () => crypto.createHmac(\"nope\", \"k\")], [\"hmac no key\", () => crypto.createHmac(\"sha256\")], [\"hmac key number\", () => crypto.createHmac(\"sha256\", 5)], [\"update number\", () => crypto.createHash(\"md5\").update(5)], [\"update bad encoding\", () => crypto.createHash(\"md5\").update(\"a\", \"nope\")], [\"update after digest\", () => { const h = crypto.createHash(\"md5\"); h.digest(); h.update(\"a\"); }], [\"digest twice\", () => { const h = crypto.createHash(\"md5\"); h.digest(); return h.digest(); }], [\"hmac digest twice\", () => { const h = crypto.createHmac(\"md5\", \"k\"); h.digest(); return [h.digest(\"hex\"), h.digest().length]; }], [\"copy after digest\", () => { const h = crypto.createHash(\"md5\"); h.digest(); return h.copy(); }], [\"digest bad encoding\", () => crypto.createHash(\"md5\").update(\"a\").digest(\"nope\")], [\"outputLength bad\", () => crypto.createHash(\"sha256\", { outputLength: -1 })], [\"without new\", () => crypto.Hash(\"md5\").update(\"a\").digest(\"hex\")], [\"hmac without new\", () => crypto.Hmac(\"md5\", \"k\").update(\"a\").digest(\"hex\")], [\"update returns this\", () => { const h = crypto.createHash(\"md5\"); return h.update(\"a\") === h; }], [\"dataview\", () => crypto.createHash(\"md5\").update(new DataView(new Uint8Array([1, 2]).buffer)).digest(\"hex\")], [\"u16\", () => crypto.createHash(\"md5\").update(new Uint16Array([258, 772])).digest(\"hex\")], [\"arraybuffer refused\", () => crypto.createHash(\"md5\").update(new ArrayBuffer(2))], [\"copy\", () => { const h = crypto.createHash(\"sha256\").update(\"a\"); const c = h.copy(); return [h.update(\"b\").digest(\"hex\"), c.update(\"c\").digest(\"hex\"), crypto.createHash(\"sha256\").update(\"ac\").digest(\"hex\")]; }]]) t(\"hash \" + label, f);
+for (const [label, f] of [[\"one shot\", () => [crypto.hash(\"sha1\", \"abc\"), crypto.hash(\"md5\", Buffer.from(\"abc\"), \"base64\"), show(crypto.hash(\"md5\", \"abc\", \"buffer\")), crypto.hash(\"sha256\", \"abc\", { outputEncoding: \"base64url\" })]], [\"one shot unknown\", () => crypto.hash(\"nope\", \"a\")], [\"one shot bad input\", () => crypto.hash(\"md5\", 5)], [\"one shot bad encoding\", () => crypto.hash(\"md5\", \"a\", \"nope\")], [\"getHashes\", () => { const h = crypto.getHashes(); return [Array.isArray(h), h.includes(\"sha256\"), h.includes(\"RSA-SHA256\"), h.includes(\"md5\"), h.every((n) => typeof n === \"string\")]; }]]) t(\"hash \" + label, f);
+for (const [label, f] of [[\"equal\", () => crypto.timingSafeEqual(Buffer.from(\"abc\"), Buffer.from(\"abc\"))], [\"not equal\", () => crypto.timingSafeEqual(Buffer.from(\"abc\"), Buffer.from(\"abd\"))], [\"lengths\", () => crypto.timingSafeEqual(Buffer.from(\"a\"), Buffer.from(\"ab\"))], [\"views\", () => crypto.timingSafeEqual(new Uint16Array([1, 2]), new Uint8Array([1, 0, 2, 0]))], [\"arraybuffer\", () => crypto.timingSafeEqual(new Uint8Array([1]).buffer, new Uint8Array([1]))], [\"string\", () => crypto.timingSafeEqual(\"a\", \"a\")], [\"empty\", () => crypto.timingSafeEqual(Buffer.alloc(0), new Uint8Array(0))]]) t(\"timingSafeEqual \" + label, f);
+// random: what comes back is different every time, so only its shape is compared
+for (const [label, f] of [[\"bytes\", () => { const b = crypto.randomBytes(32); return [Buffer.isBuffer(b), b.length, crypto.randomBytes(0).length]; }], [\"bytes bad\", () => [call(() => crypto.randomBytes(-1)), call(() => crypto.randomBytes(\"5\")), call(() => crypto.randomBytes(2 ** 31)), call(() => crypto.randomBytes(1.5).length), call(() => crypto.randomBytes(4, 5))]], [\"fill\", () => { const b = Buffer.alloc(10); const r = crypto.randomFillSync(b, 2, 4); return [r === b, b[0], b[1], b[6], b[9], crypto.randomFillSync(new Uint32Array(4)).length, crypto.randomFillSync(new ArrayBuffer(8)).byteLength, crypto.randomFillSync(new DataView(new ArrayBuffer(4))).byteLength]; }], [\"fill bad\", () => [call(() => crypto.randomFillSync(\"x\")), call(() => crypto.randomFillSync(Buffer.alloc(4), 9)), call(() => crypto.randomFillSync(Buffer.alloc(4), 2, 9)), call(() => crypto.randomFillSync(Buffer.alloc(4), -1))]], [\"int\", () => { const seen = new Set(); for (let i = 0; i < 300; i++) seen.add(crypto.randomInt(5)); const ranged = Array.from({ length: 100 }, () => crypto.randomInt(10, 13)); return [[...seen].sort().join(), Math.min(...ranged), Math.max(...ranged), Number.isInteger(crypto.randomInt(2 ** 40))]; }], [\"int bad\", () => [call(() => crypto.randomInt()), call(() => crypto.randomInt(5, 5)), call(() => crypto.randomInt(5, 3)), call(() => crypto.randomInt(0, 2 ** 48)), call(() => crypto.randomInt(1.5)), call(() => crypto.randomInt(2 ** 53))]], [\"uuid\", () => { const shape = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/; const many = Array.from({ length: 200 }, () => crypto.randomUUID()); return [many.every((u) => shape.test(u)), new Set(many).size, shape.test(crypto.randomUUID({ disableEntropyCache: true })), call(() => crypto.randomUUID(5)), call(() => crypto.randomUUID({ disableEntropyCache: 1 }))]; }], [\"values\", () => { const a = new Uint8Array(16); return [crypto.getRandomValues(a) === a, crypto.getRandomValues(new Uint32Array(3)).length, crypto.getRandomValues(new BigInt64Array(2)).length, call(() => crypto.getRandomValues(new Float32Array(2))), call(() => crypto.getRandomValues(new Uint8Array(65537))), call(() => crypto.getRandomValues([1])), call(() => crypto.getRandomValues(new DataView(new ArrayBuffer(2))))]; }], [\"not all the same\", () => { const a = crypto.randomBytes(16), b = crypto.randomBytes(16); return [a.equals(b), a.every((x) => x === 0)]; }]]) t(\"random \" + label, f);
+t(\"web crypto\", () => { const w = crypto.webcrypto; return [w === globalThis.crypto, Object.prototype.toString.call(w), Object.prototype.toString.call(w.subtle), typeof w.randomUUID(), w.getRandomValues(new Uint8Array(4)).length, call(() => w.getRandomValues.call({}, new Uint8Array(1))), call(() => new w.constructor()), crypto.subtle === w.subtle]; });
+t(\"shape\", () => [typeof crypto.createHash, crypto.createHash.length, crypto.createHmac.length, crypto.Hash.name, crypto.Hmac.name, crypto.createHash(\"md5\") instanceof crypto.Hash, crypto.createHash(\"md5\") instanceof require(\"stream\").Transform, crypto.prng === crypto.randomBytes, crypto.pseudoRandomBytes === crypto.randomBytes, crypto.rng === crypto.randomBytes, Object.keys(crypto).includes(\"prng\")]);
+for (const name of [\"SHA-1\", \"SHA-256\", \"SHA-384\", \"SHA-512\", \"sha-256\", { name: \"SHA-256\" }]) settle(\"subtle digest \" + JSON.stringify(name), async () => Buffer.from(await crypto.subtle.digest(name, new TextEncoder().encode(\"abc\"))));
+settle(\"subtle digest of a buffer\", async () => Buffer.from(await crypto.subtle.digest(\"SHA-1\", new Uint8Array([1, 2, 3]).buffer)));
+settle(\"subtle digest unknown\", () => crypto.subtle.digest(\"MD5\", new Uint8Array(1)));
+settle(\"random bytes callback\", () => new Promise((resolve, reject) => crypto.randomBytes(8, (err, buf) => (err ? reject(err) : resolve([Buffer.isBuffer(buf), buf.length])))));
+settle(\"random fill callback\", () => new Promise((resolve, reject) => { const b = Buffer.alloc(6); crypto.randomFill(b, 1, 2, (err, same) => (err ? reject(err) : resolve([same === b, b[0], b[5]]))); }));
+settle(\"random int callback\", () => new Promise((resolve, reject) => crypto.randomInt(3, (err, n) => (err ? reject(err) : resolve(n >= 0 && n < 3)))));
+settle(\"hash as a stream\", () => new Promise((resolve) => { const h = crypto.createHash(\"sha256\"); const got = []; h.on(\"data\", (d) => got.push(d.toString(\"hex\"))); h.on(\"end\", () => resolve(got)); h.write(\"ab\"); h.end(\"c\"); }));
+settle(\"hmac as a stream\", () => new Promise((resolve) => { const h = crypto.createHmac(\"sha1\", \"k\"); h.setEncoding(\"base64\"); const got = []; h.on(\"data\", (d) => got.push(d)); h.on(\"end\", () => resolve(got)); h.end(\"abc\"); }));
+settle(\"hash piped\", () => new Promise((resolve) => { const { Readable } = require(\"stream\"); const h = crypto.createHash(\"md5\"); h.setEncoding(\"hex\"); let text = \"\"; h.on(\"data\", (d) => (text += d)); h.on(\"end\", () => resolve(text)); Readable.from([Buffer.from(\"pi\"), Buffer.from(\"ped\")]).pipe(h); }));
+(async () => { for (const run of later) await run(); const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"D \") ? \"digests generated\" : line.startsWith(\"M \") ? \"hmacs generated\" : line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+globalThis.out.push(\"finished\"); })();
+
+"
+
+// 120 generated digests and 60 generated hmacs over every algorithm, in
+// pieces and in each encoding; then one case each for what is refused, the
+// one-shot hash, timingSafeEqual, the shapes of what the random calls give
+// (the bytes here come from a made-up source, the same on every run), the
+// web crypto global, and a hash used as a stream. Each line is a kind of
+// case, how many, and a hash of what they printed in node 26.11.1
+pub fn crypto_matches_node_test() {
+  let rt = run_to_end(run_commonjs(node_runtime(), crypto_matches_node_script))
+  assert out_lines(rt)
+    == [
+      "digests generated 120 552916550",
+      "hmacs generated 60 1912751651",
+      "known 1 1065135284",
+      "shake 1 200561837",
+      "hash 27 3637423944",
+      "timingSafeEqual 7 931458354",
+      "random 12 3208379687",
+      "web 1 1058863291",
+      "shape 1 3818673648",
+      "subtle 8 260331021",
+      "hmac 1 4214654828",
+      "finished",
     ]
 }

@@ -11,6 +11,7 @@ import spark.{type Runtime, Finished, WakeIn}
 import spark/async_hooks
 import spark/buffer
 import spark/builtin.{type Builtin}
+import spark/crypto
 import spark/dom_events
 import spark/domexception
 import spark/encoding
@@ -20,8 +21,8 @@ import spark/fs
 import spark/global
 import spark/io.{
   type Answer, type Failure, type Io, type ReplySlip, type Stream, type Want,
-  Access, DropBody, Fetch, Io, ReadBody, ReadFile, Readdir, Readlink, Realpath,
-  Stat, Stderr, Stdout, Write,
+  Access, Bytes, DropBody, Fetch, Io, Random, ReadBody, ReadFile, Readdir,
+  Readlink, Realpath, Stat, Stderr, Stdout, Write,
 } as _
 import spark/net
 import spark/os.{type Os, type User, BigEndian, LittleEndian, Os}
@@ -100,6 +101,7 @@ fn builtins(
     util.types_builtin(),
     web_streams.builtin(),
     fetch.builtin(),
+    crypto.builtin(),
     tty.builtin(terminals()),
     // the cli has no roots of its own to ship, so the machine's stand for both
     tls.builtin(
@@ -236,6 +238,7 @@ fn perform(want: Want) -> Result(Answer, Failure) {
     Fetch(method:, url:, headers:, body:) -> fetch(method, url, headers, body)
     ReadBody(body:) -> read_body(body)
     DropBody(body:) -> drop_body(body)
+    Random(bytes:) -> Ok(Bytes(strong_random(bytes)))
     Write(stream:, data:) -> write(stream, data)
   }
 }
@@ -247,6 +250,9 @@ fn fetch(
   headers: List(#(String, String)),
   body: BitArray,
 ) -> Result(Answer, Failure)
+
+@external(erlang, "crypto", "strong_rand_bytes")
+fn strong_random(bytes: Int) -> BitArray
 
 @external(erlang, "spark_cli_ffi", "read_body")
 fn read_body(body: Int) -> Result(Answer, Failure)

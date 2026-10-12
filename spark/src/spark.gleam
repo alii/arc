@@ -118,6 +118,7 @@ const shipped_sources = [
   js.tls,
   js.web_streams,
   js.fetch,
+  js.crypto,
 ]
 
 /// compiles the js of every builtin spark ships; installs and runs nothing
@@ -218,6 +219,7 @@ fn internal_builtin() -> Builtin(host) {
     dependencies: ["spark:loop"],
     optional: [
       "node:process", "node:buffer", "node:path", "node:url", "spark:dom_events",
+      "spark:domexception",
     ],
     exports: [],
     globals: [],

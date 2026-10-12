@@ -40,6 +40,7 @@ const names = [
   "tls",
   "web_streams",
   "fetch",
+  "crypto",
 ]
 
 const target = "src/spark/js.gleam"

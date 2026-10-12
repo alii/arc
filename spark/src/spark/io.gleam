@@ -44,6 +44,10 @@ pub type Want {
   /// the script will read no more of this body, so what is left of it can be
   /// let go; answered with Done
   DropBody(body: Int)
+  /// this many bytes that nobody could guess; answered with Bytes. Behind
+  /// node:crypto's randomBytes, randomUUID and the rest, and the web's
+  /// crypto.getRandomValues
+  Random(bytes: Int)
   /// write these bytes to the process's standard output or error; behind
   /// process.stdout.write and process.stderr.write
   Write(stream: Stream, data: BitArray)
