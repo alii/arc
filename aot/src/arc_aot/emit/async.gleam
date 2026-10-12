@@ -1298,15 +1298,17 @@ fn cursor_only_walk(p: SplitPlanner, s: ast.Statement) -> SplitPlanner {
           Some(fi) -> plan_for_init(p, fi)
           None -> p
         }
+        // scopes are in the order emitted: test, body, update
         let p = plan_opt_expr(p, c)
-        let p = plan_opt_expr(p, u)
-        plan_stmt_cursor_only(p, b)
+        let p = plan_stmt_cursor_only(p, b)
+        plan_opt_expr(p, u)
       })
     ast.ForInStatement(left: l, right: r, body: b)
     | ast.ForOfStatement(left: l, right: r, body: b, ..) ->
       in_child_scope_if(p, ast_util.for_classic_init_is_lex(Some(l)), fn(p) {
-        let p = plan_for_init(p, l)
+        // the right side's scopes come before the left side's
         let p = plan_expr(p, r)
+        let p = plan_for_init(p, l)
         plan_stmt_cursor_only(p, b)
       })
     ast.SwitchStatement(discriminant:, cases:) -> {
@@ -1595,6 +1597,8 @@ fn plan_for_await(
   let #(brk, p) = alloc_sentinel(p)
   let #(cont, p) = alloc_sentinel(p)
   let region = current_region(p)
+  // the right side's scopes come first: the setup arm takes them as it emits
+  let after_right = plan_expr(p, right).cur
   let spec =
     ForAwaitSpec(
       head:,
@@ -1602,11 +1606,12 @@ fn plan_for_await(
       body_state:,
       after:,
       left:,
-      body_cursor: p.cur,
+      body_cursor: after_right,
       region:,
     )
   let p = SplitPlanner(..p, for_awaits: [spec, ..p.for_awaits])
   let p = finish_arm(p, ForAwaitSetup(right:, head:), body_state, JumpEntry)
+  let p = SplitPlanner(..p, cur: after_right)
   let machine_frame =
     MachineLoop(
       js_label: label,

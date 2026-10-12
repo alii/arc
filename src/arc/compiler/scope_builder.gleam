@@ -527,6 +527,38 @@ pub fn children_since(
   list.take(now, list.length(now) - list.length(before))
 }
 
+// puts the children a scope opened after `mid` ahead of the ones it opened
+// between `before` and `mid`, for a construct whose later part runs first.
+// both are earlier readings of children_newest_first
+pub fn later_children_first(
+  sb: ScopeBuilder,
+  scope_id: ScopeId,
+  before before: List(ScopeId),
+  mid mid: List(ScopeId),
+) -> ScopeBuilder {
+  let opened_until = fn(children: List(ScopeId), reading: List(ScopeId)) {
+    case reading {
+      [] -> children
+      [newest, ..] -> list.take_while(children, fn(id) { id != newest })
+    }
+  }
+  let late = opened_until(children_newest_first(sb, scope_id), mid)
+  let early = opened_until(mid, before)
+  use <- bool.guard(late == [] || early == [], sb)
+  set_children_newest_first(sb, scope_id, list.flatten([early, late, before]))
+}
+
+fn set_children_newest_first(
+  sb: ScopeBuilder,
+  scope_id: ScopeId,
+  children: List(ScopeId),
+) -> ScopeBuilder {
+  ScopeBuilder(
+    ..sb,
+    children_at: dict.insert(sb.children_at, scope_id, children),
+  )
+}
+
 pub fn tag_children_since(
   sb: ScopeBuilder,
   parent_id: ScopeId,

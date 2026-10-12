@@ -1674,6 +1674,7 @@ fn parse_for_using_declaration(
         ])
       parse_for_in_of_rest(
         exit_declaration_context(p3, p),
+        p,
         decl,
         is_of: True,
         is_await:,
@@ -1725,7 +1726,8 @@ fn parse_for_declaration(
     Parser(..p, scopes: class_scopes.mark_pattern_assigned(p.scopes, pattern))
   }
   case peek(p3) {
-    In -> parse_for_in_of_rest(p_in_of(), decl, is_of: False, is_await: False)
+    In ->
+      parse_for_in_of_rest(p_in_of(), p, decl, is_of: False, is_await: False)
     Of -> {
       use Nil <- result.try(case kind {
         ast.Var ->
@@ -1736,7 +1738,7 @@ fn parse_for_declaration(
           )
         _ -> Ok(Nil)
       })
-      parse_for_in_of_rest(p_in_of(), decl, is_of: True, is_await:)
+      parse_for_in_of_rest(p_in_of(), p, decl, is_of: True, is_await:)
     }
     Semicolon | Comma ->
       case kind {
@@ -1883,7 +1885,7 @@ fn parse_for_expression(
           ),
         )
       let left = ast.ForInitExpression(expr)
-      parse_for_in_of_rest(p2, left, is_of:, is_await: is_of && is_await)
+      parse_for_in_of_rest(p2, p, left, is_of:, is_await: is_of && is_await)
     }
     _ -> Error(ExpectedForSeparator(pos_of(p2)))
   }
@@ -1904,8 +1906,10 @@ fn parse_remaining_declarators(
   }
 }
 
+// head is the parser at the start of the left side
 fn parse_for_in_of_rest(
   p: Parser,
+  head: Parser,
   left: ast.ForInit,
   is_of is_of: Bool,
   is_await is_await: Bool,
@@ -1916,6 +1920,8 @@ fn parse_for_in_of_rest(
     False -> parse_expression(p2)
   })
   use p4 <- result.try(expect(p3, RightParen))
+  // the right side is emitted before the left side binds
+  let p4 = later_scopes_first(p4, before: head, mid: p)
   use #(p5, body) <- result.map(parse_single_statement(
     p4,
     allow_annex_b_function: False,
@@ -1950,7 +1956,30 @@ fn parse_for_classic_rest(
     p3,
     allow_annex_b_function: False,
   ))
-  #(p4, ast.ForStatement(init:, condition:, update:, body:))
+  // the body is emitted before the update
+  #(
+    later_scopes_first(p4, before: p2, mid: p3),
+    ast.ForStatement(init:, condition:, update:, body:),
+  )
+}
+
+// see scope_builder.later_children_first; the three parsers are at the
+// same scope
+fn later_scopes_first(
+  p: Parser,
+  before before: Parser,
+  mid mid: Parser,
+) -> Parser {
+  let here = p.scopes.current
+  Parser(
+    ..p,
+    scopes: scope_builder.later_children_first(
+      p.scopes,
+      here,
+      before: scope_builder.children_newest_first(before.scopes, here),
+      mid: scope_builder.children_newest_first(mid.scopes, here),
+    ),
+  )
 }
 
 fn parse_return_statement(

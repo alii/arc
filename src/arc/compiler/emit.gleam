@@ -694,27 +694,34 @@ fn emit_classic_loop(
       }
     None -> Ok(e)
   })
-  let e = emit_ir(e, IrLabel(loop_start))
-  use e <- result.try(emit_stmt(e, body))
-  let e = emit_ir(e, IrLabel(loop_continue))
-  let e = list.fold(per_iter, e, emit_var_rebox)
-  use e <- result.try(case update {
-    Some(upd) -> {
-      use e <- result.map(emit_expr(e, for_effect(upd)))
-      emit_op(e, opcode.Pop)
-    }
-    None -> Ok(e)
-  })
-  use e <- result.map(case condition {
+  // the test is written before the body, so its scopes come first: emit it
+  // now and place its code after the update
+  let before_test = e.code
+  use e <- result.try(case condition {
     Some(cond) -> {
+      let e = Emitter(..e, code: [])
       let e = case safe_to_emit_twice(cond) {
         True -> e
         False -> emit_ir(e, IrLabel(loop_test))
       }
       emit_test(e, cond, jump_when: True, to: loop_start)
     }
-    None -> Ok(emit_ir(e, IrJump(loop_start)))
+    None -> Ok(emit_ir(Emitter(..e, code: []), IrJump(loop_start)))
   })
+  let test_code = e.code
+  let e = Emitter(..e, code: before_test)
+  let e = emit_ir(e, IrLabel(loop_start))
+  use e <- result.try(emit_stmt(e, body))
+  let e = emit_ir(e, IrLabel(loop_continue))
+  let e = list.fold(per_iter, e, emit_var_rebox)
+  use e <- result.map(case update {
+    Some(upd) -> {
+      use e <- result.map(emit_expr(e, for_effect(upd)))
+      emit_op(e, opcode.Pop)
+    }
+    None -> Ok(e)
+  })
+  let e = Emitter(..e, code: list.append(test_code, e.code))
   let e = emit_ir(e, IrLabel(loop_end))
   pop_frame(e)
 }

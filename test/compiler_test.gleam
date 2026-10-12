@@ -3346,6 +3346,46 @@ pub fn function_bind_preserves_this_test() -> Nil {
   )
 }
 
+// functions written in a for head each close over their own names: the
+// parts of a head are emitted in another order than they are written
+pub fn for_classic_head_functions_keep_their_scopes_test() -> Nil {
+  assert_normal(
+    "(function () {
+       var a = 0, b = 0, r = [];
+       for (var i = 0; (function () { return a; })() < 2; (function () { b++; a++; })()) {
+         r.push((function () { return i + ':' + a + ':' + b; })()); i++;
+       }
+       return r.join(',');
+     })()",
+    KStr("0:0:0,1:1:1"),
+  )
+  assert_normal(
+    "(function () {
+       var fns = [], seen = [];
+       for (let i = 0, get = () => i; (() => i)() < 3; (() => { seen.push(get()); i++; })()) fns.push(() => i);
+       return fns.map((f) => f()).join('') + '|' + seen.join('');
+     })()",
+    KStr("012|000"),
+  )
+}
+
+pub fn for_in_of_head_functions_keep_their_scopes_test() -> Nil {
+  assert_normal(
+    "var y = 'Y', z = 'Z', probeExpr, probeDecl, probeBody;
+     for (let [x, _ = probeDecl = function () { return x + y; }] in { i: probeExpr = function () { return z; } })
+       probeBody = function () { return x; };
+     [probeDecl(), probeExpr(), probeBody()].join(',')",
+    KStr("iY,Z,i"),
+  )
+  assert_normal(
+    "var y = 'Y', z = 'Z', r = [];
+     for (let { k = (() => z)() } of (function () { return [{ q: y }]; })()) r.push(k);
+     for (var [m = (function () { return y; })()] of (function () { return [[]].concat(z === 'Z' ? [] : [1]); })()) r.push(m);
+     r.join(',')",
+    KStr("Z,Y"),
+  )
+}
+
 pub fn function_bind_name_test() -> Nil {
   assert_normal(
     "function foo() {} var b = foo.bind(null); b.name",
