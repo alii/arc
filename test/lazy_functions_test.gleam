@@ -33,8 +33,20 @@ fn run(source: String) -> Result(JsValKind, JsValKind) {
 }
 
 pub fn a_plain_function_is_left_as_a_stub_test() {
-  let script = compile("function add(a, b) { return a + b; } add(1, 2)")
-  let assert [add] = tuple_array.to_list(script.functions)
+  let script =
+    compile(
+      "function add(a, b) { /* long enough to be worth leaving for later */ return a + b; }
+       function tiny(a) { return a; }
+       add(1, 2)",
+    )
+  let assert [add, tiny] = tuple_array.to_list(script.functions)
+  // what a short function compiles to is smaller than a stub
+  let assert [first, ..] = tuple_array.to_list(tiny.bytecode)
+  assert first != opcode.Return
+  assert case first {
+    opcode.CompileSelf(_) -> False
+    _ -> True
+  }
   let assert [opcode.CompileSelf(_), opcode.Return] =
     tuple_array.to_list(add.bytecode)
   assert add.name == Some("add")
@@ -114,12 +126,12 @@ fn is_stub(template: FuncTemplate) -> Bool {
 pub fn a_function_called_where_it_is_written_is_compiled_at_once_test() {
   let script =
     compile(
-      "(function () { function inner() { return 1; } return inner(); })();
-       !function () { return 2; }.call(this);
-       var wrapped = (function () { return 3; });
-       var later = function () { return 4; };
-       var arrow = () => 5;
-       var called_arrow = (() => 6)();",
+      "(function () { function inner() { /* long enough to be left for its first call */ return 1; } return inner(); })();
+       !function () { /* long enough to be left for its first call, if it were */ return 2; }.call(this);
+       var wrapped = (function () { /* long enough to be left for its first call, if it were */ return 3; });
+       var later = function () { /* long enough to be left for its first call */ return 4; };
+       var arrow = () => { /* long enough to be left for its first call too */ return 5; };
+       var called_arrow = (() => { /* long enough to be left for its first call, if it were */ return 6; })();",
     )
   let assert [called, called_with_this, wrapped, later, arrow, called_arrow] =
     tuple_array.to_list(script.functions)

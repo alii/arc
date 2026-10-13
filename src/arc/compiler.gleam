@@ -37,6 +37,7 @@ pub type AloneError {
 /// inside it are in turn left for their own first calls
 pub fn compile_function_alone(
   function: LazyFunction,
+  parent_slots parent_slots: List(Int),
   lazy lazy: Bool,
 ) -> Result(FuncTemplate, AloneError) {
   let LazyFunction(
@@ -44,10 +45,15 @@ pub fn compile_function_alone(
     is_module:,
     source:,
     name:,
-    captures:,
-    lexical: lexical_seeds,
+    capture_names:,
+    capture_seeds:,
+    lexical: packed_lexical,
     code_kind:,
   ) = function
+  // the parent's slots are the names', then the lexical refs'
+  let #(name_slots, lexical_slots) =
+    list.split(parent_slots, list.length(capture_names))
+  let lexical_seeds = lazy.unpack_lexical(packed_lexical)
   let mode = case is_module {
     True -> parser.Module
     False -> parser.Script
@@ -60,18 +66,18 @@ pub fn compile_function_alone(
     scope.AnalyzeOpts(
       ..scope.default_analyze_opts(),
       strict: source.strict,
-      parent_names: dict.from_list(
-        list.map(captures, fn(capture) { #(capture.0, capture.1) }),
-      ),
-      parent_seeds: dict.from_list(
-        list.map(captures, fn(capture) { #(capture.0, capture.2) }),
-      ),
-      lexical_captures: dict.from_list(
-        list.map(lexical_seeds, fn(seed) { #(seed.0, seed.1) }),
-      ),
+      parent_names: dict.from_list(list.zip(capture_names, name_slots)),
+      parent_seeds: dict.from_list(list.zip(
+        capture_names,
+        lazy.unpack_seeds(capture_seeds),
+      )),
+      lexical_captures: dict.from_list(list.zip(
+        list.map(lexical_seeds, fn(seed) { seed.0 }),
+        lexical_slots,
+      )),
       lexical_captures_boxed: {
         let boxed = fn(ref) {
-          list.any(lexical_seeds, fn(seed) { seed.0 == ref && seed.2 })
+          list.any(lexical_seeds, fn(seed) { seed.0 == ref && seed.1 })
         }
         lexical.LexicalRefs(
           this: boxed(lexical.ThisRef),
@@ -468,7 +474,6 @@ fn compile_child(
       child,
       tree,
       info,
-      parent_info,
       env_descriptors,
       unit,
       _,
@@ -523,34 +528,29 @@ fn lazy_function(
   child: emit.CompiledChild,
   tree: scope.ScopeTree,
   info: scope.FunctionInfo,
-  parent_info: scope.FunctionInfo,
   unit: Unit,
   source: scope.FnSource,
 ) -> LazyFunction {
   let own = scope.get(tree, child.scope_id)
-  let captures =
+  let seeds =
     list.map(info.captures, fn(capture) {
       let assert Ok(binding) = dict.get(own.bindings, capture.name)
         as "compiler: a captured name is not bound in its function's scope"
-      #(
-        capture.name,
-        capture.parent_slot,
-        scope.CaptureSeed(binding.boxed, binding.declared_kind),
-      )
+      scope.CaptureSeed(binding.boxed, binding.declared_kind)
     })
   LazyFunction(
     bytes: unit.bytes,
     is_module: unit.is_module,
     source:,
     name: child.name,
-    captures:,
+    capture_names: list.map(info.captures, fn(capture) { capture.name }),
+    capture_seeds: lazy.pack_seeds(seeds),
     lexical: {
-      use ref <- list.filter_map(lexical.all_lexical_refs)
-      use <- bool.guard(!dict.has_key(info.lexical_captures, ref), Error(Nil))
-      use slot <- result.map(
-        lexical.slot_of(parent_info.lexical, ref) |> option.to_result(Nil),
-      )
-      #(ref, slot, lexical.refs_get(info.lexical_boxed, ref))
+      use ref <- lazy.pack_lexical
+      case dict.has_key(info.lexical_captures, ref) {
+        True -> Some(lexical.refs_get(info.lexical_boxed, ref))
+        False -> None
+      }
     },
     code_kind: child.code_kind,
   )
@@ -562,12 +562,11 @@ fn stub_template(
   child: emit.CompiledChild,
   tree: scope.ScopeTree,
   info: scope.FunctionInfo,
-  parent_info: scope.FunctionInfo,
   env_descriptors: List(Int),
   unit: Unit,
   source: scope.FnSource,
 ) -> FuncTemplate {
-  let function = lazy_function(child, tree, info, parent_info, unit, source)
+  let function = lazy_function(child, tree, info, unit, source)
   // every stub owns the four lexical slots after its captures, so the first
   // call finds the function object there whatever the real layout is
   let captured = list.length(env_descriptors)

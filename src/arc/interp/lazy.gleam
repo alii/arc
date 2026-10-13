@@ -32,7 +32,13 @@ pub fn first_call(
     case dict.get(agent.store.meta.lazy_code, key) {
       Ok(template) -> Ok(#(template, agent))
       Error(Nil) ->
-        case compiler.compile_function_alone(function, lazy: True) {
+        case
+          compiler.compile_function_alone(
+            function,
+            parent_slots: state.func.env_descriptors,
+            lazy: True,
+          )
+        {
           Ok(template) -> Ok(#(template, remember(agent, key, template)))
           Error(error) -> state.throw_syntax_error(state, string.inspect(error))
         }

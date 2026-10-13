@@ -2589,6 +2589,8 @@ fn hint_called_now(e: Emitter, inner: ast.Expression) -> Emitter {
   }
 }
 
+const lazy_min_bytes = 64
+
 // the next child function, when it is one to leave for its first call
 fn lazy_source(
   parent: Emitter,
@@ -2602,7 +2604,10 @@ fn lazy_source(
     -> {
       let info = scope.function_info(parent.scope_tree, fn_id)
       use <- bool.guard(info.eval_in_subtree, None)
-      option.map(info.source, fn(source) { #(source, fn_id, rest) })
+      use source <- option.then(info.source)
+      // what a short function compiles to is smaller than what stands in for it
+      use <- bool.guard(source.end - source.start < lazy_min_bytes, None)
+      Some(#(source, fn_id, rest))
     }
     _, _ -> None
   }

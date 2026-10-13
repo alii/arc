@@ -106,7 +106,14 @@ pub type ArrowInherits {
 /// where a function's text starts and what its parse took from the code
 /// around it, which is all that parsing it again alone needs
 pub type FnSource {
-  FnSource(start: Int, line: Int, form: FnForm, strict: Bool)
+  FnSource(
+    start: Int,
+    // where its text ends; 0 until its parse has got there
+    end: Int,
+    line: Int,
+    form: FnForm,
+    strict: Bool,
+  )
 }
 
 /// how the code around a function compiled alone hands it one captured name

@@ -640,6 +640,22 @@ pub fn close_block(sb: ScopeBuilder, block_id: ScopeId) -> ScopeBuilder {
   }
 }
 
+pub fn set_fn_end(sb: ScopeBuilder, fn_id: ScopeId, end: Int) -> ScopeBuilder {
+  let info = fn_info_at(sb, fn_id)
+  case info.source {
+    None -> sb
+    Some(source) ->
+      ScopeBuilder(
+        ..sb,
+        functions: dict.insert(
+          sb.functions,
+          fn_id,
+          RawFunctionInfo(..info, source: Some(scope.FnSource(..source, end:))),
+        ),
+      )
+  }
+}
+
 // a use strict directive covers the scope it opens and everything inside
 pub fn mark_strict(sb: ScopeBuilder) -> ScopeBuilder {
   update_current(sb, fn(s) { RawScope(..s, is_strict: True) })

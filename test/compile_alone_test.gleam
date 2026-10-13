@@ -42,12 +42,16 @@ fn alone(
       LazyFunction(
         bytes: bit_array.from_string(source),
         is_module: False,
-        source: scope.FnSource(start:, line:, form:, strict:),
+        source: scope.FnSource(start:, end: 0, line:, form:, strict:),
         name:,
-        captures:,
-        lexical: [],
+        capture_names: list.map(captures, fn(capture) { capture.0 }),
+        capture_seeds: lazy.pack_seeds(
+          list.map(captures, fn(capture) { capture.2 }),
+        ),
+        lexical: 0,
         code_kind: lexical.FunctionCode,
       ),
+      parent_slots: list.map(captures, fn(capture) { capture.1 }),
       lazy: False,
     )
   template

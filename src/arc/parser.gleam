@@ -478,6 +478,11 @@ fn arrow_inherits(outer: Parser) -> scope.ArrowInherits {
   )
 }
 
+// the function fn_id names has just been parsed to its last token
+fn note_fn_end(p: Parser, fn_id: scope.ScopeId) -> Parser {
+  Parser(..p, scopes: scope_builder.set_fn_end(p.scopes, fn_id, p.prev_end))
+}
+
 // notes where a plain function starts so it can be parsed again alone. A
 // class body or a with block hands a function more than the note holds
 fn note_fn_source(inner: Parser, outer: Parser, form: scope.FnForm) -> Parser {
@@ -488,6 +493,7 @@ fn note_fn_source(inner: Parser, outer: Parser, form: scope.FnForm) -> Parser {
   let source =
     scope.FnSource(
       start: pos_of(outer),
+      end: 0,
       line: line_of(outer),
       form:,
       strict: outer.ctx.strict,
@@ -2528,6 +2534,7 @@ fn parse_function_declaration(
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(p_fn) |> restore_context_fn(p),
   )
+  let p5 = note_fn_end(p5, p_fn.scopes.current)
   use p6 <- result.map(case name, declares_name {
     None, _ | _, False -> Ok(p5)
     Some(name), True ->
@@ -3984,6 +3991,7 @@ fn finish_arrow(
 ) -> Result(#(Parser, ast.Expression), ArrowAttempt) {
   use #(p_body, body) <- result.try(result.map_error(body_result, ArrowError))
   let body_end = p_body.prev_end
+  let p_body = note_fn_end(p_body, p_body.scopes.current_fn)
   let p_restored = restore_outer_context(p_body, outer)
   // §13.15.1: (x => x) = 1 is invalid
   Ok(#(
@@ -5493,6 +5501,7 @@ fn parse_function_expression(
   use #(p5, params, body) <- result.map(
     parse_function_params_and_body(p_inner) |> restore_context_fn(p),
   )
+  let p5 = note_fn_end(p5, fn_scope)
   // §15.2.6 nfe name: own scope, declared after body, first wins
   let p5 = case name {
     None -> p5
