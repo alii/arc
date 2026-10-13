@@ -13,8 +13,8 @@ import arc/module/summary
 import arc/parser
 import arc/parser/ast
 import arc/rt/bytecode.{
-  type EnvCapture, type EvalNameTable, type FuncTemplate, type VarEnvKind,
-  CaptureLocal, EvalNameTable, FrameVarEnv, FuncTemplate, GlobalVarEnv,
+  type EvalNameTable, type FuncTemplate, type VarEnvKind, EvalNameTable,
+  FrameVarEnv, FuncTemplate, GlobalVarEnv,
 }
 import arc/rt/types.{type JsVal}
 import gleam/bool
@@ -407,7 +407,7 @@ fn build_template(
   constants: List(JsVal),
   info: scope.FunctionInfo,
   functions: List(FuncTemplate),
-  env_descriptors: List(EnvCapture),
+  env_descriptors: List(Int),
   local_names: Option(EvalNameTable),
   is_strict is_strict: Bool,
   code_kind code_kind: CodeKind,
@@ -444,9 +444,7 @@ fn build_template(
 }
 
 fn captured_slots(children: List(FuncTemplate)) -> Set(Int) {
-  list.flat_map(children, fn(t) {
-    list.map(t.env_descriptors, fn(c) { c.parent_index })
-  })
+  list.flat_map(children, fn(t) { t.env_descriptors })
   |> set.from_list
 }
 
@@ -465,7 +463,6 @@ fn compile_child(
   let env_descriptors =
     list.map(info.captures, fn(c) { c.parent_slot })
     |> list.append(scope.lexical_capture_parent_slots(info, parent_info))
-    |> list.map(CaptureLocal)
   use <- option.lazy_unwrap(
     option.map(child.lazy, stub_template(
       child,
@@ -566,7 +563,7 @@ fn stub_template(
   tree: scope.ScopeTree,
   info: scope.FunctionInfo,
   parent_info: scope.FunctionInfo,
-  env_descriptors: List(EnvCapture),
+  env_descriptors: List(Int),
   unit: Unit,
   source: scope.FnSource,
 ) -> FuncTemplate {

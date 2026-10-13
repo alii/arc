@@ -1180,7 +1180,7 @@ fn instantiate_hoisted_functions(
             tuple_array.get_unchecked(func_idx, compiled.template.functions)
           let captured =
             list.map(child.env_descriptors, fn(desc) {
-              tuple_array.get_unchecked(desc.parent_index, locals)
+              tuple_array.get_unchecked(desc, locals)
             })
           let #(closure, st) =
             rt_closure.new_bytecode_function(

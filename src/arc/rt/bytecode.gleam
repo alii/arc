@@ -13,10 +13,6 @@ pub type EvalNameTable {
   EvalNameTable(var_env: VarEnvKind, names: List(#(String, Int)))
 }
 
-pub type EnvCapture {
-  CaptureLocal(parent_index: Int)
-}
-
 pub type FnFlags {
   FnFlags(
     is_constructor: Bool,
@@ -253,7 +249,8 @@ pub type FuncTemplate {
     // source line per pc, for error.stack
     lines: TupleArray(Int),
     functions: TupleArray(FuncTemplate),
-    env_descriptors: List(EnvCapture),
+    // for each captured value, in env order, the local it has in the parent
+    env_descriptors: List(Int),
     is_strict: Bool,
     is_arrow: Bool,
     is_derived_constructor: Bool,

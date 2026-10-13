@@ -4,7 +4,7 @@ import arc/bytecode/binop.{type ClassifiedBinOp, type PureBinOp}
 import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type LexicalSlots}
 import arc/internal/tuple_array.{type TupleArray}
-import arc/rt/bytecode.{type EnvCapture, type EnvTuple}
+import arc/rt/bytecode.{type EnvTuple}
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsVal, type LexicalGlobal,
   type Property, type Store, type SymbolId,
@@ -33,7 +33,7 @@ pub fn cell_of(st: Agent, v: JsVal) -> Cell
 
 @external(erlang, "arc_interp_ffi", "capture_env")
 pub fn capture_env(
-  descriptors: List(EnvCapture),
+  descriptors: List(Int),
   locals: TupleArray(JsVal),
 ) -> EnvTuple
 

@@ -88,7 +88,7 @@ fn sync_fallback_template() -> FuncTemplate {
     constants: tuple_array.from_list([mk_undefined()]),
     lines: tuple_array.from_list([0, 0, 0, 0, 0, 0]),
     functions: tuple_array.from_list([]),
-    env_descriptors: [bytecode.CaptureLocal(0), bytecode.CaptureLocal(1)],
+    env_descriptors: [0, 1],
     is_strict: True,
     is_arrow: True,
     is_derived_constructor: False,

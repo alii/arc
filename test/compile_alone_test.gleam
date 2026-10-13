@@ -4,7 +4,7 @@ import arc/compiler
 import arc/compiler/scope
 import arc/internal/tuple_array
 import arc/parser
-import arc/rt/bytecode.{type FuncTemplate, CaptureLocal}
+import arc/rt/bytecode.{type FuncTemplate}
 import gleam/bit_array
 import gleam/list
 import gleam/option.{type Option, Some}
@@ -81,8 +81,7 @@ pub fn an_expression_compiled_alone_takes_its_captures_as_seeds_test() {
 })(1);
 "
   let in_place = child(child(whole(source), 0), 0)
-  let assert [CaptureLocal(base_slot), CaptureLocal(count_slot)] =
-    in_place.env_descriptors
+  let assert [base_slot, count_slot] = in_place.env_descriptors
   // base is never written, so it is held by value; count is in a box
   let captures = [
     #("base", base_slot, scope.CaptureSeed(False, scope.ParamBinding)),

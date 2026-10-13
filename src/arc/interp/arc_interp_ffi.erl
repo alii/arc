@@ -95,11 +95,10 @@ box_get(St, {?HANDLE_TAG, Id}) ->
 box_get(_, _) -> miss.
 
 capture_env([], _) -> {};
-capture_env([{capture_local, I}], Locals) -> {element(I + 1, Locals)};
-capture_env([{capture_local, I}, {capture_local, J}], Locals) ->
-    {element(I + 1, Locals), element(J + 1, Locals)};
+capture_env([I], Locals) -> {element(I + 1, Locals)};
+capture_env([I, J], Locals) -> {element(I + 1, Locals), element(J + 1, Locals)};
 capture_env(Descriptors, Locals) ->
-    list_to_tuple([element(I + 1, Locals) || {capture_local, I} <- Descriptors]).
+    list_to_tuple([element(I + 1, Locals) || I <- Descriptors]).
 
 %% §13.10.2 + §7.3.22 when @@hasInstance is provably the intrinsic; proxies miss
 instance_of(_, js_tdz, _, _) -> miss;
