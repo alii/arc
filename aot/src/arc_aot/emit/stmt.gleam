@@ -1303,9 +1303,10 @@ fn assign_target_names(ex: ast.Expression, acc: List(String)) -> List(String) {
 fn for_in_of_carried(
   e: Emitter,
   left: ast.ForInit,
+  right: ast.Expression,
   body: ast.Statement,
 ) -> List(Int) {
-  let head_names = case left {
+  let declared = case left {
     ast.ForInitExpression(target) -> assign_target_names(target, [])
     ast.ForInitPattern(p) -> pattern_names(p, [])
     ast.ForInitDeclaration(kind:, declarations:) ->
@@ -1315,6 +1316,9 @@ fn for_in_of_carried(
         ast.Let | ast.Const | ast.Using | ast.AwaitUsing -> []
       }
   }
+  // the head's own assignments must outlive the loop too
+  let head_names =
+    for_init_assigned_names(left, expr_assigned_names(right, declared))
   let head_slots =
     list.filter_map(head_names, fn(name) {
       case state.resolve(e, name) {
@@ -1552,7 +1556,7 @@ fn emit_for_in(
   let head_scope = e.cur_scope
   use obj, e <- expr_(e, right)
   use keys, e <- cps.host(e, "for_in_keys", [obj])
-  let carried = for_in_of_carried(e, left, body)
+  let carried = for_in_of_carried(e, left, right, body)
   let result_tys = carried_types(carried)
   let #(brk, e) = state.fresh_label(e)
   let #(cont, e) = state.fresh_label(e)
@@ -1614,11 +1618,11 @@ fn emit_for_of(
   use e <- seed_head(e)
   let head_scope = e.cur_scope
   let #(start_tree, e) = anf.run(expr.for_of_record(right), e)
-  let #(start, e) = state.fresh_var(e)
+  use start, e <- cps.let_(e, start_tree)
   let #(before, e) = state.fresh_var(e)
   let #(it, e) = state.fresh_var(e)
   let after_iter = fn(e: Emitter) -> EmitResult {
-    let carried = for_in_of_carried(e, left, body)
+    let carried = for_in_of_carried(e, left, right, body)
     let result_tys = carried_types(carried)
     let #(exit, e) = state.fresh_label(e)
     let #(brk, e) = state.fresh_label(e)
@@ -1627,7 +1631,7 @@ fn emit_for_of(
     let #(exn, e) = state.fresh_var(e)
     let #(user_params, e) = carried_params(e, carried)
     let loop_params = [
-      ir.LoopParam(name: before, ty: ir.TTerm, init: ir.Var(start)),
+      ir.LoopParam(name: before, ty: ir.TTerm, init: start),
       ..user_params
     ]
     let #(esc, e) = state.fresh_escape(e, 0)
@@ -1716,8 +1720,7 @@ fn emit_for_of(
     let e = state.leave_for_scope(e, save)
     rebind_after_block(e, carried, outer, next)
   }
-  use body_tree <- state.map_tree(after_iter(e))
-  ir.Let([start], start_tree, body_tree)
+  after_iter(e)
 }
 
 fn emit_try(
@@ -2103,9 +2106,15 @@ fn emit_for_classic(
           None -> Error(Nil)
         }
       })
+    // leaving a lexical head's scope drops what its init assigned
+    let init_names = case has_lex, init {
+      True, Some(fi) -> for_init_assigned_names(fi, [])
+      _, _ -> []
+    }
     let carried =
       assigned_unboxed_slots_all(e, [body, ..head_stmts])
       |> list.append(per_iter_slots)
+      |> list.append(unboxed_slots_named(e, init_names))
       |> list.unique
       |> list.sort(int.compare)
     let result_tys = carried_types(carried)
