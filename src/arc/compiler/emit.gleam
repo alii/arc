@@ -236,6 +236,7 @@ pub fn function_alone(
   form: scope.FnForm,
   name: Option(String),
   strict strict: Bool,
+  code_kind code_kind: lexical.CodeKind,
   lazy lazy: Bool,
 ) -> Result(#(CompiledChild, scope.ScopeTree), EmitError) {
   let ast.FunctionLiteral(
@@ -249,8 +250,11 @@ pub fn function_alone(
     scope.FnDeclaration -> FnDecl(is_generator:, is_async:)
     scope.FnExpression ->
       FnExpr(self_name: ast.binding_name(written), is_generator:, is_async:)
+    scope.FnArrow(_) -> Arrow(is_async:)
   }
-  let root = Emitter(..new_emitter(tree, root_scope_id), strict:, lazy:)
+  // an arrow takes its code kind from here; the others set their own
+  let root =
+    Emitter(..new_emitter(tree, root_scope_id), strict:, code_kind:, lazy:)
   use #(child, root) <- result.map(compile_function_now(
     root,
     name,
@@ -2520,13 +2524,17 @@ fn compile_function_body(
   case source {
     None -> compile_function_now(parent, name, params, body, shape:)
     Some(#(source, fn_id, rest)) -> {
-      let FnTraits(is_generator:, is_async:, is_constructor:, ..) =
+      let FnTraits(is_arrow:, is_generator:, is_async:, is_constructor:, ..) =
         traits_of(shape)
       let stmts = case body {
         StmtsBody(stmts:) -> stmts
         FieldInitsBody(..) -> []
       }
-      let layout = param_layout(params, False)
+      let layout = param_layout(params, is_arrow)
+      let code_kind = case is_arrow {
+        True -> parent.code_kind
+        False -> lexical.FunctionCode
+      }
       let child =
         CompiledChild(
           scope_id: fn_id,
@@ -2537,14 +2545,19 @@ fn compile_function_body(
           constants: [],
           functions: [],
           is_strict: parent.strict || ast_util.has_use_strict_directive(stmts),
-          is_arrow: False,
+          is_arrow:,
           is_derived_constructor: False,
           is_generator:,
           is_async:,
           is_constructor:,
           is_class_constructor: False,
-          references_arguments: False,
-          code_kind: lexical.FunctionCode,
+          // an arrow that captures arguments makes its function create them
+          references_arguments: is_arrow
+            && list.any(
+            scope.function_info(parent.scope_tree, fn_id).captures,
+            fn(capture) { capture.name == "arguments" },
+          ),
+          code_kind:,
           lazy: Some(source),
         )
       Ok(#(child, Emitter(..parent, child_fn_cursor: rest)))
@@ -2556,7 +2569,7 @@ fn compile_function_body(
 // for its first call would only parse it twice
 fn calls_function_expression(callee: ast.Expression) -> Bool {
   case ast_util.unwrap_parens(callee) {
-    ast.FunctionExpression(..) -> True
+    ast.FunctionExpression(..) | ast.ArrowFunctionExpression(..) -> True
     ast.MemberExpression(object:, property: ast.Dot(name: "call", ..), ..)
     | ast.MemberExpression(object:, property: ast.Dot(name: "apply", ..), ..) ->
       case ast_util.unwrap_parens(object) {
@@ -2583,7 +2596,10 @@ fn lazy_source(
 ) -> Option(#(scope.FnSource, ScopeId, List(ScopeId))) {
   use <- bool.guard(!parent.lazy, None)
   case shape, parent.child_fn_cursor {
-    FnDecl(..), [fn_id, ..rest] | FnExpr(..), [fn_id, ..rest] -> {
+    FnDecl(..), [fn_id, ..rest]
+    | FnExpr(..), [fn_id, ..rest]
+    | Arrow(..), [fn_id, ..rest]
+    -> {
       let info = scope.function_info(parent.scope_tree, fn_id)
       use <- bool.guard(info.eval_in_subtree, None)
       option.map(info.source, fn(source) { #(source, fn_id, rest) })

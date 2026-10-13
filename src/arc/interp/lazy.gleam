@@ -1,26 +1,27 @@
 import arc/bytecode/lazy.{type LazyFunction}
-import arc/bytecode/lexical
 import arc/compiler
 import arc/internal/tuple_array.{type TupleArray}
+import arc/interp/kernel
 import arc/interp/state.{type State, type StepExit, State}
-import arc/rt/bytecode.{type FuncTemplate}
+import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, Agent, BytecodeFn, KHandle, SObject, Store, StoreMeta,
   classify,
 }
 import gleam/dict
-import gleam/option.{None, Some}
+import gleam/list
 import gleam/result
 import gleam/string
 
-@external(erlang, "arc_interp_locals_ffi", "widen")
-fn widen(locals: TupleArray(JsVal), count: Int) -> TupleArray(JsVal)
+// the first `count` locals, which are what the closure captured
+@external(erlang, "arc_interp_locals_ffi", "captured")
+fn captured(locals: TupleArray(JsVal), count: Int) -> EnvTuple
 
 /// the first call of a function left uncompiled: compiles it, or takes what
-/// an earlier closure of the same function compiled, and starts this frame
-/// again on the real code. The stub and the real template lay the frame out
-/// alike, bar how many locals follow the parameters
+/// an earlier closure of the same function compiled, and lays this frame out
+/// again for the real code. A stub's frame is its captures, then this, the
+/// function object, the home object and new.target, then its parameters
 pub fn first_call(
   state: State,
   function: LazyFunction,
@@ -37,11 +38,25 @@ pub fn first_call(
         }
     },
   )
+  let captures = list.length(state.func.env_descriptors)
+  let callee = tuple_array.get_unchecked(captures + 1, state.locals)
+  let locals =
+    kernel.frame_locals(
+      captured(state.locals, captures),
+      template.lexical,
+      state.this,
+      callee,
+      state.home_object,
+      state.new_target,
+      state.call_args,
+      template.arity,
+      template.local_count,
+    )
   State(
     ..state,
-    agent: adopt(agent, state, template),
+    agent: adopt(agent, callee, template),
     func: template,
-    locals: widen(state.locals, template.local_count),
+    locals:,
     pc: 0,
   )
 }
@@ -55,18 +70,10 @@ fn remember(agent: Agent, key: #(Int, Int), template: FuncTemplate) -> Agent {
   )
 }
 
-// the running function object takes the real template, so its next call
-// starts there
-fn adopt(agent: Agent, state: State, template: FuncTemplate) -> Agent {
-  let callee = {
-    use slot <- option.map(lexical.slot_of(
-      state.func.lexical,
-      lexical.ActiveFuncRef,
-    ))
-    classify(tuple_array.get_unchecked(slot, state.locals))
-  }
-  case callee {
-    Some(KHandle(handle)) -> {
+// the function object takes the real template, so its next call starts there
+fn adopt(agent: Agent, callee: JsVal, template: FuncTemplate) -> Agent {
+  case classify(callee) {
+    KHandle(handle) -> {
       use cell <- rt_store.cell_update(agent, handle)
       case cell {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
@@ -74,6 +81,6 @@ fn adopt(agent: Agent, state: State, template: FuncTemplate) -> Agent {
         _ -> cell
       }
     }
-    Some(_) | None -> agent
+    _ -> agent
   }
 }

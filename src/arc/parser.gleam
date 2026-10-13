@@ -396,6 +396,58 @@ pub fn parse_function_at(
       ))
       #(function, p.scopes)
     }
+    scope.FnArrow(inherits) -> {
+      let scope.ArrowInherits(
+        allow_new_target:,
+        allow_super_property:,
+        allow_super_call:,
+        allow_in:,
+        in_generator:,
+        in_async:,
+      ) = inherits
+      let p =
+        Parser(
+          ..p,
+          ctx: GrammarContext(
+            ..p.ctx,
+            allow_new_target:,
+            allow_super_property:,
+            allow_super_call:,
+            allow_in:,
+            in_generator:,
+            in_async:,
+          ),
+        )
+      use #(p, expression) <- result.map(
+        try_arrow_function(p)
+        |> result.map_error(fn(attempt) {
+          case attempt {
+            ArrowError(error) -> error
+            NotAnArrow -> UnexpectedToken(pos_of(p), peek(p))
+          }
+        }),
+      )
+      let assert ast.ArrowFunctionExpression(params:, body:, is_async:, ..) =
+        expression
+        as "parser: an arrow function parsed as something else"
+      // a concise body is the statement emit makes of it
+      let body = case body {
+        ast.ArrowBodyBlock(statements) -> statements
+        ast.ArrowBodyExpression(value) -> [
+          ast.StmtWithLine(0, ast.ReturnStatement(Some(value))),
+        ]
+      }
+      #(
+        ast.FunctionLiteral(
+          name: None,
+          params:,
+          body:,
+          is_generator: False,
+          is_async:,
+        ),
+        p.scopes,
+      )
+    }
     scope.FnExpression -> {
       use #(p, expression) <- result.map(parse_function_expression(p, is_async:))
       let assert ast.FunctionExpression(
@@ -413,6 +465,17 @@ pub fn parse_function_at(
       )
     }
   }
+}
+
+fn arrow_inherits(outer: Parser) -> scope.ArrowInherits {
+  scope.ArrowInherits(
+    allow_new_target: outer.ctx.allow_new_target,
+    allow_super_property: outer.ctx.allow_super_property,
+    allow_super_call: outer.ctx.allow_super_call,
+    allow_in: outer.ctx.allow_in,
+    in_generator: outer.ctx.in_generator,
+    in_async: outer.ctx.in_async,
+  )
 }
 
 // notes where a plain function starts so it can be parsed again alone. A
@@ -3838,7 +3901,9 @@ fn try_single_ident_arrow(
   )
   let p2 = advance(ident_p)
   use <- bool.guard(has_line_break_before(p2), Error(NotAnArrow))
-  let p3 = enter_arrow_context(advance(p2), is_async:, param_names: [name])
+  let p3 =
+    enter_arrow_context(advance(p2), is_async:, param_names: [name])
+    |> note_fn_source(outer, scope.FnArrow(arrow_inherits(outer)))
   // set after entering context, which zeroes param state
   let p3 =
     Parser(..p3, ctx: GrammarContext(..p3.ctx, param_bound_names: [name]))
@@ -3853,7 +3918,9 @@ fn try_paren_arrow(
   is_async is_async: Bool,
 ) -> Result(#(Parser, ast.Expression), ArrowAttempt) {
   // push arrow scope before params; failure discards it for free
-  let p_ctx = enter_arrow_context(p_params, is_async:, param_names: [])
+  let p_ctx =
+    enter_arrow_context(p_params, is_async:, param_names: [])
+    |> note_fn_source(outer, scope.FnArrow(arrow_inherits(outer)))
   // arrow params always reject duplicates
   let p_arrow =
     Parser(

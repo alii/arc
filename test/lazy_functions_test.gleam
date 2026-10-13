@@ -117,14 +117,50 @@ pub fn a_function_called_where_it_is_written_is_compiled_at_once_test() {
       "(function () { function inner() { return 1; } return inner(); })();
        !function () { return 2; }.call(this);
        var wrapped = (function () { return 3; });
-       var later = function () { return 4; };",
+       var later = function () { return 4; };
+       var arrow = () => 5;
+       var called_arrow = (() => 6)();",
     )
-  let assert [called, called_with_this, wrapped, later] =
+  let assert [called, called_with_this, wrapped, later, arrow, called_arrow] =
     tuple_array.to_list(script.functions)
   assert !is_stub(called)
   assert !is_stub(called_with_this)
   assert !is_stub(wrapped)
   assert is_stub(later)
+  assert is_stub(arrow)
+  assert !is_stub(called_arrow)
   let assert [inner] = tuple_array.to_list(called.functions)
   assert is_stub(inner)
+}
+
+pub fn arrows_take_this_and_arguments_from_around_them_test() {
+  assert run(
+      "(function () {
+         function Counter(start) {
+           this.n = start;
+           this.bump = (by = 1) => { this.n += by; return this.n; };
+           this.args = () => arguments.length;
+           this.target = () => new.target === Counter;
+         }
+         var c = new Counter(5, 'x');
+         var twice = [1, 2, 3].map(v => v * 2).join('');
+         var nested = (a) => (b) => (c2) => a + b + c2;
+         var later = async (v) => (await v) + 1;
+         var seen = [];
+         later(Promise.resolve(41)).then(v => seen.push(v));
+         return [c.bump(), c.bump(3), c.args(), c.target(), twice, nested(1)(2)(3)].join(',');
+       })()",
+    )
+    == Ok(KStr("6,9,2,true,246,6"))
+}
+
+pub fn an_arrow_in_a_method_reaches_super_test() {
+  assert run(
+      "(function () {
+         var base = { greet() { return 'base'; } };
+         var derived = { __proto__: base, greet() { var up = () => super.greet(); return up() + '+derived'; } };
+         return derived.greet();
+       })()",
+    )
+    == Ok(KStr("base+derived"))
 }

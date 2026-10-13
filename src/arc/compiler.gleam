@@ -39,7 +39,15 @@ pub fn compile_function_alone(
   function: LazyFunction,
   lazy lazy: Bool,
 ) -> Result(FuncTemplate, AloneError) {
-  let LazyFunction(bytes:, is_module:, source:, name:, captures:) = function
+  let LazyFunction(
+    bytes:,
+    is_module:,
+    source:,
+    name:,
+    captures:,
+    lexical: lexical_seeds,
+    code_kind:,
+  ) = function
   let mode = case is_module {
     True -> parser.Module
     False -> parser.Script
@@ -58,6 +66,21 @@ pub fn compile_function_alone(
       parent_seeds: dict.from_list(
         list.map(captures, fn(capture) { #(capture.0, capture.2) }),
       ),
+      lexical_captures: dict.from_list(
+        list.map(lexical_seeds, fn(seed) { #(seed.0, seed.1) }),
+      ),
+      lexical_captures_boxed: {
+        let boxed = fn(ref) {
+          list.any(lexical_seeds, fn(seed) { seed.0 == ref && seed.2 })
+        }
+        lexical.LexicalRefs(
+          this: boxed(lexical.ThisRef),
+          active_func: boxed(lexical.ActiveFuncRef),
+          home_object: boxed(lexical.HomeObjectRef),
+          new_target: boxed(lexical.NewTargetRef),
+        )
+      },
+      root_may_own_lexical: False,
     )
   let tree = scope_analysis.finalize(scopes, opts)
   use #(child, tree) <- result.map(
@@ -67,6 +90,7 @@ pub fn compile_function_alone(
       source.form,
       name,
       strict: source.strict,
+      code_kind:,
       lazy:,
     )
     |> result.map_error(AloneCompileError),
@@ -447,6 +471,7 @@ fn compile_child(
       child,
       tree,
       info,
+      parent_info,
       env_descriptors,
       unit,
       _,
@@ -496,16 +521,15 @@ fn compile_children(
   list.map(children, compile_child(_, tree, parent_fn_scope, unit))
 }
 
-// a function whose whole body is "compile me": it has the frame layout the
-// analysis gave it, and carries what its first call needs to compile it
-fn stub_template(
+// what a function left for later carries: its text and what its parent hands it
+fn lazy_function(
   child: emit.CompiledChild,
   tree: scope.ScopeTree,
   info: scope.FunctionInfo,
-  env_descriptors: List(EnvCapture),
+  parent_info: scope.FunctionInfo,
   unit: Unit,
   source: scope.FnSource,
-) -> FuncTemplate {
+) -> LazyFunction {
   let own = scope.get(tree, child.scope_id)
   let captures =
     list.map(info.captures, fn(capture) {
@@ -517,19 +541,44 @@ fn stub_template(
         scope.CaptureSeed(binding.boxed, binding.declared_kind),
       )
     })
-  let function =
-    LazyFunction(
-      bytes: unit.bytes,
-      is_module: unit.is_module,
-      source:,
-      name: child.name,
-      captures:,
-    )
+  LazyFunction(
+    bytes: unit.bytes,
+    is_module: unit.is_module,
+    source:,
+    name: child.name,
+    captures:,
+    lexical: {
+      use ref <- list.filter_map(lexical.all_lexical_refs)
+      use <- bool.guard(!dict.has_key(info.lexical_captures, ref), Error(Nil))
+      use slot <- result.map(
+        lexical.slot_of(parent_info.lexical, ref) |> option.to_result(Nil),
+      )
+      #(ref, slot, lexical.refs_get(info.lexical_boxed, ref))
+    },
+    code_kind: child.code_kind,
+  )
+}
+
+// a function whose whole body is "compile me": it has the frame layout the
+// analysis gave it, and carries what its first call needs to compile it
+fn stub_template(
+  child: emit.CompiledChild,
+  tree: scope.ScopeTree,
+  info: scope.FunctionInfo,
+  parent_info: scope.FunctionInfo,
+  env_descriptors: List(EnvCapture),
+  unit: Unit,
+  source: scope.FnSource,
+) -> FuncTemplate {
+  let function = lazy_function(child, tree, info, parent_info, unit, source)
+  // every stub owns the four lexical slots after its captures, so the first
+  // call finds the function object there whatever the real layout is
+  let captured = list.length(env_descriptors)
   FuncTemplate(
     name: child.name,
     arity: child.arity,
     length: child.length,
-    local_count: info.local_count,
+    local_count: captured + lexical.owned_lexical_slot_count + child.arity,
     bytecode: tuple_array.from_list([
       opcode.CompileSelf(function),
       opcode.Return,
@@ -539,14 +588,14 @@ fn stub_template(
     functions: tuple_array.from_list([]),
     env_descriptors:,
     is_strict: child.is_strict,
-    is_arrow: False,
+    is_arrow: child.is_arrow,
     is_derived_constructor: False,
     is_generator: child.is_generator,
     is_async: child.is_async,
     is_constructor: child.is_constructor,
     is_class_constructor: False,
     local_names: None,
-    lexical: info.lexical,
+    lexical: lexical.OwnedLexicalSlots(base: captured),
     code_kind: child.code_kind,
     regs: bytecode.NoRegs,
   )

@@ -1,4 +1,5 @@
 import arc/bytecode/lazy.{LazyFunction}
+import arc/bytecode/lexical
 import arc/compiler
 import arc/compiler/scope
 import arc/internal/tuple_array
@@ -44,6 +45,8 @@ fn alone(
         source: scope.FnSource(start:, line:, form:, strict:),
         name:,
         captures:,
+        lexical: [],
+        code_kind: lexical.FunctionCode,
       ),
       lazy: False,
     )

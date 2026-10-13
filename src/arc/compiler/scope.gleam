@@ -86,6 +86,21 @@ pub type NameCapture {
 pub type FnForm {
   FnDeclaration
   FnExpression
+  FnArrow(inherits: ArrowInherits)
+}
+
+/// the grammar an arrow takes from the code it is written in
+pub type ArrowInherits {
+  ArrowInherits(
+    allow_new_target: Bool,
+    allow_super_property: Bool,
+    allow_super_call: Bool,
+    // a concise body may not hold a bare `in` inside a for head
+    allow_in: Bool,
+    // whether yield and await are keywords in its parameters
+    in_generator: Bool,
+    in_async: Bool,
+  )
 }
 
 /// where a function's text starts and what its parse took from the code
@@ -154,6 +169,10 @@ pub type AnalyzeOpts {
     // a parent name not listed here is boxed, as a direct eval's caller's are
     parent_seeds: Dict(String, CaptureSeed),
     lexical_captures: Dict(LexicalRef, Int),
+    // which of lexical_captures the parent holds in boxes
+    lexical_captures_boxed: LexicalRefs,
+    // false when the root stands in for code that is not there to own them
+    root_may_own_lexical: Bool,
     linker_seeded_exports: Set(String),
     // sloppy script root vars get real slots; measured slower, off by default
     module_slot_globals: Bool,
@@ -172,6 +191,8 @@ pub fn default_analyze_opts() -> AnalyzeOpts {
     parent_names: dict.new(),
     parent_seeds: dict.new(),
     lexical_captures: dict.new(),
+    lexical_captures_boxed: lexical.every_lexical_ref,
+    root_may_own_lexical: True,
     linker_seeded_exports: set.new(),
     module_slot_globals: False,
     box_try_writes: False,

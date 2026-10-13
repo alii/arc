@@ -75,7 +75,8 @@ pub fn finalize(builder: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   let root_base =
     dict.size(opts.parent_names) + dict.size(opts.lexical_captures)
   // owner iff root_base == 0, not merely empty lexical_captures
-  let script_root_owns_lexical = root_raw.kind == Script && root_base == 0
+  let script_root_owns_lexical =
+    opts.root_may_own_lexical && root_raw.kind == Script && root_base == 0
   let #(root_local_count, root_lexical) = case script_root_owns_lexical {
     True -> #(
       root_base + lexical.owned_lexical_slot_count,
@@ -118,7 +119,12 @@ pub fn finalize(builder: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       linker_seeded_exports: opts.linker_seeded_exports,
       inherited_with_stack: opts.with_stack,
     )
-  analyze_captures(tree, builder, box_try_writes: opts.box_try_writes)
+  analyze_captures(
+    tree,
+    builder,
+    box_try_writes: opts.box_try_writes,
+    parent_lexical_boxed: opts.lexical_captures_boxed,
+  )
 }
 
 fn finalize_scope(
@@ -705,6 +711,7 @@ fn analyze_captures(
   tree: ScopeTree,
   builder: ScopeBuilder,
   box_try_writes box_try_writes: Bool,
+  parent_lexical_boxed parent_lexical_boxed: lexical.LexicalRefs,
 ) -> ScopeTree {
   let reads = resolve_own_reads(tree, builder)
   let own_by_fn =
@@ -769,7 +776,7 @@ fn analyze_captures(
         lets: set.new(),
       ),
       lexical_available: lexical.no_lexical_refs,
-      lexical_boxed: lexical.every_lexical_ref,
+      lexical_boxed: parent_lexical_boxed,
     )
   assign_captures(tree, analysis, root_scope_id, root_parent)
 }
