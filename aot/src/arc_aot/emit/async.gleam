@@ -156,6 +156,9 @@ type SegmentTail {
   ForUpdate(update: Option(ast.Expression), head: Int)
   ForOfSetup(right: ast.Expression, iter_key: String, head: Int)
   ForOfStep(left: ast.ForInit, iter_key: String, body_state: Int, after: Int)
+  // for-in keeps its remaining keys in the iter slot
+  ForInSetup(right: ast.Expression, iter_key: String, head: Int)
+  ForInStep(left: ast.ForInit, iter_key: String, body_state: Int, after: Int)
   SwitchDispatch(
     discriminant: HeadValue,
     tests: List(#(Option(ast.Expression), Int)),
@@ -165,6 +168,12 @@ type SegmentTail {
   AsyncGenYieldSent(resume_state: Int)
   BodyEnd
   SegmentDone
+}
+
+type LoopOver {
+  OverValues
+  OverAwaitedValues
+  OverKeys
 }
 
 type HeadValue {
@@ -860,6 +869,7 @@ fn finish_arm(
       tail:,
       machine_frames: p.open_frames,
     )
+  let p = skip_tail(p, tail)
   SplitPlanner(
     ..p,
     arms: [arm, ..p.arms],
@@ -873,6 +883,34 @@ fn finish_arm(
   )
 }
 
+// the tail emits these whole, so the next arm's scopes start after them
+fn skip_tail(p: SplitPlanner, tail: SegmentTail) -> SplitPlanner {
+  let after = case tail {
+    SplitAt(arg:, ..) -> plan_opt_expr(p, arg)
+    CondBranch(cond: FromExpr(e), ..) -> plan_expr(p, e)
+    ForUpdate(update:, ..) -> plan_opt_expr(p, update)
+    ForOfSetup(right:, ..)
+    | ForInSetup(right:, ..)
+    | ForAwaitSetup(right:, ..) -> plan_expr(p, right)
+    ForOfStep(left:, ..) | ForInStep(left:, ..) -> plan_for_init(p, left)
+    SwitchDispatch(discriminant:, tests:, ..) -> {
+      let p = case discriminant {
+        FromExpr(e) -> plan_expr(p, e)
+        FromResumedValue -> p
+      }
+      list.fold(tests, p, fn(p, t) { plan_opt_expr(p, t.0) })
+    }
+    CondBranch(cond: FromResumedValue, ..)
+    | FallTo(..)
+    | FallToFinally(..)
+    | FinallyEnd(..)
+    | AsyncGenYieldSent(..)
+    | BodyEnd
+    | SegmentDone -> p
+  }
+  SplitPlanner(..p, cur: after.cur)
+}
+
 fn push_machine_frame(p: SplitPlanner, l: MachineFrame) -> SplitPlanner {
   // the open segment was opened before this push and must see it
   let machine_frames = [l, ..p.machine_frames]
@@ -884,6 +922,15 @@ fn pop_machine_frame(p: SplitPlanner) -> SplitPlanner {
     [_, ..rest] -> SplitPlanner(..p, machine_frames: rest)
     [] -> p
   }
+}
+
+// the resumed arm binds its pattern before anything else it emits
+fn open_resume(p: SplitPlanner, resume: Option(ResumeWith)) -> SplitPlanner {
+  let after = case resume {
+    Some(ResumeBind(pat:, ..)) -> plan_pattern(p, pat)
+    _ -> p
+  }
+  SplitPlanner(..p, open_resume: resume, cur: after.cur)
 }
 
 fn plan_split(
@@ -913,7 +960,7 @@ fn plan_plain_split(
       resume_state,
       ResumeEntry(kind),
     )
-  SplitPlanner(..p, open_resume: resume)
+  open_resume(p, resume)
 }
 
 // an async generator yield awaits its operand first
@@ -931,7 +978,7 @@ fn plan_async_gen_yield(
       resume_state,
       ResumeEntry(YieldSplit),
     )
-  SplitPlanner(..p, open_resume: resume)
+  open_resume(p, resume)
 }
 
 fn plan_delegate(
@@ -963,10 +1010,9 @@ fn plan_delegate(
       region:,
       await_state:,
     )
-  SplitPlanner(
-    ..p,
-    delegates: [delegate_spec, ..p.delegates],
-    open_resume: resume,
+  open_resume(
+    SplitPlanner(..p, delegates: [delegate_spec, ..p.delegates]),
+    resume,
   )
 }
 
@@ -980,13 +1026,18 @@ fn in_child_scope(
     let p_in = f(SplitPlanner(..p, cur: inner))
     SplitPlanner(..p_in, cur: cursor_leave_scope(resume, p_in.cur))
   })
-  let p = case p.pending_stmts_rev {
-    [] -> SplitPlanner(..p, open_cursor: inner)
-    [_, ..] -> {
+  let p = case p.pending_stmts_rev, p.open_resume {
+    [_, ..], _ | _, Some(ResumeBind(..)) -> {
       let #(fresh, p) = alloc_state(p)
       let p = finish_arm(p, FallTo(fresh), fresh, JumpEntry)
       SplitPlanner(..p, open_cursor: inner)
     }
+    // the arm binds its catch parameter first, from where it opened
+    [], Some(ResumeCatch(param: Some(_), ..)) -> {
+      let child_fn_cursor = p.open_cursor.child_fn_cursor
+      SplitPlanner(..p, open_cursor: ArmCursor(..inner, child_fn_cursor:))
+    }
+    [], _ -> SplitPlanner(..p, open_cursor: inner)
   }
   let p_in = f(SplitPlanner(..p, cur: inner))
   let resumed = cursor_leave_scope(resume, p_in.cur)
@@ -1022,7 +1073,11 @@ fn walk_catch_cur(
 ) -> SplitPlanner {
   let body_has = ast_util.block_has_declarations(h.body)
   case h.param {
-    Some(_) -> in_child_scope(p, fn(p) { in_child_scope_if(p, body_has, f) })
+    Some(pat) -> {
+      use p <- in_child_scope(p)
+      let p = SplitPlanner(..p, cur: plan_pattern(p, pat).cur)
+      in_child_scope_if(p, body_has, f)
+    }
     None -> in_child_scope_if(p, body_has, f)
   }
 }
@@ -1037,11 +1092,11 @@ fn plan_opt_expr(p: SplitPlanner, o: Option(ast.Expression)) -> SplitPlanner {
 fn plan_expr(p: SplitPlanner, e: ast.Expression) -> SplitPlanner {
   case e {
     ast.AwaitExpression(argument: arg, ..) ->
-      plan_split(plan_expr(p, arg), AwaitSplit, Some(arg), None)
+      plan_split(p, AwaitSplit, Some(arg), None)
     ast.YieldExpression(argument: arg, is_delegate: True, ..) ->
-      plan_split(plan_opt_expr(p, arg), YieldStarSplit, arg, None)
+      plan_split(p, YieldStarSplit, arg, None)
     ast.YieldExpression(argument: arg, is_delegate: False, ..) ->
-      plan_split(plan_opt_expr(p, arg), YieldSplit, arg, None)
+      plan_split(p, YieldSplit, arg, None)
     ast.Identifier(..)
     | ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
@@ -1218,9 +1273,9 @@ fn plan_split_stmt(p: SplitPlanner, sl: ast.StmtWithLine) -> SplitPlanner {
     ast.ForStatement(init: i, condition: c, update: u, body: b) ->
       plan_for(p, line, None, i, c, u, b)
     ast.ForOfStatement(left: l, right: r, body: b, is_await:) ->
-      plan_for_of(p, line, None, l, r, b, is_await:)
+      plan_for_of(p, line, None, l, r, b, for_of_over(is_await))
     ast.ForInStatement(left: l, right: r, body: b) ->
-      plan_for_of(p, line, None, l, r, b, is_await: False)
+      plan_for_of(p, line, None, l, r, b, OverKeys)
     ast.SwitchStatement(discriminant:, cases:) ->
       plan_switch(p, None, discriminant, cases)
     ast.ExpressionStatement(..)
@@ -1245,7 +1300,7 @@ fn plan_hoisted(p: SplitPlanner, items: List(HoistedItem)) -> SplitPlanner {
   case item {
     PlainStmt(s) -> push_pending_stmt(plan_stmt_cursor_only(p, s.statement), s)
     SplitStmt(kind:, operand:, resume:) ->
-      plan_split(plan_opt_expr(p, operand), kind, operand, Some(resume))
+      plan_split(p, kind, operand, Some(resume))
   }
 }
 
@@ -1347,10 +1402,10 @@ fn plan_head_expr(
     None, _
     | Some(#(YieldStarSplit, _)), _
     | Some(#(YieldSplit, _)), state.AsyncGenerator
-    -> #(FromExpr(expr), plan_expr(p, expr))
+    -> #(FromExpr(expr), p)
     Some(#(kind, operand)), _ -> #(
       FromResumedValue,
-      plan_plain_split(plan_opt_expr(p, operand), kind, operand, None),
+      plan_plain_split(p, kind, operand, None),
     )
   }
 }
@@ -1539,6 +1594,13 @@ fn plan_for(
   })
 }
 
+fn for_of_over(is_await: Bool) -> LoopOver {
+  case is_await {
+    True -> OverAwaitedValues
+    False -> OverValues
+  }
+}
+
 fn plan_for_of(
   p: SplitPlanner,
   line: Int,
@@ -1546,10 +1608,10 @@ fn plan_for_of(
   left: ast.ForInit,
   right: ast.Expression,
   body: ast.Statement,
-  is_await is_await: Bool,
+  over: LoopOver,
 ) -> SplitPlanner {
   use p <- in_child_scope_if(p, ast_util.for_classic_init_is_lex(Some(left)))
-  use <- bool.lazy_guard(is_await, fn() {
+  use <- bool.lazy_guard(over == OverAwaitedValues, fn() {
     plan_for_await(p, line, label, left, right, body)
   })
   let #(head, p) = alloc_state(p)
@@ -1558,15 +1620,13 @@ fn plan_for_of(
   let #(brk, p) = alloc_sentinel(p)
   let #(cont, p) = alloc_sentinel(p)
   let ikey = iter_key(head)
-  let p =
-    finish_arm(p, ForOfSetup(right:, iter_key: ikey, head:), head, JumpEntry)
-  let p =
-    finish_arm(
-      p,
-      ForOfStep(left:, iter_key: ikey, body_state:, after:),
-      body_state,
-      JumpEntry,
-    )
+  let #(setup, step) = case over {
+    OverKeys -> #(ForInSetup, ForInStep)
+    OverValues | OverAwaitedValues -> #(ForOfSetup, ForOfStep)
+  }
+  let p = finish_arm(p, setup(right, ikey, head), head, JumpEntry)
+  let step = step(left, ikey, body_state, after)
+  let p = finish_arm(p, step, body_state, JumpEntry)
   let machine_frame =
     MachineLoop(
       js_label: label,
@@ -1597,8 +1657,7 @@ fn plan_for_await(
   let #(brk, p) = alloc_sentinel(p)
   let #(cont, p) = alloc_sentinel(p)
   let region = current_region(p)
-  // the right side's scopes come first: the setup arm takes them as it emits
-  let after_right = plan_expr(p, right).cur
+  let p = finish_arm(p, ForAwaitSetup(right:, head:), body_state, JumpEntry)
   let spec =
     ForAwaitSpec(
       head:,
@@ -1606,12 +1665,18 @@ fn plan_for_await(
       body_state:,
       after:,
       left:,
-      body_cursor: after_right,
+      body_cursor: p.cur,
       region:,
     )
-  let p = SplitPlanner(..p, for_awaits: [spec, ..p.for_awaits])
-  let p = finish_arm(p, ForAwaitSetup(right:, head:), body_state, JumpEntry)
-  let p = SplitPlanner(..p, cur: after_right)
+  // the check arm binds the left side, so the body starts after it
+  let after_left = plan_for_init(p, left).cur
+  let p =
+    SplitPlanner(
+      ..p,
+      for_awaits: [spec, ..p.for_awaits],
+      cur: after_left,
+      open_cursor: after_left,
+    )
   let machine_frame =
     MachineLoop(
       js_label: label,
@@ -1622,7 +1687,6 @@ fn plan_for_await(
       enclosing_try: region,
     )
   let p = push_machine_frame(p, machine_frame)
-  let p = plan_for_init(p, left)
   let p = plan_stmts(p, one_stmt(line, body))
   let p = pop_machine_frame(p)
   finish_arm(p, FallTo(head), after, JumpEntry)
@@ -1718,9 +1782,9 @@ fn plan_labeled(
     ast.ForStatement(init: i, condition: c, update: u, body: b) ->
       plan_for(p, line, Some(label), i, c, u, b)
     ast.ForOfStatement(left: l, right: r, body: b, is_await:) ->
-      plan_for_of(p, line, Some(label), l, r, b, is_await:)
+      plan_for_of(p, line, Some(label), l, r, b, for_of_over(is_await))
     ast.ForInStatement(left: l, right: r, body: b) ->
-      plan_for_of(p, line, Some(label), l, r, b, is_await: False)
+      plan_for_of(p, line, Some(label), l, r, b, OverKeys)
     ast.SwitchStatement(discriminant:, cases:) ->
       plan_switch(p, Some(label), discriminant, cases)
     ast.LabeledStatement(label: inner, body: b) -> {
@@ -2081,8 +2145,10 @@ fn alloc_for_of_extras(
     }
   }
   case arm.tail {
-    ForOfStep(iter_key: k, ..) -> alloc(k)
-    ForOfSetup(iter_key: k, ..) -> alloc(k)
+    ForOfStep(iter_key: k, ..)
+    | ForOfSetup(iter_key: k, ..)
+    | ForInStep(iter_key: k, ..)
+    | ForInSetup(iter_key: k, ..) -> alloc(k)
     _ -> #(extras, next)
   }
 }
@@ -3226,6 +3292,10 @@ fn emit_seg_tail(
       emit_for_of_step(e, ctx, left, iter_key, body_state, after)
     ForOfSetup(right, iter_key, head) ->
       emit_iterator_setup(e, ctx, right, iter_key, ir.ConstAtom("sync"), head)
+    ForInSetup(right, iter_key, head) ->
+      emit_for_in_setup(e, ctx, right, iter_key, head)
+    ForInStep(left, iter_key, body_state, after) ->
+      emit_for_in_step(e, ctx, left, iter_key, body_state, after)
     ForAwaitSetup(right, head) -> {
       let hint = ir.ConstAtom("async")
       emit_iterator_setup(e, ctx, right, for_await_iter_key(head), hint, head)
@@ -3335,6 +3405,66 @@ fn emit_for_of_step(
       e,
     )
   })
+}
+
+fn emit_for_in_setup(
+  e: Emitter,
+  ctx: MachineContext,
+  right: ast.Expression,
+  iter_key: String,
+  head: Int,
+) -> EmitResult {
+  use #(rhs_tree, e) <- result.map(e.dispatch.emit_expr(e, right))
+  let #(rhs_n, e) = state.fresh_var(e)
+  let #(keys_n, e) = state.fresh_var(e)
+  let over =
+    dict.from_list([#(extra_idx(ctx.layout, iter_key), ir.Var(keys_n))])
+  use t <- anf.wrap(jump_state_leaf(e, ctx, head, over))
+  let keys = ir.CallHost("js", "for_in_keys", [ir.Var(rhs_n)])
+  ir.Let([rhs_n], rhs_tree, ir.Let([keys_n], keys, t))
+}
+
+fn emit_for_in_step(
+  e: Emitter,
+  ctx: MachineContext,
+  left: ast.ForInit,
+  iter_key: String,
+  body_state: Int,
+  after: Int,
+) -> EmitResult {
+  let iter_idx = extra_idx(ctx.layout, iter_key)
+  let #(keys_n, e) = state.fresh_var(e)
+  let #(empty_n, e) = state.fresh_var(e)
+  let #(key_n, e) = state.fresh_var(e)
+  let #(rest_n, e) = state.fresh_var(e)
+  let #(done_branch, e) = jump_state_leaf(e, ctx, after, dict.new())
+  use #(bind_tree, e) <- result.map(for_lhs_bind(e, left, ir.Var(key_n)))
+  let #(tmp, e) = state.fresh_var(e)
+  let over = dict.from_list([#(iter_idx, ir.Var(rest_n))])
+  let #(body_branch, e) = {
+    use t <- anf.wrap(jump_state_leaf(e, ctx, body_state, over))
+    ir.Let(
+      [key_n],
+      ir.TermOp(ir.ListHead, [ir.Var(keys_n)]),
+      ir.Let(
+        [rest_n],
+        ir.TermOp(ir.ListTail, [ir.Var(keys_n)]),
+        state.splice_let(bind_tree, tmp, t),
+      ),
+    )
+  }
+  #(
+    ir.Let(
+      [keys_n],
+      ir.TermOp(ir.TupleGet(iter_idx), [ctx.saved_locals]),
+      ir.Let(
+        [empty_n],
+        ir.TermOp(ir.IsEmptyList, [ir.Var(keys_n)]),
+        ir.If(ir.Var(empty_n), [ir.TTerm], done_branch, body_branch),
+      ),
+    ),
+    e,
+  )
 }
 
 fn named_key_tuple(s: String) -> ir.Expr {
