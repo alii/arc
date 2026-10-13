@@ -264,10 +264,16 @@ fn own_property_of(
             seq: 0,
           ))
       }
-    BytecodeFn(template:, birth: BirthPending(_), ..), Named("length") ->
-      Some(birth_prop(types.mk_int(template.length), 0))
-    BytecodeFn(template:, birth: BirthPending(_), ..), Named("name") ->
-      Some(birth_prop(types.mk_string(option.unwrap(template.name, "")), 1))
+    BytecodeFn(template:, env:, birth: BirthPending(_), ..), Named("length") ->
+      Some(birth_prop(
+        types.mk_int(bytecode.birth_name_and_length(template, env).1),
+        0,
+      ))
+    BytecodeFn(template:, env:, birth: BirthPending(_), ..), Named("name") ->
+      Some(birth_prop(
+        types.mk_string(bytecode.birth_name_and_length(template, env).0),
+        1,
+      ))
     CompiledFn(length:, birth: BirthPending(_), ..), Named("length") ->
       Some(birth_prop(types.mk_int(length), 0))
     CompiledFn(name:, birth: BirthPending(_), ..), Named("name") ->
@@ -492,12 +498,13 @@ type PendingBirth {
 
 fn pending_birth(cell: Cell) -> Option(PendingBirth) {
   case cell {
-    SObject(kind: BytecodeFn(template:, birth: BirthPending(parent), ..), ..) ->
-      Some(PendingBirth(
-        types.mk_int(template.length),
-        option.unwrap(template.name, ""),
-        parent,
-      ))
+    SObject(
+      kind: BytecodeFn(template:, env:, birth: BirthPending(parent), ..),
+      ..,
+    ) -> {
+      let #(name, length) = bytecode.birth_name_and_length(template, env)
+      Some(PendingBirth(types.mk_int(length), name, parent))
+    }
     SObject(
       kind: CompiledFn(length:, name:, birth: BirthPending(parent), ..),
       ..,
@@ -588,8 +595,11 @@ fn read_settled(st: Agent, h: Handle, key: ObjectKey) -> #(Cell, Agent) {
 pub fn name_if_anonymous(st: Agent, f: Handle, name: String) -> Agent {
   use cell <- rt_store.cell_update(st, f)
   case cell {
-    SObject(kind: BytecodeFn(template:, birth: BirthPending(_), ..) as kind, ..) ->
-      case option.unwrap(template.name, "") {
+    SObject(
+      kind: BytecodeFn(template:, env:, birth: BirthPending(_), ..) as kind,
+      ..,
+    ) ->
+      case bytecode.birth_name_and_length(template, env).0 {
         "" ->
           SObject(
             ..cell,

@@ -43,16 +43,18 @@ fn alone(
   let #(start, line) = position(source, marker)
   let assert Ok(template) =
     compiler.compile_function_alone(
-      LazyFunction(
-        bytes: bit_array.from_string(source),
-        is_module: False,
+      bit_array.from_string(source),
+      is_module: False,
+      function: LazyFunction(
         source: scope.FnSource(start:, end: 0, line:, form:, strict:),
+        parent_slots:,
         name:,
+        arity: 0,
+        length: 0,
         free: lazy.pack_free(free),
         lexical: 0,
         code_kind: lexical.FunctionCode,
       ),
-      parent_slots:,
       lazy: False,
     )
   template

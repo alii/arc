@@ -1,3 +1,4 @@
+import arc/bytecode/lazy
 import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
 import arc/bytecode/opcode.{type Op, type Pc, type TryKind}
 import arc/internal/tuple_array.{type TupleArray}
@@ -321,3 +322,32 @@ pub const reg_b_slot = -2
 
 // a negative retpc makes Ret return the value under it
 pub const return_retpc = -1
+
+@external(erlang, "erlang", "tuple_size")
+fn env_size(env: EnvTuple) -> Int
+
+@external(erlang, "erlang", "element")
+fn env_record(index: Int, env: EnvTuple) -> BitArray
+
+/// the name and length a function object is born with. A closure of a
+/// function not yet compiled has them in the record it captures last, since
+/// its template is one many functions share
+pub fn birth_name_and_length(
+  template: FuncTemplate,
+  env: EnvTuple,
+) -> #(String, Int) {
+  let recorded = case tuple_array.element(1, template.bytecode) {
+    opcode.CompileSelf(..) ->
+      lazy.unpack(env_record(env_size(env), env)) |> option.from_result
+    _ -> option.None
+  }
+  case template.name, recorded {
+    // named since, at run time
+    option.Some(name), option.Some(function) -> #(name, function.length)
+    option.None, option.Some(function) -> #(
+      option.unwrap(function.name, ""),
+      function.length,
+    )
+    name, option.None -> #(option.unwrap(name, ""), template.length)
+  }
+}

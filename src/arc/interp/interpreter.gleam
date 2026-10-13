@@ -23,17 +23,17 @@ import arc/bytecode/opcode.{
   IncLocalJump, InitGlobalLex, InitialYield, IterateView, IteratorCheckObject,
   IteratorClose, IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest,
   Jump, JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
-  MakeClosure, MakeMethod, MakeSuppressed, NewObject, NewObjectShaped,
-  NewObjectWith, NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc,
-  Pop, PopTry, PostDecLocal, PostIncLocal, PrivateInDyn, PushConst, PushTry,
-  PutBoxed, PutBoxedCheckInit, PutElem, PutElemPop, PutEvalVar, PutField,
-  PutFieldPop, PutGlobal, PutLocal, PutLocalCheckInit, PutLocalConstField,
-  PutLocalLocalField, PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3,
-  Safepoint, SetProto, SetupDerivedClass, Swap, Throw, ThrowConstAssign,
-  ThrowReferenceError, ToObject, ToPropertyKey, ToStringVal, TypeOf,
-  TypeofEvalVar, TypeofGlobal, UnaryOp, UnpackArray, Unrot4, WithDeleteVar,
-  WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef, WithPutRefValue,
-  WithPutVar, Yield, YieldStar,
+  MakeClosure, MakeLazyClosure, MakeMethod, MakeSuppressed, NewObject,
+  NewObjectShaped, NewObjectWith, NewPrivateName, NewRegExp, ObjectRestCopy,
+  ObjectSpread, Pc, Pop, PopTry, PostDecLocal, PostIncLocal, PrivateInDyn,
+  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutElemPop,
+  PutEvalVar, PutField, PutFieldPop, PutGlobal, PutLocal, PutLocalCheckInit,
+  PutLocalConstField, PutLocalLocalField, PutPrivateFieldDyn, PutSuperValue, Ret,
+  Return, Rot3, Safepoint, SetProto, SetupDerivedClass, Swap, Throw,
+  ThrowConstAssign, ThrowReferenceError, ToObject, ToPropertyKey, ToStringVal,
+  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, UnpackArray, Unrot4,
+  WithDeleteVar, WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef,
+  WithPutRefValue, WithPutVar, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -2482,6 +2482,30 @@ fn loop(
       )
     }
 
+    MakeLazyClosure(stub_index, record) -> {
+      let #(fn_h, agent) =
+        lazy.make_closure(
+          agent,
+          state.func,
+          state.unit_id,
+          locals,
+          stub_index,
+          record,
+        )
+      loop(
+        state,
+        drive,
+        pc + 1,
+        [mk_object(fn_h), ..stack],
+        locals,
+        agent,
+        code,
+        constants,
+        r0,
+        r1,
+      )
+    }
+
     GetIterator ->
       case stack {
         [iterable, ..rest] -> {
@@ -3864,7 +3888,7 @@ fn conditional_jump(
 
 fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   case op {
-    CompileSelf(function) -> lazy.first_call(state, function)
+    CompileSelf(bytes, is_module) -> lazy.first_call(state, bytes, is_module)
 
     // the loop runs these without ever falling back here
     PushConst(_)
@@ -3874,6 +3898,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     | NewObjectWith(..)
     | NewObjectShaped(..)
     | MakeClosure(_)
+    | MakeLazyClosure(..)
     | InitialYield
     | Yield
     | Await

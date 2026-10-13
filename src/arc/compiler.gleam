@@ -23,7 +23,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
-import gleam/string
 
 pub type CompileError =
   emit.EmitError
@@ -33,22 +32,23 @@ pub type AloneError {
   AloneCompileError(CompileError)
 }
 
-/// compiles the one function `function` describes, giving the template the
-/// whole-unit compile gives for it. With `lazy`, the plain functions written
-/// inside it are in turn left for their own first calls
+/// compiles the one function `function` describes out of the unit's text,
+/// giving the template the whole-unit compile gives for it. With `lazy`, the
+/// plain functions written inside it are in turn left for their first calls
 pub fn compile_function_alone(
-  function: LazyFunction,
-  parent_slots parent_slots: List(Int),
+  bytes: BitArray,
+  is_module is_module: Bool,
+  function function: LazyFunction,
   lazy lazy: Bool,
 ) -> Result(FuncTemplate, AloneError) {
   let LazyFunction(
-    bytes:,
-    is_module:,
     source:,
+    parent_slots:,
     name:,
     free:,
     lexical: packed_lexical,
     code_kind:,
+    ..,
   ) = function
   let lexical_seeds = lazy.unpack_lexical(packed_lexical)
   let mode = case is_module {
@@ -436,7 +436,11 @@ fn build_template(
   let assemble.Assembled(bytecode:, constants:, lines:) =
     assemble.assemble(code, constants)
   let #(bytecode, regs) = case use_registers {
-    True -> registers.assign_regs(bytecode, captured_slots(functions))
+    True ->
+      registers.assign_regs(
+        bytecode,
+        set.union(captured_slots(functions), lazily_captured_slots(bytecode)),
+      )
     False -> #(bytecode, bytecode.NoRegs)
   }
   FuncTemplate(
@@ -463,6 +467,18 @@ fn build_template(
   )
 }
 
+// a lazy closure's captures are named by its record, not by a child template
+fn lazily_captured_slots(code: tuple_array.TupleArray(opcode.Op)) -> Set(Int) {
+  use slots, op <- list.fold(tuple_array.to_list(code), set.new())
+  case op {
+    opcode.MakeLazyClosure(record:, ..) ->
+      lazy.creation(record)
+      |> result.map(fn(made) { list.fold(made.1, slots, set.insert) })
+      |> result.unwrap(slots)
+    _ -> slots
+  }
+}
+
 fn captured_slots(children: List(FuncTemplate)) -> Set(Int) {
   list.flat_map(children, fn(t) { t.env_descriptors })
   |> set.from_list
@@ -478,21 +494,16 @@ fn compile_child(
   parent_fn_scope: scope.ScopeId,
   unit: Unit,
 ) -> FuncTemplate {
+  use <- option.lazy_unwrap(
+    option.map(child.lazy, fn(lazy) {
+      stub_template(child, lazy.env_size, unit)
+    }),
+  )
   let info = scope.function_info(tree, child.scope_id)
   let parent_info = scope.function_info(tree, parent_fn_scope)
   let env_descriptors =
     list.map(info.captures, fn(c) { c.parent_slot })
     |> list.append(scope.lexical_capture_parent_slots(info, parent_info))
-  use <- option.lazy_unwrap(
-    option.map(child.lazy, stub_template(
-      child,
-      tree,
-      info,
-      env_descriptors,
-      unit,
-      _,
-    )),
-  )
 
   let local_names = case info.eval_in_subtree {
     True -> Some(eval_name_table(FrameVarEnv, info))
@@ -537,69 +548,28 @@ fn compile_children(
   list.map(children, compile_child(_, tree, parent_fn_scope, unit))
 }
 
-// what a function left for later carries: its text and what its parent hands it
-fn lazy_function(
-  child: emit.CompiledChild,
-  tree: scope.ScopeTree,
-  info: scope.FunctionInfo,
-  unit: Unit,
-  source: scope.FnSource,
-) -> LazyFunction {
-  let own = scope.get(tree, child.scope_id)
-  let captured =
-    set.from_list(list.map(info.captures, fn(capture) { capture.name }))
-  let free =
-    list.sort(set.to_list(info.free), string.compare)
-    |> list.map(fn(name) {
-      use <- bool.guard(!set.contains(captured, name), None)
-      let assert Ok(binding) = dict.get(own.bindings, name)
-        as "compiler: a captured name is not bound in its function's scope"
-      Some(scope.CaptureSeed(binding.boxed, binding.declared_kind))
-    })
-  LazyFunction(
-    bytes: unit.bytes,
-    is_module: unit.is_module,
-    source:,
-    name: child.name,
-    free: lazy.pack_free(free),
-    lexical: {
-      use ref <- lazy.pack_lexical
-      case dict.has_key(info.lexical_captures, ref) {
-        True -> Some(lexical.refs_get(info.lexical_boxed, ref))
-        False -> None
-      }
-    },
-    code_kind: child.code_kind,
-  )
-}
-
-// a function whose whole body is "compile me": it has the frame layout the
-// analysis gave it, and carries what its first call needs to compile it
+// the template every closure of a lazy function of one kind starts with. Its
+// whole body is "compile me". A closure of it captures env_size values, the
+// last being its function's record; then come the four lexical slots, so the
+// first call finds the function object there whatever the real layout is
 fn stub_template(
   child: emit.CompiledChild,
-  tree: scope.ScopeTree,
-  info: scope.FunctionInfo,
-  env_descriptors: List(Int),
+  env_size: Int,
   unit: Unit,
-  source: scope.FnSource,
 ) -> FuncTemplate {
-  let function = lazy_function(child, tree, info, unit, source)
-  // every stub owns the four lexical slots after its captures, so the first
-  // call finds the function object there whatever the real layout is
-  let captured = list.length(env_descriptors)
   FuncTemplate(
-    name: child.name,
-    arity: child.arity,
-    length: child.length,
-    local_count: captured + lexical.owned_lexical_slot_count + child.arity,
+    name: None,
+    arity: 0,
+    length: 0,
+    local_count: env_size + lexical.owned_lexical_slot_count,
     bytecode: tuple_array.from_list([
-      opcode.CompileSelf(function),
+      opcode.CompileSelf(unit.bytes, unit.is_module),
       opcode.Return,
     ]),
     constants: tuple_array.from_list([]),
-    lines: tuple_array.from_list([source.line, source.line]),
+    lines: tuple_array.from_list([0, 0]),
     functions: tuple_array.from_list([]),
-    env_descriptors:,
+    env_descriptors: [],
     is_strict: child.is_strict,
     is_arrow: child.is_arrow,
     is_derived_constructor: False,
@@ -608,7 +578,7 @@ fn stub_template(
     is_constructor: child.is_constructor,
     is_class_constructor: False,
     local_names: None,
-    lexical: lexical.OwnedLexicalSlots(base: captured),
+    lexical: lexical.OwnedLexicalSlots(base: env_size),
     code_kind: child.code_kind,
     regs: bytecode.NoRegs,
   )

@@ -1,5 +1,6 @@
 import arc/bytecode/binop.{AddOp, PureOp}
 import arc/bytecode/key
+import arc/bytecode/lazy.{LazyFunction}
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarResume, IrBinOp,
@@ -31,6 +32,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
+import gleam/string
 
 pub type CompiledChild {
   CompiledChild(
@@ -51,8 +53,15 @@ pub type CompiledChild {
     references_arguments: Bool,
     code_kind: lexical.CodeKind,
     // Some when the body was left for the first call to compile
-    lazy: Option(scope.FnSource),
+    lazy: Option(LazyChild),
   )
+}
+
+/// a function left for later: the record its closures carry, and how many
+/// values they capture, the record included. Functions alike in everything
+/// else share one child, so there the record is empty
+pub type LazyChild {
+  LazyChild(record: BitArray, env_size: Int)
 }
 
 pub type EmitOutput {
@@ -137,6 +146,8 @@ type Emitter {
     lazy: Bool,
     // the next function is called where it is written, so it is compiled now
     called_now: Bool,
+    // the child each kind of lazy function shares
+    stub_indices: Dict(CompiledChild, Int),
   )
 }
 
@@ -276,8 +287,19 @@ pub fn module(
   let e = Emitter(..new_emitter(tree, root_scope_id), strict: True, lazy:)
   let e = enter_root_scope(e)
 
-  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(
+    e,
+    stmts,
+    eager: True,
+  ))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
+  let hoisted_funcs =
+    list.filter_map(hoisted_funcs, fn(hf) {
+      case hf.1 {
+        opcode.MakeClosure(index) -> Ok(#(hf.0, index))
+        _ -> Error(Nil)
+      }
+    })
 
   use e <- result.try(case has_module_using {
     False -> emit_stmts_tail(e, stmts)
@@ -864,7 +886,11 @@ fn emit_top_level_body(
         emit_op(e, opcode.DeclareGlobalLex(name, is_const))
       })
   }
-  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(
+    e,
+    stmts,
+    eager: False,
+  ))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   use e <- result.try(emit_stmts_tail(e, stmts))
   let Finished(code:, constants:, children:) = finish(e)
@@ -904,6 +930,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     child_fn_cursor: scope.child_function_scopes(tree, fn_id),
     lazy: False,
     called_now: False,
+    stub_indices: dict.new(),
     field_init: NoFieldInit,
     in_block: False,
     deletable_global_vars: False,
@@ -1946,7 +1973,6 @@ fn rewrite_apply_arguments(
 }
 
 fn add_child_function(e: Emitter, child: CompiledChild) -> #(Int, Emitter) {
-  let idx = e.next_func
   // arrow refs propagate to the parent; non-arrows own their slots
   let #(references_arguments, arguments_escape) = case child.is_arrow {
     True -> #(
@@ -1955,14 +1981,33 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Int, Emitter) {
     )
     False -> #(e.references_arguments, e.arguments_escape)
   }
+  let e = Emitter(..e, references_arguments:, arguments_escape:)
+  // lazy functions alike in all but their records share one child
+  let #(child, shared) = case child.lazy {
+    None -> #(child, None)
+    Some(LazyChild(env_size:, ..)) -> {
+      let stub =
+        CompiledChild(
+          ..child,
+          references_arguments: False,
+          lazy: Some(LazyChild(record: <<>>, env_size:)),
+        )
+      #(stub, dict.get(e.stub_indices, stub) |> option.from_result)
+    }
+  }
+  use <- option.lazy_unwrap(option.map(shared, fn(idx) { #(idx, e) }))
+  let idx = e.next_func
+  let stub_indices = case child.lazy {
+    None -> e.stub_indices
+    Some(_) -> dict.insert(e.stub_indices, child, idx)
+  }
   #(
     idx,
     Emitter(
       ..e,
       functions: [child, ..e.functions],
       next_func: idx + 1,
-      references_arguments:,
-      arguments_escape:,
+      stub_indices:,
     ),
   )
 }
@@ -2218,10 +2263,10 @@ fn emit_block_declarations(
   e: Emitter,
   body: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
-  use #(funcs, e) <- result.map(collect_hoisted_funcs(e, body))
+  use #(funcs, e) <- result.map(collect_hoisted_funcs(e, body, eager: False))
   list.fold(funcs, e, fn(e, hf) {
-    let #(name, idx) = hf
-    let e = emit_op(e, opcode.MakeClosure(idx))
+    let #(name, make) = hf
+    let e = emit_op(e, make)
     emit_var_init(e, name)
   })
 }
@@ -2344,10 +2389,13 @@ fn emit_stmts_tail_value(
 fn collect_hoisted_funcs(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
-) -> Result(#(List(#(String, Int)), Emitter), EmitError) {
+  // module declarations are instantiated by the linker, which needs them whole
+  eager eager: Bool,
+) -> Result(#(List(#(String, opcode.Op)), Emitter), EmitError) {
   use #(funcs_rev, e) <- result.map(
     list.try_fold(stmts, #([], e), fn(acc, located) {
       let #(funcs, e) = acc
+      let e = Emitter(..e, called_now: eager)
       case ast_util.peel_labels(located.statement) {
         ast.FunctionDeclaration(
           Some(ast.NamedBinding(name, _)),
@@ -2364,22 +2412,23 @@ fn collect_hoisted_funcs(
             shape: FnDecl(is_generator:, is_async:),
           ))
           let #(idx, e) = add_child_function(e, child)
-          #([#(name, idx), ..funcs], e)
+          #([#(name, closure_op(child, idx)), ..funcs], e)
         }
         _ -> Ok(#(funcs, e))
       }
     }),
   )
-  #(list.reverse(funcs_rev), e)
+  #(list.reverse(funcs_rev), Emitter(..e, called_now: False))
 }
 
+// each hoisted function with the op that makes its closure
 fn emit_hoisted_funcs(
   e: Emitter,
-  hoisted_funcs: List(#(String, Int)),
+  hoisted_funcs: List(#(String, opcode.Op)),
 ) -> Emitter {
   list.fold(hoisted_funcs, e, fn(e, hf) {
-    let #(name, func_idx) = hf
-    e |> emit_op(opcode.MakeClosure(func_idx)) |> emit_var_put(name)
+    let #(name, make) = hf
+    e |> emit_op(make) |> emit_var_put(name)
   })
 }
 
@@ -2535,12 +2584,49 @@ fn compile_function_body(
         True -> parent.code_kind
         False -> lexical.FunctionCode
       }
-      let child =
-        CompiledChild(
-          scope_id: fn_id,
+      let tree = parent.scope_tree
+      let info = scope.function_info(tree, fn_id)
+      let own = scope.get(tree, fn_id)
+      let captured =
+        set.from_list(list.map(info.captures, fn(capture) { capture.name }))
+      let free =
+        list.sort(set.to_list(info.free), string.compare)
+        |> list.map(fn(free_name) {
+          use <- bool.guard(!set.contains(captured, free_name), None)
+          let assert Ok(binding) = dict.get(own.bindings, free_name)
+            as "emit: a captured name is not bound in its function's scope"
+          Some(scope.CaptureSeed(binding.boxed, binding.declared_kind))
+        })
+      let parent_slots =
+        list.map(info.captures, fn(capture) { capture.parent_slot })
+        |> list.append(scope.lexical_capture_parent_slots(
+          info,
+          scope.function_info(tree, parent.fn_scope),
+        ))
+      let record =
+        lazy.pack(LazyFunction(
+          source:,
+          parent_slots:,
           name:,
           arity: list.length(layout.fixed),
           length: expected_argument_count(layout.fixed),
+          free: lazy.pack_free(free),
+          lexical: {
+            use ref <- lazy.pack_lexical
+            case dict.has_key(info.lexical_captures, ref) {
+              True -> Some(lexical.refs_get(info.lexical_boxed, ref))
+              False -> None
+            }
+          },
+          code_kind:,
+        ))
+      // name, arity and length are in the record, so stubs differ in little
+      let child =
+        CompiledChild(
+          scope_id: root_scope_id,
+          name: None,
+          arity: 0,
+          length: 0,
           code: [],
           constants: [],
           functions: [],
@@ -2553,15 +2639,22 @@ fn compile_function_body(
           is_class_constructor: False,
           // an arrow that captures arguments makes its function create them
           references_arguments: is_arrow
-            && list.any(
-            scope.function_info(parent.scope_tree, fn_id).captures,
-            fn(capture) { capture.name == "arguments" },
-          ),
+            && list.any(info.captures, fn(capture) {
+            capture.name == "arguments"
+          }),
           code_kind:,
-          lazy: Some(source),
+          lazy: Some(LazyChild(record:, env_size: list.length(parent_slots) + 1)),
         )
       Ok(#(child, Emitter(..parent, child_fn_cursor: rest)))
     }
+  }
+}
+
+// how a closure of this child, which sits at index, is made
+fn closure_op(child: CompiledChild, index: Int) -> opcode.Op {
+  case child.lazy {
+    Some(LazyChild(record:, ..)) -> opcode.MakeLazyClosure(index, record)
+    None -> opcode.MakeClosure(index)
   }
 }
 
@@ -2689,7 +2782,11 @@ fn compile_function_now(
     }
   }
 
-  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(
+    e,
+    stmts,
+    eager: False,
+  ))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
 
   // generators suspend here before the body; async runs eagerly
@@ -4077,7 +4174,7 @@ fn register_closure(
 ) -> Result(Emitter, EmitError) {
   use #(child, e) <- result.map(compiled)
   let #(idx, e) = add_child_function(e, child)
-  emit_op(e, opcode.MakeClosure(idx))
+  emit_op(e, closure_op(child, idx))
 }
 
 // never a constructor: new o.m() must throw

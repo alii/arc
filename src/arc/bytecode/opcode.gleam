@@ -1,6 +1,5 @@
 import arc/bytecode/binop.{type ClassifiedBinOp, type PureBinOp}
 import arc/bytecode/key.{type PropertyKey}
-import arc/bytecode/lazy.{type LazyFunction}
 import gleam/option.{type Option, None, Some}
 
 pub type TemplateQuasi {
@@ -168,8 +167,12 @@ pub type Op {
   PopTry
 
   MakeClosure(func_index: Int)
-  // the whole body of a function not compiled yet: compiles it, then runs it
-  CompileSelf(function: LazyFunction)
+  // a closure of a function not compiled yet: the template at stub_index
+  // with the function's packed record as the last thing it captures
+  MakeLazyClosure(stub_index: Int, record: BitArray)
+  // the whole body of a stub: compiles the function its closure's record
+  // names, out of this unit's text, then runs it
+  CompileSelf(bytes: BitArray, is_module: Bool)
   BoxLocal(index: Int)
   // slots ascending; an uninit box holds tdz, else the slot's value
   BoxLocals(slots: List(Int), uninit: Bool)

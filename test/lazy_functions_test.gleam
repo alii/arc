@@ -1,3 +1,4 @@
+import arc/bytecode/lazy.{type LazyFunction}
 import arc/bytecode/opcode
 import arc/compiler
 import arc/host_hooks
@@ -8,6 +9,7 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion}
 import arc/rt/types.{type JsValKind, KStr}
+import gleam/list
 import gleam/option.{Some}
 import rt_helpers
 
@@ -32,26 +34,40 @@ fn run(source: String) -> Result(JsValKind, JsValKind) {
   }
 }
 
-pub fn a_plain_function_is_left_as_a_stub_test() {
+// the functions a template makes lazy closures of, as their records have them
+fn lazy_functions(template: FuncTemplate) -> List(LazyFunction) {
+  use op <- list.filter_map(tuple_array.to_list(template.bytecode))
+  case op {
+    opcode.MakeLazyClosure(record:, ..) -> lazy.unpack(record)
+    _ -> Error(Nil)
+  }
+}
+
+fn is_stub(template: FuncTemplate) -> Bool {
+  case tuple_array.to_list(template.bytecode) {
+    [opcode.CompileSelf(..), ..] -> True
+    _ -> False
+  }
+}
+
+pub fn a_plain_function_is_left_for_its_first_call_test() {
   let script =
     compile(
       "function add(a, b) { /* long enough to be worth leaving for later */ return a + b; }
+       function also(a, b, c) { /* long enough to be worth leaving for later */ return a; }
        function tiny(a) { return a; }
        add(1, 2)",
     )
-  let assert [add, tiny] = tuple_array.to_list(script.functions)
-  // what a short function compiles to is smaller than a stub
-  let assert [first, ..] = tuple_array.to_list(tiny.bytecode)
-  assert first != opcode.Return
-  assert case first {
-    opcode.CompileSelf(_) -> False
-    _ -> True
-  }
-  let assert [opcode.CompileSelf(_), opcode.Return] =
-    tuple_array.to_list(add.bytecode)
+  let assert [add, also] = lazy_functions(script)
   assert add.name == Some("add")
   assert add.arity == 2
-  assert add.length == 2
+  assert also.name == Some("also")
+  assert also.length == 3
+  // the two share one stub; what a short function compiles to is smaller
+  // than a record, so tiny is compiled at once
+  let assert [stub, tiny] = tuple_array.to_list(script.functions)
+  assert is_stub(stub)
+  assert !is_stub(tiny)
 }
 
 pub fn calls_recursion_and_captures_test() {
@@ -115,13 +131,6 @@ pub fn a_throw_from_a_lazy_function_is_caught_test() {
     == Ok(KStr("RangeError:late"))
 }
 
-fn is_stub(template: FuncTemplate) -> Bool {
-  case tuple_array.to_list(template.bytecode) {
-    [opcode.CompileSelf(_), ..] -> True
-    _ -> False
-  }
-}
-
 // a function called where it is written would only be parsed twice
 pub fn a_function_called_where_it_is_written_is_compiled_at_once_test() {
   let script =
@@ -133,6 +142,10 @@ pub fn a_function_called_where_it_is_written_is_compiled_at_once_test() {
        var arrow = () => { /* long enough to be left for its first call too */ return 5; };
        var called_arrow = (() => { /* long enough to be left for its first call, if it were */ return 6; })();",
     )
+  assert list.map(lazy_functions(script), fn(function) { function.name })
+    == [Some("later"), Some("arrow")]
+  // three compiled at once, a stub for the function, three more, one for the
+  // arrow
   let assert [called, called_with_this, wrapped, later, arrow, called_arrow] =
     tuple_array.to_list(script.functions)
   assert !is_stub(called)
@@ -141,8 +154,8 @@ pub fn a_function_called_where_it_is_written_is_compiled_at_once_test() {
   assert is_stub(later)
   assert is_stub(arrow)
   assert !is_stub(called_arrow)
-  let assert [inner] = tuple_array.to_list(called.functions)
-  assert is_stub(inner)
+  let assert [inner] = lazy_functions(called)
+  assert inner.name == Some("inner")
 }
 
 pub fn arrows_take_this_and_arguments_from_around_them_test() {
