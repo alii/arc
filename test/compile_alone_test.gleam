@@ -7,7 +7,7 @@ import arc/parser
 import arc/rt/bytecode.{type FuncTemplate}
 import gleam/bit_array
 import gleam/list
-import gleam/option.{type Option, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/string
 
 fn whole(source: String) -> FuncTemplate {
@@ -28,13 +28,17 @@ fn position(source: String, marker: String) -> #(Int, Int) {
   #(string.byte_size(before), list.length(string.split(before, "\n")))
 }
 
+// `free` is, for each outer name the function uses, in order, how the code
+// around it hands it over, or None for a global; `parent_slots` are the
+// parent's slots for the ones it does hand over
 fn alone(
   source: String,
   marker: String,
   form: scope.FnForm,
   strict: Bool,
   name: Option(String),
-  captures: List(#(String, Int, scope.CaptureSeed)),
+  free: List(Option(scope.CaptureSeed)),
+  parent_slots: List(Int),
 ) -> FuncTemplate {
   let #(start, line) = position(source, marker)
   let assert Ok(template) =
@@ -44,14 +48,11 @@ fn alone(
         is_module: False,
         source: scope.FnSource(start:, end: 0, line:, form:, strict:),
         name:,
-        capture_names: list.map(captures, fn(capture) { capture.0 }),
-        capture_seeds: lazy.pack_seeds(
-          list.map(captures, fn(capture) { capture.2 }),
-        ),
+        free: lazy.pack_free(free),
         lexical: 0,
         code_kind: lexical.FunctionCode,
       ),
-      parent_slots: list.map(captures, fn(capture) { capture.1 }),
+      parent_slots:,
       lazy: False,
     )
   template
@@ -65,12 +66,14 @@ function add(a, b) {
   return inner() + this.x++;
 }
 "
+  // `seen` is a global there
   assert alone(
       source,
       "function add",
       scope.FnDeclaration,
       False,
       Some("add"),
+      [None],
       [],
     )
     == child(whole(source), 0)
@@ -87,17 +90,17 @@ pub fn an_expression_compiled_alone_takes_its_captures_as_seeds_test() {
   let in_place = child(child(whole(source), 0), 0)
   let assert [base_slot, count_slot] = in_place.env_descriptors
   // base is never written, so it is held by value; count is in a box
-  let captures = [
-    #("base", base_slot, scope.CaptureSeed(False, scope.ParamBinding)),
-    #("count", count_slot, scope.CaptureSeed(True, scope.VarBinding)),
-  ]
   assert alone(
       source,
       "function next",
       scope.FnExpression,
       True,
       Some("next"),
-      captures,
+      [
+        Some(scope.CaptureSeed(False, scope.ParamBinding)),
+        Some(scope.CaptureSeed(True, scope.VarBinding)),
+      ],
+      [base_slot, count_slot],
     )
     == in_place
 }

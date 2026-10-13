@@ -17,10 +17,9 @@ pub type LazyFunction {
     source: FnSource,
     // the name the code around it gave it
     name: Option(String),
-    // its captured names, in env order
-    capture_names: List(String),
-    // how the parent holds each of them, see pack_seeds
-    capture_seeds: BitArray,
+    // for each outer name it uses, in order, how the parent hands it over:
+    // see pack_free
+    free: BitArray,
     // an arrow's this, new.target and the like, see pack_lexical
     lexical: Int,
     // an arrow is the kind of code it is written in
@@ -28,21 +27,31 @@ pub type LazyFunction {
   )
 }
 
-/// a byte for each seed: the declared kind, doubled, plus one when boxed
-pub fn pack_seeds(seeds: List(CaptureSeed)) -> BitArray {
-  use packed, CaptureSeed(boxed:, declared_kind:) <- list.fold(seeds, <<>>)
-  let boxed = case boxed {
-    True -> 1
-    False -> 0
+/// a byte for each outer name: 255 when the parent does not supply it (it is
+/// a global), else the declared kind, doubled, plus one when it is boxed
+pub fn pack_free(names: List(Option(CaptureSeed))) -> BitArray {
+  use packed, name <- list.fold(names, <<>>)
+  case name {
+    option.None -> <<packed:bits, 255>>
+    option.Some(CaptureSeed(boxed:, declared_kind:)) -> {
+      let boxed = case boxed {
+        True -> 1
+        False -> 0
+      }
+      <<packed:bits, { kind_number(declared_kind) * 2 + boxed }>>
+    }
   }
-  <<packed:bits, { kind_number(declared_kind) * 2 + boxed }>>
 }
 
-pub fn unpack_seeds(packed: BitArray) -> List(CaptureSeed) {
+pub fn unpack_free(packed: BitArray) -> List(Option(CaptureSeed)) {
   case packed {
+    <<255, rest:bits>> -> [option.None, ..unpack_free(rest)]
     <<byte, rest:bits>> -> [
-      CaptureSeed(boxed: byte % 2 == 1, declared_kind: numbered_kind(byte / 2)),
-      ..unpack_seeds(rest)
+      option.Some(CaptureSeed(
+        boxed: byte % 2 == 1,
+        declared_kind: numbered_kind(byte / 2),
+      )),
+      ..unpack_free(rest)
     ]
     _ -> []
   }

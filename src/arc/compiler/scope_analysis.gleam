@@ -49,7 +49,21 @@ fn blank_function_info(
     is_arrow: raw.is_arrow,
     is_derived_constructor: raw.is_derived_constructor,
     source: raw.source,
+    free: set.new(),
   )
+}
+
+/// the outer names the one function under this root uses, in the order its
+/// captures are laid out in. For a function parsed alone, before it is known
+/// which of them the code around it supplies
+pub fn lone_free_names(
+  builder: ScopeBuilder,
+  opts: AnalyzeOpts,
+) -> List(String) {
+  let tree = finalize(builder, opts)
+  child_function_scopes(tree, root_scope_id)
+  |> list.flat_map(fn(id) { set.to_list(function_info(tree, id).free) })
+  |> list.sort(string.compare)
 }
 
 pub fn finalize(builder: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
@@ -997,6 +1011,7 @@ fn write_captures(
     fallthrough:,
     contains_direct_eval: subtree.own_eval,
     eval_in_subtree: subtree.eval_in_subtree,
+    free: subtree.transitive_free,
   )
 }
 

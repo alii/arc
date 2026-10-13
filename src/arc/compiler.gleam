@@ -23,6 +23,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
+import gleam/string
 
 pub type CompileError =
   emit.EmitError
@@ -45,14 +46,10 @@ pub fn compile_function_alone(
     is_module:,
     source:,
     name:,
-    capture_names:,
-    capture_seeds:,
+    free:,
     lexical: packed_lexical,
     code_kind:,
   ) = function
-  // the parent's slots are the names', then the lexical refs'
-  let #(name_slots, lexical_slots) =
-    list.split(parent_slots, list.length(capture_names))
   let lexical_seeds = lazy.unpack_lexical(packed_lexical)
   let mode = case is_module {
     True -> parser.Module
@@ -62,15 +59,33 @@ pub fn compile_function_alone(
     parser.parse_function_at(bytes, mode, source)
     |> result.map_error(AloneParseError),
   )
-  let opts =
+  let unseeded =
     scope.AnalyzeOpts(
       ..scope.default_analyze_opts(),
       strict: source.strict,
-      parent_names: dict.from_list(list.zip(capture_names, name_slots)),
-      parent_seeds: dict.from_list(list.zip(
-        capture_names,
-        lazy.unpack_seeds(capture_seeds),
+      root_may_own_lexical: False,
+    )
+  // the names it uses are in its text; which of them the parent supplies,
+  // and how, is what the stub kept
+  let captures =
+    list.zip(
+      scope_analysis.lone_free_names(scopes, unseeded),
+      lazy.unpack_free(free),
+    )
+    |> list.filter_map(fn(name) {
+      option.map(name.1, fn(seed) { #(name.0, seed) }) |> option.to_result(Nil)
+    })
+  // the parent's slots are the names', then the lexical refs'
+  let #(name_slots, lexical_slots) =
+    list.split(parent_slots, list.length(captures))
+  let opts =
+    scope.AnalyzeOpts(
+      ..unseeded,
+      parent_names: dict.from_list(list.zip(
+        list.map(captures, fn(capture) { capture.0 }),
+        name_slots,
       )),
+      parent_seeds: dict.from_list(captures),
       lexical_captures: dict.from_list(list.zip(
         list.map(lexical_seeds, fn(seed) { seed.0 }),
         lexical_slots,
@@ -86,7 +101,6 @@ pub fn compile_function_alone(
           new_target: boxed(lexical.NewTargetRef),
         )
       },
-      root_may_own_lexical: False,
     )
   let tree = scope_analysis.finalize(scopes, opts)
   use #(child, tree) <- result.map(
@@ -532,19 +546,22 @@ fn lazy_function(
   source: scope.FnSource,
 ) -> LazyFunction {
   let own = scope.get(tree, child.scope_id)
-  let seeds =
-    list.map(info.captures, fn(capture) {
-      let assert Ok(binding) = dict.get(own.bindings, capture.name)
+  let captured =
+    set.from_list(list.map(info.captures, fn(capture) { capture.name }))
+  let free =
+    list.sort(set.to_list(info.free), string.compare)
+    |> list.map(fn(name) {
+      use <- bool.guard(!set.contains(captured, name), None)
+      let assert Ok(binding) = dict.get(own.bindings, name)
         as "compiler: a captured name is not bound in its function's scope"
-      scope.CaptureSeed(binding.boxed, binding.declared_kind)
+      Some(scope.CaptureSeed(binding.boxed, binding.declared_kind))
     })
   LazyFunction(
     bytes: unit.bytes,
     is_module: unit.is_module,
     source:,
     name: child.name,
-    capture_names: list.map(info.captures, fn(capture) { capture.name }),
-    capture_seeds: lazy.pack_seeds(seeds),
+    free: lazy.pack_free(free),
     lexical: {
       use ref <- lazy.pack_lexical
       case dict.has_key(info.lexical_captures, ref) {
