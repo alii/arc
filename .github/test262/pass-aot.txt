@@ -49038,6 +49038,7 @@ staging/sm/lexical-environment/block-scoped-functions-annex-b-same-name.js
 staging/sm/lexical-environment/block-scoped-functions-annex-b.js
 staging/sm/lexical-environment/block-scoped-functions-hoisted-tdz.js
 staging/sm/lexical-environment/block-scoped-functions-strict.js
+staging/sm/lexical-environment/bug-1216623.js
 staging/sm/lexical-environment/catch-body.js
 staging/sm/lexical-environment/const-declaration-in-for-loop.js
 staging/sm/misc/bug1126318.js
