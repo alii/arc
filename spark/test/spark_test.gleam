@@ -1,9 +1,11 @@
-import arc/engine.{type Engine, Returned, Threw}
+import arc/engine.{type Engine, OnFirstCall, Returned, Threw}
+import arc/hints
 import arc/host.{AlreadySettled, Resumed}
 import arc/host_hooks.{HostHooks}
 import arc/module/loader
 import arc/rt/types.{KStr, classify}
 import gleam/bit_array
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option
@@ -4673,4 +4675,30 @@ pub fn blob_file_formdata_match_node_test() {
       "formData 5 2041032211",
       "finished",
     ]
+}
+
+pub fn a_script_s_functions_can_wait_for_their_first_calls_test() {
+  let source =
+    "function joined(a, b) { /* long enough to be worth leaving for later */ return a + '/' + b; }
+     function unused(a) { /* long enough to be worth leaving for later */ return a; }
+     joined('/a', 'b')"
+  let load = fn(except) {
+    let assert Ok(#(Returned(value), script, rt)) =
+      spark.eval_script(
+        node_runtime(),
+        source,
+        compile_functions: OnFirstCall(except:),
+      )
+    assert classify(value) == KStr("/a/b")
+    #(
+      engine.learned_hints(spark.engine(rt), script),
+      // how many functions were compiled on a first call
+      dict.size(engine.agent(spark.engine(rt)).store.meta.lazy_code),
+    )
+  }
+  let #(learned, late) = load(hints.none())
+  assert late == 1
+  // what that run compiled late is compiled at load by the next, which has
+  // nothing more to learn
+  assert load(learned) == #(learned, 0)
 }

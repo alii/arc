@@ -1,5 +1,8 @@
 import arc/bytecode/key
-import arc/engine.{type Engine, type EvalError, type Outcome, Returned, Threw}
+import arc/engine.{
+  type Engine, type EvalError, type FunctionCompile, type Outcome, type Script,
+  Returned, Threw,
+}
 import arc/host
 import arc/module/loader
 import arc/rt/async as rt_async
@@ -496,6 +499,23 @@ pub fn eval(
     drain(rt),
   ))
   #(outcome, Runtime(..rt, engine: eng))
+}
+
+/// eval, choosing when the script's functions are compiled: worth it for a
+/// large script of which little runs. `engine.learned_hints(engine(rt),
+/// script)` then says what to compile at load next time
+pub fn eval_script(
+  rt: Runtime(host),
+  source: String,
+  compile_functions functions: FunctionCompile,
+) -> Result(#(Outcome, Script, Runtime(host)), EvalError(host)) {
+  use #(outcome, script, eng) <- result.map(engine.eval_script(
+    rt.engine,
+    source,
+    compile_functions: functions,
+    drain: drain(rt),
+  ))
+  #(outcome, script, Runtime(..rt, engine: eng))
 }
 
 /// call a js function and run its microtasks
