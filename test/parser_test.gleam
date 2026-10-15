@@ -716,3 +716,29 @@ pub fn for_head_no_in_stops_at_function_boundary_test() {
   ]
   |> report("for-head [In] boundary cases failed")
 }
+
+// §13.2.5, §15.4: a getter or setter is neither async nor a generator
+pub fn an_accessor_is_neither_async_nor_a_generator_test() {
+  list.each(
+    [
+      "({ async get x() {} })",
+      "({ async set x(v) {} })",
+      "({ get *x() {} })",
+      "({ set *x(v) {} })",
+      "class A { async get x() {} }",
+      "class A { static async set x(v) {} }",
+      "class A { get *x() {} }",
+    ],
+    fn(src) {
+      let assert Error(_) = parser.parse(src, parser.Script)
+        as "an async or generator accessor parsed"
+    },
+  )
+  // get, set and async are still names where they are not prefixes
+  let assert Ok(Nil) =
+    expect_parses(
+      "({ get x() {}, set x(v) {}, async m() {}, *g() {}, async *ag() {}, get() {}, set() {}, async() {}, get async() {} });
+       class A { get x() {} static set x(v) {} async m() {} *g() {} async *ag() {} get() {} set() {} async() {} static get async() {} }",
+      parser.Script,
+    )
+}

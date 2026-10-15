@@ -3274,6 +3274,11 @@ fn parse_class_element(
   // get * is a field named get plus an asi generator
   let #(p3, prefix) =
     parse_method_prefix(p2, ends_class_element_name, star_ends_accessor: True)
+  // §15.4 a getter or setter is not async
+  use <- bool.guard(
+    prefix.accessor != NoAccessor && prefix.is_async,
+    Error(UnexpectedToken(pos_of(p2), Async)),
+  )
   // snapshot to diff out computed-key scopes
   let key_before = scope_builder.children_newest_first(p3.scopes, ids.class_id)
   use #(p4, key) <- result.try(parse_property_name(p3))
@@ -5467,6 +5472,15 @@ fn parse_object_property(
 ) -> Result(#(Parser, ast.Property), ParseError) {
   let #(p2, prefix) =
     parse_method_prefix(p, ends_object_property_name, star_ends_accessor: False)
+  // §13.2.5 a getter or setter is neither async nor a generator
+  use <- bool.guard(
+    prefix.accessor != NoAccessor && prefix.is_async,
+    Error(UnexpectedToken(pos_of(p), Async)),
+  )
+  use <- bool.guard(
+    prefix.accessor != NoAccessor && prefix.is_generator,
+    Error(UnexpectedToken(p2.prev_end - 1, Star)),
+  )
   let key_token = peek(p2)
   let shorthand_name = simple_binding_name(p2)
   use #(p3, key) <- result.try(parse_property_name(p2))
