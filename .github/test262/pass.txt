@@ -52277,6 +52277,7 @@ staging/sm/class/fields-static-class-name-binding.js
 staging/sm/class/geterNoExprClosure.js
 staging/sm/class/innerBinding.js
 staging/sm/class/methDefn.js
+staging/sm/class/methDefnGen.js
 staging/sm/class/methodInstallation.js
 staging/sm/class/methodName.js
 staging/sm/class/methodOverwrites.js
