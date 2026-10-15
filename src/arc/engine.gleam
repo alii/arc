@@ -70,6 +70,11 @@ pub type EvaluatedModule {
   ModuleThrew(error: JsVal)
 }
 
+/// An engine keeps script text and long strings as off-heap binaries. On the
+/// BEAM, once a process holds more of those than its `min_bin_vheap_size`
+/// (46422 words unless raised), every other collection it does is a full
+/// one. Raise it with `erlang:process_flag` in the process that runs the
+/// engine.
 pub fn new() -> Engine(host) {
   from_agent(rt_builtins.new_agent(host_hooks.default()))
 }

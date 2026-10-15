@@ -380,6 +380,7 @@ fn halt(code: Int) -> a
 fn preload() -> Nil
 
 pub fn main() -> Nil {
+  roomy_binaries()
   preload()
   case run(argv.load().arguments) {
     Ok(Nil) -> Nil
@@ -389,3 +390,6 @@ pub fn main() -> Nil {
     }
   }
 }
+
+@external(erlang, "spark_cli_ffi", "roomy_binaries")
+fn roomy_binaries() -> Nil

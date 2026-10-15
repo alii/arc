@@ -1,4 +1,5 @@
 -module(spark_cli_ffi).
+-export([roomy_binaries/0]).
 -export([access/2, realpath/1, write/2, env/0, cwd/0, platform/0, arch/0, pid/0, is_tty/1]).
 -export([stat/2, readlink/1, readdir/1, read_file/1]).
 -export([user/0, certificates/0, terminals/0]).
@@ -272,4 +273,10 @@ preload() ->
     Modules = [list_to_atom(filename:basename(Beam, ".beam"))
                || Beam <- filelib:wildcard(filename:join(Packages, "*/ebin/*.beam"))],
     _ = code:ensure_modules_loaded(Modules),
+    nil.
+
+%% past the vm's own floor of 46422 words of long-lived off-heap binaries,
+%% which script text and strings soon are, every other collection is a full one
+roomy_binaries() ->
+    erlang:process_flag(min_bin_vheap_size, 8000000),
     nil.
