@@ -252,14 +252,13 @@ pub fn eval_script(
   use template <- result.map(
     compile_task.run(string.byte_size(source), fn() {
       use #(body, scopes) <- result.try(
-        parser.parse_script(source) |> result.map_error(ParseError),
+        case compile_now {
+          None -> parser.parse_script(source)
+          Some(compile_now) -> parser.parse_script_lazily(source, compile_now:)
+        }
+        |> result.map_error(ParseError),
       )
-      case compile_now {
-        None -> compiler.compile_script(body, scopes)
-        Some(compile_now) ->
-          compiler.compile_script_lazy(body, scopes, compile_now:)
-      }
-      |> result.map_error(CompileError)
+      compiler.compile_script(body, scopes) |> result.map_error(CompileError)
     }),
   )
   let unit_id = rt_store.upcoming_unit_id(engine.agent)

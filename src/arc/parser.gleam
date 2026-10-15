@@ -216,8 +216,23 @@ type Parser {
     import_bindings: Set(String),
     last_expr_name: Option(String),
     scopes: scope_builder.ScopeBuilder,
+    waiting: Waiting,
+    // where a function starts that is called where it is written: the first
+    // thing inside grouping parens or after a `!`
+    called_now_at: Int,
   )
 }
+
+// which plain functions are left for their first calls to compile
+type Waiting {
+  NoneWait
+  // all but the short ones, the ones called where they are written, and
+  // the ones that start at these byte offsets
+  Wait(compile_now: Set(Int))
+}
+
+// what a short function compiles to is smaller than what stands in for it
+const wait_min_bytes = 64
 
 // [+In] for the duration of then
 fn allowing_in(
@@ -368,6 +383,8 @@ fn parser_at(bytes: BitArray, mode: ParseMode, pos: Int, line: Int) -> Parser {
     import_bindings: set.new(),
     last_expr_name: None,
     scopes: scope_builder.init(code_kind, bytes),
+    waiting: NoneWait,
+    called_now_at: -1,
   ))
 }
 
@@ -378,12 +395,18 @@ pub fn parse_function_at(
   bytes: BitArray,
   mode: ParseMode,
   source: scope.FnSource,
+  // the plain functions written inside it are in turn left for their first calls
+  lazy lazy: Bool,
 ) -> Result(#(ast.FunctionLiteral, scope_builder.ScopeBuilder), ParseError) {
   let p = parser_at(bytes, mode, source.start, source.line)
   let p =
     Parser(
       ..p,
       ctx: GrammarContext(..p.ctx, strict: source.strict || mode == Module),
+      waiting: case lazy {
+        True -> Wait(compile_now: set.new())
+        False -> NoneWait
+      },
     )
   let is_async = peek(p) == Async
   case source.form {
@@ -478,9 +501,23 @@ fn arrow_inherits(outer: Parser) -> scope.ArrowInherits {
   )
 }
 
-// the function fn_id names has just been parsed to its last token
-fn note_fn_end(p: Parser, fn_id: scope.ScopeId) -> Parser {
-  Parser(..p, scopes: scope_builder.set_fn_end(p.scopes, fn_id, p.prev_end))
+// the function fn_id names has just been parsed to its last token; `outer`
+// is the parser at its first. Settles whether it waits for its first call
+fn close_fn(p: Parser, fn_id: scope.ScopeId, outer: Parser) -> Parser {
+  let scopes = scope_builder.set_fn_end(p.scopes, fn_id, p.prev_end)
+  let waits = case p.waiting, scope_builder.fn_info_at(scopes, fn_id).source {
+    Wait(compile_now:), Some(source) ->
+      source.end - source.start >= wait_min_bytes
+      && !set.contains(compile_now, source.start)
+      && source.start != outer.called_now_at
+      // a direct eval inside it sees its names as they are laid out
+      && scopes.eval_marks == outer.scopes.eval_marks
+    NoneWait, _ | _, None -> False
+  }
+  Parser(..p, scopes: case waits {
+    True -> scope_builder.set_fn_waits(scopes, fn_id)
+    False -> scopes
+  })
 }
 
 // notes where a plain function starts so it can be parsed again alone. A
@@ -529,6 +566,17 @@ pub fn parse_script(
 ) -> Result(#(List(ast.StmtWithLine), scope_builder.ScopeBuilder), ParseError) {
   use p <- init_parser(source, Script)
   script_body(p)
+}
+
+/// parse_script, marking each plain function to be left for its first call
+/// to compile: all but the short ones, the ones called where they are
+/// written, and the ones whose text starts at a `compile_now` byte offset
+pub fn parse_script_lazily(
+  source: String,
+  compile_now compile_now: Set(Int),
+) -> Result(#(List(ast.StmtWithLine), scope_builder.ScopeBuilder), ParseError) {
+  use p <- init_parser(source, Script)
+  script_body(Parser(..p, waiting: Wait(compile_now:)))
 }
 
 pub fn parse_module(
@@ -2534,7 +2582,7 @@ fn parse_function_declaration(
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(p_fn) |> restore_context_fn(p),
   )
-  let p5 = note_fn_end(p5, p_fn.scopes.current)
+  let p5 = close_fn(p5, p_fn.scopes.current, p)
   use p6 <- result.map(case name, declares_name {
     None, _ | _, False -> Ok(p5)
     Some(name), True ->
@@ -3991,7 +4039,7 @@ fn finish_arrow(
 ) -> Result(#(Parser, ast.Expression), ArrowAttempt) {
   use #(p_body, body) <- result.try(result.map_error(body_result, ArrowError))
   let body_end = p_body.prev_end
-  let p_body = note_fn_end(p_body, p_body.scopes.current_fn)
+  let p_body = close_fn(p_body, p_body.scopes.current_fn, outer)
   let p_restored = restore_outer_context(p_body, outer)
   // §13.15.1: (x => x) = 1 is invalid
   Ok(#(
@@ -4244,7 +4292,10 @@ fn parse_unary_expression(
       )
       Ok(#(p3, expr))
     }
-    Bang -> unary(advance(p), ast.LogicalNot)
+    Bang -> {
+      let p = advance(p)
+      unary(Parser(..p, called_now_at: pos_of(p)), ast.LogicalNot)
+    }
     Tilde -> unary(advance(p), ast.BitwiseNot)
     Typeof -> unary(advance(p), ast.TypeOf)
     Void -> unary(advance(p), ast.Void)
@@ -5119,6 +5170,7 @@ fn parse_primary_non_identifier(
     LeftParen -> {
       let start = pos_of(p)
       let p2 = advance(p)
+      let p2 = Parser(..p2, called_now_at: pos_of(p2))
       // () without => is an error
       use <- bool.guard(
         peek(p2) == RightParen,
@@ -5501,7 +5553,7 @@ fn parse_function_expression(
   use #(p5, params, body) <- result.map(
     parse_function_params_and_body(p_inner) |> restore_context_fn(p),
   )
-  let p5 = note_fn_end(p5, fn_scope)
+  let p5 = close_fn(p5, fn_scope, p)
   // §15.2.6 nfe name: own scope, declared after body, first wins
   let p5 = case name {
     None -> p5

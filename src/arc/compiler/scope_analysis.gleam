@@ -49,6 +49,7 @@ fn blank_function_info(
     is_arrow: raw.is_arrow,
     is_derived_constructor: raw.is_derived_constructor,
     source: raw.source,
+    waits: raw.waits,
     free: set.new(),
   )
 }

@@ -142,14 +142,8 @@ type Emitter {
     line: Int,
     // child function scope ids in emission order, popped by compile_function_body
     child_fn_cursor: List(ScopeId),
-    // plain functions written in here are left for their first call
-    lazy: Bool,
-    // the next function is called where it is written, so it is compiled now
-    called_now: Bool,
     // the child each kind of lazy function shares
     stub_indices: Dict(CompiledChild, Int),
-    // where functions start that are compiled now though lazy is on
-    compile_now: Set(Int),
   )
 }
 
@@ -202,9 +196,6 @@ pub fn program(
   stmts: List(ast.StmtWithLine),
   tree: scope.ScopeTree,
   deletable_global_vars deletable_global_vars: Bool,
-  lazy lazy: Bool,
-  // with lazy, a function that starts at one of these is compiled all the same
-  compile_now compile_now: Set(Int),
 ) -> Result(EmitOutput, EmitError) {
   let script_strict = ast_util.has_use_strict_directive(stmts)
   let e =
@@ -212,8 +203,6 @@ pub fn program(
       ..new_emitter(tree, root_scope_id),
       strict: script_strict,
       deletable_global_vars:,
-      lazy:,
-      compile_now:,
     )
   emit_top_level_body(e, stmts, script_strict:, vars_to_global: True)
 }
@@ -253,7 +242,6 @@ pub fn function_alone(
   name: Option(String),
   strict strict: Bool,
   code_kind code_kind: lexical.CodeKind,
-  lazy lazy: Bool,
 ) -> Result(#(CompiledChild, scope.ScopeTree), EmitError) {
   let ast.FunctionLiteral(
     name: written,
@@ -269,8 +257,7 @@ pub fn function_alone(
     scope.FnArrow(_) -> Arrow(is_async:)
   }
   // an arrow takes its code kind from here; the others set their own
-  let root =
-    Emitter(..new_emitter(tree, root_scope_id), strict:, code_kind:, lazy:)
+  let root = Emitter(..new_emitter(tree, root_scope_id), strict:, code_kind:)
   use #(child, root) <- result.map(compile_function_now(
     root,
     name,
@@ -291,11 +278,7 @@ pub fn module(
   let e = Emitter(..new_emitter(tree, root_scope_id), strict: True)
   let e = enter_root_scope(e)
 
-  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(
-    e,
-    stmts,
-    eager: True,
-  ))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   let hoisted_funcs =
     list.filter_map(hoisted_funcs, fn(hf) {
@@ -890,11 +873,7 @@ fn emit_top_level_body(
         emit_op(e, opcode.DeclareGlobalLex(name, is_const))
       })
   }
-  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(
-    e,
-    stmts,
-    eager: False,
-  ))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   use e <- result.try(emit_stmts_tail(e, stmts))
   let Finished(code:, constants:, children:) = finish(e)
@@ -932,10 +911,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     current_scope: fn_id,
     scope_cursor: block_child_scopes(tree, fn_id),
     child_fn_cursor: scope.child_function_scopes(tree, fn_id),
-    lazy: False,
-    called_now: False,
     stub_indices: dict.new(),
-    compile_now: set.new(),
     field_init: NoFieldInit,
     in_block: False,
     deletable_global_vars: False,
@@ -2268,7 +2244,7 @@ fn emit_block_declarations(
   e: Emitter,
   body: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
-  use #(funcs, e) <- result.map(collect_hoisted_funcs(e, body, eager: False))
+  use #(funcs, e) <- result.map(collect_hoisted_funcs(e, body))
   list.fold(funcs, e, fn(e, hf) {
     let #(name, make) = hf
     let e = emit_op(e, make)
@@ -2394,13 +2370,10 @@ fn emit_stmts_tail_value(
 fn collect_hoisted_funcs(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
-  // module declarations are instantiated by the linker, which needs them whole
-  eager eager: Bool,
 ) -> Result(#(List(#(String, opcode.Op)), Emitter), EmitError) {
   use #(funcs_rev, e) <- result.map(
     list.try_fold(stmts, #([], e), fn(acc, located) {
       let #(funcs, e) = acc
-      let e = Emitter(..e, called_now: eager)
       case ast_util.peel_labels(located.statement) {
         ast.FunctionDeclaration(
           Some(ast.NamedBinding(name, _)),
@@ -2423,7 +2396,7 @@ fn collect_hoisted_funcs(
       }
     }),
   )
-  #(list.reverse(funcs_rev), Emitter(..e, called_now: False))
+  #(list.reverse(funcs_rev), e)
 }
 
 // each hoisted function with the op that makes its closure
@@ -2569,13 +2542,7 @@ fn compile_function_body(
   body: FnBody,
   shape shape: FunctionShape,
 ) -> Result(#(CompiledChild, Emitter), EmitError) {
-  let called_now = parent.called_now
-  let parent = Emitter(..parent, called_now: False)
-  let source = case called_now {
-    True -> None
-    False -> lazy_source(parent, shape)
-  }
-  case source {
+  case waiting_source(parent, shape) {
     None -> compile_function_now(parent, name, params, body, shape:)
     Some(#(source, fn_id, rest)) -> {
       let FnTraits(is_arrow:, is_generator:, is_async:, is_constructor:, ..) =
@@ -2663,50 +2630,20 @@ fn closure_op(child: CompiledChild, index: Int) -> opcode.Op {
   }
 }
 
-// (function () {})() and (function () {}).call(x): leaving such a function
-// for its first call would only parse it twice
-fn calls_function_expression(callee: ast.Expression) -> Bool {
-  case ast_util.unwrap_parens(callee) {
-    ast.FunctionExpression(..) | ast.ArrowFunctionExpression(..) -> True
-    ast.MemberExpression(object:, property: ast.Dot(name: "call", ..), ..)
-    | ast.MemberExpression(object:, property: ast.Dot(name: "apply", ..), ..) ->
-      case ast_util.unwrap_parens(object) {
-        ast.FunctionExpression(..) -> True
-        _ -> False
-      }
-    _ -> False
-  }
-}
-
-// a function expression wrapped in parentheses is, by long habit, one that
-// is about to be called
-fn hint_called_now(e: Emitter, inner: ast.Expression) -> Emitter {
-  case inner {
-    ast.FunctionExpression(..) -> Emitter(..e, called_now: True)
-    _ -> e
-  }
-}
-
-const lazy_min_bytes = 64
-
-// the next child function, when it is one to leave for its first call
-fn lazy_source(
+// the next child function, when the parser left it for its first call
+fn waiting_source(
   parent: Emitter,
   shape: FunctionShape,
 ) -> Option(#(scope.FnSource, ScopeId, List(ScopeId))) {
-  use <- bool.guard(!parent.lazy, None)
   case shape, parent.child_fn_cursor {
     FnDecl(..), [fn_id, ..rest]
     | FnExpr(..), [fn_id, ..rest]
     | Arrow(..), [fn_id, ..rest]
     -> {
       let info = scope.function_info(parent.scope_tree, fn_id)
-      use <- bool.guard(info.eval_in_subtree, None)
-      use source <- option.then(info.source)
-      // what a short function compiles to is smaller than what stands in for it
-      use <- bool.guard(source.end - source.start < lazy_min_bytes, None)
-      use <- bool.guard(set.contains(parent.compile_now, source.start), None)
-      Some(#(source, fn_id, rest))
+      use <- bool.guard(!info.waits, None)
+      use source <- option.map(info.source)
+      #(source, fn_id, rest)
     }
     _, _ -> None
   }
@@ -2752,8 +2689,6 @@ fn compile_function_now(
   let e =
     Emitter(
       ..new_emitter(parent.scope_tree, fn_id),
-      lazy: parent.lazy,
-      compile_now: parent.compile_now,
       next_label: parent.next_label,
       strict: child_strict,
       is_async:,
@@ -2789,11 +2724,7 @@ fn compile_function_now(
     }
   }
 
-  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(
-    e,
-    stmts,
-    eager: False,
-  ))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
 
   // generators suspend here before the body; async runs eagerly
@@ -3594,8 +3525,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_op(e, opcode.Await)
     }
 
-    ast.ParenthesizedExpression(_, inner) ->
-      emit_expr(hint_called_now(e, inner), inner)
+    ast.ParenthesizedExpression(_, inner) -> emit_expr(e, inner)
 
     ast.RegExpLiteral(_, pattern, flags) -> {
       let e = push_const(e, mk_string(pattern))
@@ -3865,7 +3795,6 @@ fn emit_call(
   use <- bool.lazy_guard(ast_util.chain_has_optional(callee), fn() {
     emit_chain_root(e, expr)
   })
-  let e = Emitter(..e, called_now: calls_function_expression(callee))
   case callee {
     // §13.3.7.1 super(args): parent ctor, new.target, construct, bind this, field init
     ast.SuperExpression(_) -> {
@@ -4156,8 +4085,7 @@ fn emit_named_expr(
 ) -> Result(Emitter, EmitError) {
   case expr {
     // looks through parens: (function(){}) is still anonymous
-    ast.ParenthesizedExpression(_, inner) ->
-      emit_named_expr(hint_called_now(e, inner), inner, name)
+    ast.ParenthesizedExpression(_, inner) -> emit_named_expr(e, inner, name)
     ast.FunctionExpression(_, None, params, body, is_generator, is_async) ->
       emit_function_closure(
         e,

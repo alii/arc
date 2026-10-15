@@ -27,13 +27,9 @@ fn compile_except(source: String, compile_now: List(String)) -> FuncTemplate {
         as "the source has no such words"
       string.byte_size(before)
     })
-  let assert Ok(#(body, scopes)) = parser.parse_script(source)
-  let assert Ok(template) =
-    compiler.compile_script_lazy(
-      body,
-      scopes,
-      compile_now: set.from_list(starts),
-    )
+  let assert Ok(#(body, scopes)) =
+    parser.parse_script_lazily(source, compile_now: set.from_list(starts))
+  let assert Ok(template) = compiler.compile_script(body, scopes)
   template
 }
 

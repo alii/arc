@@ -39,6 +39,7 @@ pub fn compile_function_alone(
   bytes: BitArray,
   is_module is_module: Bool,
   function function: LazyFunction,
+  // the plain functions written inside it are in turn left for their first calls
   lazy lazy: Bool,
 ) -> Result(FuncTemplate, AloneError) {
   let LazyFunction(
@@ -56,7 +57,7 @@ pub fn compile_function_alone(
     False -> parser.Script
   }
   use #(literal, scopes) <- result.try(
-    parser.parse_function_at(bytes, mode, source)
+    parser.parse_function_at(bytes, mode, source, lazy:)
     |> result.map_error(AloneParseError),
   )
   let unseeded =
@@ -111,7 +112,6 @@ pub fn compile_function_alone(
       name,
       strict: source.strict,
       code_kind:,
-      lazy:,
     )
     |> result.map_error(AloneCompileError),
   )
@@ -171,27 +171,6 @@ pub fn compile_script(
     scopes,
     scope.LocalLexical,
     deletable_global_vars: False,
-    lazy: False,
-    compile_now: set.new(),
-  )
-}
-
-/// compile_script, with each plain function left for its first call to
-/// compile, except a function whose text starts at one of the `compile_now`
-/// byte offsets. An error the emitter would raise for a function left for
-/// later is then raised by its first call, not here
-pub fn compile_script_lazy(
-  body: List(ast.StmtWithLine),
-  scopes: scope_builder.ScopeBuilder,
-  compile_now compile_now: Set(Int),
-) -> Result(FuncTemplate, CompileError) {
-  compile_top_level(
-    body,
-    scopes,
-    scope.LocalLexical,
-    deletable_global_vars: False,
-    lazy: True,
-    compile_now:,
   )
 }
 
@@ -277,8 +256,6 @@ pub fn compile_repl(
     scopes,
     scope.GlobalLexical,
     deletable_global_vars: False,
-    lazy: False,
-    compile_now: set.new(),
   )
 }
 
@@ -292,8 +269,6 @@ pub fn compile_eval(
     scopes,
     scope.LocalLexical,
     deletable_global_vars: True,
-    lazy: False,
-    compile_now: set.new(),
   )
 }
 
@@ -366,21 +341,13 @@ fn compile_top_level(
   scopes: scope_builder.ScopeBuilder,
   top_lex: scope.TopLevelLex,
   deletable_global_vars deletable_global_vars: Bool,
-  lazy lazy: Bool,
-  compile_now compile_now: Set(Int),
 ) -> Result(FuncTemplate, CompileError) {
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
   let tree = scope_analysis.finalize(scopes, opts)
-  use out <- result.map(emit.program(
-    stmts,
-    tree,
-    deletable_global_vars:,
-    lazy:,
-    compile_now:,
-  ))
+  use out <- result.map(emit.program(stmts, tree, deletable_global_vars:))
   // functions left for later are compiled from the script's text, so the
   // script hands it over before anything else
-  let out = case lazy {
+  let out = case scopes.any_waits {
     True ->
       emit.EmitOutput(..out, code: [
         opcode.IrFinal(opcode.KeepUnitText(scopes.source, is_module: False)),

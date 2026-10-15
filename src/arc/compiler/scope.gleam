@@ -137,6 +137,8 @@ pub type FunctionInfo {
     is_derived_constructor: Bool,
     // None when the function cannot be compiled alone
     source: Option(FnSource),
+    // the parser left it for its first call to compile
+    waits: Bool,
     // every outer name it or a function inside it uses
     free: Set(String),
   )

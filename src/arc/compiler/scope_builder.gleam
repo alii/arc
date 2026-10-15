@@ -52,6 +52,8 @@ pub type RawFunctionInfo {
     is_derived_constructor: Bool,
     annexb_candidates: List(#(ScopeId, String)),
     source: Option(FnSource),
+    // left for its first call to compile
+    waits: Bool,
   )
 }
 
@@ -60,6 +62,7 @@ const blank_raw_fn_info = RawFunctionInfo(
   is_derived_constructor: False,
   annexb_candidates: [],
   source: None,
+  waits: False,
 )
 
 fn new_raw_scope(
@@ -117,6 +120,10 @@ pub type ScopeBuilder {
     own_lexical_refs: Dict(ScopeId, LexicalRefs),
     // the text every offset in here points into
     source: BitArray,
+    // how many direct evals have been seen
+    eval_marks: Int,
+    // some function was left for its first call
+    any_waits: Bool,
   )
 }
 
@@ -143,6 +150,8 @@ pub fn init(root_kind: ScopeKind, source: BitArray) -> ScopeBuilder {
     try_assign_refs: [],
     own_lexical_refs: dict.new(),
     source:,
+    eval_marks: 0,
+    any_waits: False,
   )
 }
 
@@ -366,7 +375,9 @@ pub fn lexical_ref(sb: ScopeBuilder, ref: LexicalRef) -> ScopeBuilder {
 }
 
 pub fn mark_eval(sb: ScopeBuilder) -> ScopeBuilder {
-  update_current(sb, fn(s) { RawScope(..s, contains_direct_eval: True) })
+  update_current(ScopeBuilder(..sb, eval_marks: sb.eval_marks + 1), fn(s) {
+    RawScope(..s, contains_direct_eval: True)
+  })
 }
 
 pub fn set_children(
@@ -654,6 +665,19 @@ pub fn set_fn_end(sb: ScopeBuilder, fn_id: ScopeId, end: Int) -> ScopeBuilder {
         ),
       )
   }
+}
+
+pub fn set_fn_waits(sb: ScopeBuilder, fn_id: ScopeId) -> ScopeBuilder {
+  let info = fn_info_at(sb, fn_id)
+  ScopeBuilder(
+    ..sb,
+    functions: dict.insert(
+      sb.functions,
+      fn_id,
+      RawFunctionInfo(..info, waits: True),
+    ),
+    any_waits: True,
+  )
 }
 
 // a use strict directive covers the scope it opens and everything inside
