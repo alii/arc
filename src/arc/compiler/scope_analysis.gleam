@@ -67,6 +67,94 @@ pub fn lone_free_names(
   |> list.sort(string.compare)
 }
 
+/// Forgets everything inside the function `fn_id`, whose parse began at the
+/// reading `before` of the builder and has just ended, keeping only what the
+/// code around it can tell: the outer names it reads and writes, and its use
+/// of this, new.target and the like. The analysis of the code around it comes
+/// out as it would with the function whole. Not for a function that holds a
+/// direct eval.
+pub fn forget_inside(
+  builder: ScopeBuilder,
+  fn_id: ScopeId,
+  before before: ScopeBuilder,
+) -> ScopeBuilder {
+  let opts = scope.default_analyze_opts()
+  let acc =
+    finalize_scope(
+      builder,
+      opts,
+      FinalizeState(scopes: dict.new(), functions: dict.new()),
+      fn_id,
+      dict.new(),
+      inherited_strict: False,
+    )
+  let acc = hoist_annexb_block_functions(builder, acc, opts)
+  // nothing outside the function is in this tree, so it is the top of it
+  let assert Ok(top) = dict.get(acc.scopes, fn_id)
+    as "scope_analysis.forget_inside: the function was not finalized"
+  let tree =
+    ScopeTree(
+      scopes: dict.insert(acc.scopes, fn_id, Scope(..top, parent: None)),
+      functions: acc.functions,
+      children_at: builder.children_at,
+      top_lex: opts.top_lex,
+      linker_seeded_exports: opts.linker_seeded_exports,
+      inherited_with_stack: opts.with_stack,
+    )
+  let #(refs, writes, try_writes) =
+    scope_builder.recorded_since(builder, before)
+  let reads = resolve_own_reads(tree, builder, refs)
+  let own_by_fn =
+    collect_own_facts(
+      tree,
+      reads.free,
+      builder.own_lexical_refs,
+      fn_id,
+      dict.new(),
+    )
+  let subtree_by_fn =
+    collect_subtree_facts(
+      tree,
+      own_by_fn,
+      scopes_by_function(tree),
+      fn_id,
+      dict.new(),
+    )
+  let facts =
+    collect_write_facts(
+      tree,
+      builder,
+      subtree_by_fn,
+      reads.arguments,
+      writes_by_function(tree, builder, writes, fn(ref) { ref.scope }),
+      writes_by_function(tree, builder, try_writes, fn(ref) { ref.scope }),
+      fn_id,
+      WriteFacts(
+        assigned: dict.new(),
+        try_assigned: dict.new(),
+        refs_arguments: set.new(),
+        outward: dict.new(),
+      ),
+    )
+  let outward =
+    dict.get(facts.outward, fn_id)
+    |> result.unwrap(Outward(writes: dict.new(), try_writes: []))
+  scope_builder.forget_inside(
+    builder,
+    fn_id,
+    before:,
+    free: set.to_list(subtree_facts(subtree_by_fn, fn_id).transitive_free),
+    writes: dict.to_list(outward.writes),
+    try_writes: list.map(outward.try_writes, fn(write) {
+      case write.1 {
+        TryAbove(try_scope) -> #(write.0, Some(try_scope))
+        TryHere(_) | TryBelow -> #(write.0, None)
+      }
+    }),
+    lexical_refs: own_facts(own_by_fn, fn_id).lexical_refs,
+  )
+}
+
 pub fn finalize(builder: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   let root_raw = scope_builder.scope_at(builder, root_scope_id)
   let parent_declared_kind = case root_raw.kind {
@@ -270,7 +358,8 @@ fn hoist_annexb_block_functions(
   acc: FinalizeState,
   opts: AnalyzeOpts,
 ) -> FinalizeState {
-  use acc, fn_id, raw_fi <- dict.fold(builder.functions, acc)
+  use acc, fn_id <- list.fold(dict.keys(acc.functions), acc)
+  let raw_fi = scope_builder.fn_info_at(builder, fn_id)
   use <- bool.guard(raw_fi.annexb_candidates == [], acc)
   let var_is_local =
     root_binding_is_local(
@@ -407,9 +496,13 @@ type OwnReads {
 
 // each read is settled inside the function it is written in: either that
 // function declares the name or it is free there
-fn resolve_own_reads(tree: ScopeTree, builder: ScopeBuilder) -> OwnReads {
+fn resolve_own_reads(
+  tree: ScopeTree,
+  builder: ScopeBuilder,
+  refs: List(scope_builder.NameRef),
+) -> OwnReads {
   let #(_seen, reads) = {
-    use #(seen, reads) as acc, ref <- list.fold(builder.raw_refs, #(
+    use #(seen, reads) as acc, ref <- list.fold(refs, #(
       set.new(),
       OwnReads(free: dict.new(), arguments: set.new()),
     ))
@@ -728,7 +821,7 @@ fn analyze_captures(
   box_try_writes box_try_writes: Bool,
   parent_lexical_boxed parent_lexical_boxed: lexical.LexicalRefs,
 ) -> ScopeTree {
-  let reads = resolve_own_reads(tree, builder)
+  let reads = resolve_own_reads(tree, builder, builder.raw_refs)
   let own_by_fn =
     collect_own_facts(
       tree,

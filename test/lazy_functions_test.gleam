@@ -5,10 +5,12 @@ import arc/host_hooks
 import arc/internal/tuple_array
 import arc/interp/entry
 import arc/parser
+import arc/parser/ast
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion}
 import arc/rt/types.{type JsValKind, KStr}
+import gleam/dict
 import gleam/list
 import gleam/option.{Some}
 import gleam/set
@@ -218,4 +220,52 @@ pub fn an_arrow_in_a_method_reaches_super_test() {
        })()",
     )
     == Ok(KStr("base+derived"))
+}
+
+pub fn a_waiting_function_s_insides_are_forgotten_at_once_test() {
+  let source =
+    "var outer = 1;
+     function waits(a) {
+       /* long enough to be worth leaving for later */
+       var inner = a;
+       { let block = inner; if (block) { let deeper = block; outer = deeper; } }
+       return function nested() { return inner + outer; };
+     }
+     function tiny(a) { return a; }"
+  let assert Ok(#(body, scopes)) =
+    parser.parse_script_lazily(source, compile_now: set.new())
+  // its body is gone from the tree
+  let assert [_, ast.StmtWithLine(statement: waits, ..), ..] = body
+  let assert ast.FunctionDeclaration(body: [], ..) = waits
+  // and so is every scope inside it: the script, the two functions, no more
+  assert dict.size(scopes.scopes) == 3
+  // what is kept is what it does to the names around it; tiny's read of its
+  // own a is the other read, newest first
+  assert list.map(scopes.raw_refs, fn(ref) { ref.name }) == ["a", "outer"]
+  // its write of outer, filed on the function itself, after the script's own
+  assert list.map(scopes.assign_refs, fn(ref) { #(ref.name, ref.scope) })
+    == [#("outer", 1), #("outer", 0)]
+}
+
+pub fn what_a_waiting_function_does_outside_itself_still_counts_test() {
+  assert run(
+      "(function () {
+         var count = 0, kept = 1, guarded = 0;
+         function bump() { /* long enough to be worth leaving for later */ count++; return count; }
+         function read() { /* long enough to be worth leaving for later */ return kept; }
+         function risky() {
+           /* long enough to be worth leaving for later */
+           try { guarded = 1; throw 0; } catch (e) { guarded = 2; }
+           return guarded;
+         }
+         var arrow = () => { /* long enough to be worth leaving for later */ return this.tag + arguments.length; };
+         var deep = function () {
+           /* long enough to be worth leaving for later */
+           return [1].map(() => { /* long enough to be worth leaving for later */ return kept + count; })[0];
+         };
+         bump(); bump();
+         return [count, read(), risky(), guarded, arrow.call({ tag: 'no' }), deep()].join(',');
+       }).call({ tag: 'yes' }, 1, 2)",
+    )
+    == Ok(KStr("2,1,2,2,yes2,3"))
 }

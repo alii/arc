@@ -1,6 +1,7 @@
 import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
+import arc/compiler/scope_analysis
 import arc/compiler/scope_builder
 import arc/internal/bytes
 import arc/module/summary
@@ -403,8 +404,9 @@ pub fn parse_function_at(
     Parser(
       ..p,
       ctx: GrammarContext(..p.ctx, strict: source.strict || mode == Module),
+      // not the function asked for: only the ones inside it wait
       waiting: case lazy {
-        True -> Wait(compile_now: set.new())
+        True -> Wait(compile_now: set.from_list([source.start]))
         False -> NoneWait
       },
     )
@@ -502,8 +504,10 @@ fn arrow_inherits(outer: Parser) -> scope.ArrowInherits {
 }
 
 // the function fn_id names has just been parsed to its last token; `outer`
-// is the parser at its first. Settles whether it waits for its first call
-fn close_fn(p: Parser, fn_id: scope.ScopeId, outer: Parser) -> Parser {
+// is the parser at its first. Settles whether it waits for its first call,
+// and if it does, forgets what is inside it: true then, and its body is the
+// caller's to drop
+fn close_fn(p: Parser, fn_id: scope.ScopeId, outer: Parser) -> #(Parser, Bool) {
   let scopes = scope_builder.set_fn_end(p.scopes, fn_id, p.prev_end)
   let waits = case p.waiting, scope_builder.fn_info_at(scopes, fn_id).source {
     Wait(compile_now:), Some(source) ->
@@ -514,10 +518,13 @@ fn close_fn(p: Parser, fn_id: scope.ScopeId, outer: Parser) -> Parser {
       && scopes.eval_marks == outer.scopes.eval_marks
     NoneWait, _ | _, None -> False
   }
-  Parser(..p, scopes: case waits {
-    True -> scope_builder.set_fn_waits(scopes, fn_id)
+  let scopes = case waits {
     False -> scopes
-  })
+    True ->
+      scope_builder.set_fn_waits(scopes, fn_id)
+      |> scope_analysis.forget_inside(fn_id, before: outer.scopes)
+  }
+  #(Parser(..p, scopes:), waits)
 }
 
 // notes where a plain function starts so it can be parsed again alone. A
@@ -2582,7 +2589,11 @@ fn parse_function_declaration(
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(p_fn) |> restore_context_fn(p),
   )
-  let p5 = close_fn(p5, p_fn.scopes.current, p)
+  let #(p5, forgotten) = close_fn(p5, p_fn.scopes.current, p)
+  let body = case forgotten {
+    True -> []
+    False -> body
+  }
   use p6 <- result.map(case name, declares_name {
     None, _ | _, False -> Ok(p5)
     Some(name), True ->
@@ -4039,7 +4050,11 @@ fn finish_arrow(
 ) -> Result(#(Parser, ast.Expression), ArrowAttempt) {
   use #(p_body, body) <- result.try(result.map_error(body_result, ArrowError))
   let body_end = p_body.prev_end
-  let p_body = close_fn(p_body, p_body.scopes.current_fn, outer)
+  let #(p_body, forgotten) = close_fn(p_body, p_body.scopes.current_fn, outer)
+  let body = case forgotten {
+    True -> ast.ArrowBodyBlock([])
+    False -> body
+  }
   let p_restored = restore_outer_context(p_body, outer)
   // §13.15.1: (x => x) = 1 is invalid
   Ok(#(
@@ -5553,7 +5568,6 @@ fn parse_function_expression(
   use #(p5, params, body) <- result.map(
     parse_function_params_and_body(p_inner) |> restore_context_fn(p),
   )
-  let p5 = close_fn(p5, fn_scope, p)
   // §15.2.6 nfe name: own scope, declared after body, first wins
   let p5 = case name {
     None -> p5
@@ -5568,6 +5582,11 @@ fn parse_function_expression(
           synthetic: True,
         ),
       )
+  }
+  let #(p5, forgotten) = close_fn(p5, fn_scope, p)
+  let body = case forgotten {
+    True -> []
+    False -> body
   }
   let function =
     ast.FunctionExpression(

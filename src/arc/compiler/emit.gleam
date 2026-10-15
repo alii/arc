@@ -2602,7 +2602,10 @@ fn compile_function_body(
           code: [],
           constants: [],
           functions: [],
-          is_strict: parent.strict || ast_util.has_use_strict_directive(stmts),
+          // its body may be gone, so its scope answers for its directive
+          is_strict: parent.strict
+            || ast_util.has_use_strict_directive(stmts)
+            || own.is_strict,
           is_arrow:,
           is_derived_constructor: False,
           is_generator:,

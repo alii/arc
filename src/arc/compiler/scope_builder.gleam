@@ -112,11 +112,15 @@ pub type ScopeBuilder {
     current: ScopeId,
     current_fn: ScopeId,
     raw_refs: List(NameRef),
+    // the length of raw_refs
+    ref_count: Int,
     assign_refs: List(AssignRef),
     // the length of assign_refs
     assign_count: Int,
     try_scopes: List(ScopeId),
     try_assign_refs: List(TryAssignRef),
+    // the length of try_assign_refs
+    try_assign_count: Int,
     own_lexical_refs: Dict(ScopeId, LexicalRefs),
     // the text every offset in here points into
     source: BitArray,
@@ -144,10 +148,12 @@ pub fn init(root_kind: ScopeKind, source: BitArray) -> ScopeBuilder {
     current: root_scope_id,
     current_fn: root_scope_id,
     raw_refs: [],
+    ref_count: 0,
     assign_refs: [],
     assign_count: 0,
     try_scopes: [],
     try_assign_refs: [],
+    try_assign_count: 0,
     own_lexical_refs: dict.new(),
     source:,
     eval_marks: 0,
@@ -317,16 +323,20 @@ fn mark_hoisted_var(
 }
 
 pub fn ref(sb: ScopeBuilder, name: String) -> ScopeBuilder {
-  ScopeBuilder(..sb, raw_refs: [NameRef(sb.current, name), ..sb.raw_refs])
+  ScopeBuilder(
+    ..sb,
+    raw_refs: [NameRef(sb.current, name), ..sb.raw_refs],
+    ref_count: sb.ref_count + 1,
+  )
 }
 
 pub fn assign_ref(sb: ScopeBuilder, name: String) -> ScopeBuilder {
-  let try_assign_refs = case sb.try_scopes {
-    [try_scope, ..] -> [
-      TryAssignRef(scope: sb.current, name:, try_scope:),
-      ..sb.try_assign_refs
-    ]
-    [] -> sb.try_assign_refs
+  let #(try_assign_refs, try_assign_count) = case sb.try_scopes {
+    [try_scope, ..] -> #(
+      [TryAssignRef(scope: sb.current, name:, try_scope:), ..sb.try_assign_refs],
+      sb.try_assign_count + 1,
+    )
+    [] -> #(sb.try_assign_refs, sb.try_assign_count)
   }
   let assign_ref = AssignRef(scope: sb.current, name:, order_stamp: sb.next_id)
   ScopeBuilder(
@@ -334,6 +344,7 @@ pub fn assign_ref(sb: ScopeBuilder, name: String) -> ScopeBuilder {
     assign_refs: [assign_ref, ..sb.assign_refs],
     assign_count: sb.assign_count + 1,
     try_assign_refs:,
+    try_assign_count:,
   )
 }
 
@@ -357,7 +368,12 @@ pub fn reenter_try(
     list.fold(in_catch, sb.try_assign_refs, fn(refs, write) {
       [TryAssignRef(scope: write.scope, name: write.name, try_scope:), ..refs]
     })
-  ScopeBuilder(..sb, try_scopes: [try_scope, ..sb.try_scopes], try_assign_refs:)
+  ScopeBuilder(
+    ..sb,
+    try_scopes: [try_scope, ..sb.try_scopes],
+    try_assign_refs:,
+    try_assign_count: sb.try_assign_count + list.length(in_catch),
+  )
 }
 
 pub fn lexical_ref(sb: ScopeBuilder, ref: LexicalRef) -> ScopeBuilder {
@@ -833,4 +849,88 @@ pub fn with_depth(sb: ScopeBuilder) -> Int {
     With(_) -> acc + 1
     _ -> acc
   })
+}
+
+/// the reads, writes and guarded writes recorded since `before`, an earlier
+/// reading of this builder
+pub fn recorded_since(
+  sb: ScopeBuilder,
+  before: ScopeBuilder,
+) -> #(List(NameRef), List(AssignRef), List(TryAssignRef)) {
+  #(
+    list.take(sb.raw_refs, sb.ref_count - before.ref_count),
+    list.take(sb.assign_refs, sb.assign_count - before.assign_count),
+    list.take(sb.try_assign_refs, sb.try_assign_count - before.try_assign_count),
+  )
+}
+
+/// Forgets everything inside the function `fn_id`, whose parse began at the
+/// reading `before` and has just ended, and leaves in its place what the code
+/// around it can tell: the function with no names of its own, reading each of
+/// `free`, writing each of `writes` (with its latest order stamp) and each of
+/// `try_writes` (under the try block given, or one of its own when None), and
+/// using `lexical_refs`.
+pub fn forget_inside(
+  sb: ScopeBuilder,
+  fn_id: ScopeId,
+  before before: ScopeBuilder,
+  free free: List(String),
+  writes writes: List(#(String, Int)),
+  try_writes try_writes: List(#(String, Option(ScopeId))),
+  lexical_refs lexical_refs: LexicalRefs,
+) -> ScopeBuilder {
+  let own = scope_at(sb, fn_id)
+  // a body block that takes the vars of a function with non-simple
+  // parameters is where its use strict directive lands
+  let is_strict =
+    own.is_strict
+    || list.any(children_newest_first(sb, fn_id), fn(id) {
+      let child = scope_at(sb, id)
+      child.is_var_boundary && child.is_strict
+    })
+  let inside = inside_ids(fn_id + 1, sb.next_id, [])
+  let scopes =
+    list.fold(inside, sb.scopes, dict.delete)
+    |> dict.insert(
+      fn_id,
+      RawScope(
+        ..new_raw_scope(fn_id, own.parent, fn_id, own.kind, is_strict:),
+        source_tag: own.source_tag,
+      ),
+    )
+  let info = fn_info_at(sb, fn_id)
+  ScopeBuilder(
+    ..sb,
+    scopes:,
+    functions: list.fold(inside, sb.functions, dict.delete)
+      |> dict.insert(fn_id, RawFunctionInfo(..info, annexb_candidates: [])),
+    children_at: list.fold(inside, sb.children_at, dict.delete)
+      |> dict.insert(fn_id, []),
+    raw_refs: list.fold(free, before.raw_refs, fn(refs, name) {
+      [NameRef(fn_id, name), ..refs]
+    }),
+    ref_count: before.ref_count + list.length(free),
+    assign_refs: list.fold(writes, before.assign_refs, fn(refs, write) {
+      [AssignRef(scope: fn_id, name: write.0, order_stamp: write.1), ..refs]
+    }),
+    assign_count: before.assign_count + list.length(writes),
+    try_assign_refs: list.fold(
+      try_writes,
+      before.try_assign_refs,
+      fn(refs, write) {
+        let try_scope = option.unwrap(write.1, fn_id)
+        [TryAssignRef(scope: fn_id, name: write.0, try_scope:), ..refs]
+      },
+    ),
+    try_assign_count: before.try_assign_count + list.length(try_writes),
+    own_lexical_refs: list.fold(inside, sb.own_lexical_refs, dict.delete)
+      |> dict.insert(fn_id, lexical_refs),
+  )
+}
+
+fn inside_ids(from: Int, until: Int, ids: List(Int)) -> List(Int) {
+  case from >= until {
+    True -> ids
+    False -> inside_ids(from + 1, until, [from, ..ids])
+  }
 }
