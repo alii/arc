@@ -148,6 +148,8 @@ type Emitter {
     called_now: Bool,
     // the child each kind of lazy function shares
     stub_indices: Dict(CompiledChild, Int),
+    // where functions start that are compiled now though lazy is on
+    compile_now: Set(Int),
   )
 }
 
@@ -201,6 +203,8 @@ pub fn program(
   tree: scope.ScopeTree,
   deletable_global_vars deletable_global_vars: Bool,
   lazy lazy: Bool,
+  // with lazy, a function that starts at one of these is compiled all the same
+  compile_now compile_now: Set(Int),
 ) -> Result(EmitOutput, EmitError) {
   let script_strict = ast_util.has_use_strict_directive(stmts)
   let e =
@@ -209,6 +213,7 @@ pub fn program(
       strict: script_strict,
       deletable_global_vars:,
       lazy:,
+      compile_now:,
     )
   emit_top_level_body(e, stmts, script_strict:, vars_to_global: True)
 }
@@ -931,6 +936,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     lazy: False,
     called_now: False,
     stub_indices: dict.new(),
+    compile_now: set.new(),
     field_init: NoFieldInit,
     in_block: False,
     deletable_global_vars: False,
@@ -2700,6 +2706,7 @@ fn lazy_source(
       use source <- option.then(info.source)
       // what a short function compiles to is smaller than what stands in for it
       use <- bool.guard(source.end - source.start < lazy_min_bytes, None)
+      use <- bool.guard(set.contains(parent.compile_now, source.start), None)
       Some(#(source, fn_id, rest))
     }
     _, _ -> None
@@ -2747,6 +2754,7 @@ fn compile_function_now(
     Emitter(
       ..new_emitter(parent.scope_tree, fn_id),
       lazy: parent.lazy,
+      compile_now: parent.compile_now,
       next_label: parent.next_label,
       strict: child_strict,
       is_async:,

@@ -177,15 +177,18 @@ pub fn compile_script(
     scope.LocalLexical,
     deletable_global_vars: False,
     lazy: False,
+    compile_now: set.new(),
   )
 }
 
 /// compile_script, with each plain function left for its first call to
-/// compile. An error the emitter would raise for such a function's body is
-/// then raised by that call, not here
+/// compile, except a function whose text starts at one of the `compile_now`
+/// byte offsets. An error the emitter would raise for a function left for
+/// later is then raised by its first call, not here
 pub fn compile_script_lazy(
   body: List(ast.StmtWithLine),
   scopes: scope_builder.ScopeBuilder,
+  compile_now compile_now: Set(Int),
 ) -> Result(FuncTemplate, CompileError) {
   compile_top_level(
     body,
@@ -193,6 +196,7 @@ pub fn compile_script_lazy(
     scope.LocalLexical,
     deletable_global_vars: False,
     lazy: True,
+    compile_now:,
   )
 }
 
@@ -285,6 +289,7 @@ pub fn compile_repl(
     scope.GlobalLexical,
     deletable_global_vars: False,
     lazy: False,
+    compile_now: set.new(),
   )
 }
 
@@ -299,6 +304,7 @@ pub fn compile_eval(
     scope.LocalLexical,
     deletable_global_vars: True,
     lazy: False,
+    compile_now: set.new(),
   )
 }
 
@@ -377,10 +383,17 @@ fn compile_top_level(
   top_lex: scope.TopLevelLex,
   deletable_global_vars deletable_global_vars: Bool,
   lazy lazy: Bool,
+  compile_now compile_now: Set(Int),
 ) -> Result(FuncTemplate, CompileError) {
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
   let tree = scope_analysis.finalize(scopes, opts)
-  use out <- result.map(emit.program(stmts, tree, deletable_global_vars:, lazy:))
+  use out <- result.map(emit.program(
+    stmts,
+    tree,
+    deletable_global_vars:,
+    lazy:,
+    compile_now:,
+  ))
   finish_top_level(
     out,
     lexical.ScriptCode,

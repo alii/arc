@@ -11,11 +11,29 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion}
 import arc/rt/types.{type JsValKind, KStr}
 import gleam/list
 import gleam/option.{Some}
+import gleam/set
+import gleam/string
 import rt_helpers
 
 fn compile(source: String) -> FuncTemplate {
+  compile_except(source, [])
+}
+
+// lazily, but with the functions that start with these words compiled now
+fn compile_except(source: String, compile_now: List(String)) -> FuncTemplate {
+  let starts =
+    list.map(compile_now, fn(words) {
+      let assert Ok(#(before, _)) = string.split_once(source, words)
+        as "the source has no such words"
+      string.byte_size(before)
+    })
   let assert Ok(#(body, scopes)) = parser.parse_script(source)
-  let assert Ok(template) = compiler.compile_script_lazy(body, scopes)
+  let assert Ok(template) =
+    compiler.compile_script_lazy(
+      body,
+      scopes,
+      compile_now: set.from_list(starts),
+    )
   template
 }
 
@@ -68,6 +86,22 @@ pub fn a_plain_function_is_left_for_its_first_call_test() {
   let assert [stub, tiny] = tuple_array.to_list(script.functions)
   assert is_stub(stub)
   assert !is_stub(tiny)
+}
+
+pub fn a_function_named_to_compile_now_is_not_left_for_later_test() {
+  let source =
+    "function add(a, b) { /* long enough to be worth leaving for later */ return a + b; }
+     function also(a, b, c) { /* long enough to be worth leaving for later */ return a; }
+     var arrow = (a) => { /* long enough to be worth leaving for later */ return a; };
+     add(1, 2)"
+  let script = compile_except(source, ["function also", "(a) =>"])
+  let assert [add] = lazy_functions(script)
+  assert add.name == Some("add")
+  let assert [stub, also, arrow] = tuple_array.to_list(script.functions)
+  assert is_stub(stub)
+  assert !is_stub(also)
+  assert !is_stub(arrow)
+  assert also.name == Some("also")
 }
 
 pub fn calls_recursion_and_captures_test() {
