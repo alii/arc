@@ -236,6 +236,11 @@ pub fn next_symbol_id(st: Agent) -> #(Int, Agent) {
   )
 }
 
+/// the id the next unit to run will be given
+pub fn upcoming_unit_id(st: Agent) -> Int {
+  st.store.meta.next_unit_id
+}
+
 pub fn next_unit_id(st: Agent) -> #(Int, Agent) {
   let meta = st.store.meta
   #(

@@ -1,5 +1,6 @@
 import arc/compiler
 import arc/compiler/compile_task
+import arc/hints.{type Hints}
 import arc/host
 import arc/host_hooks
 import arc/interp/entry
@@ -22,6 +23,7 @@ import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set.{type Set}
 import gleam/string
 
 pub opaque type Engine(host) {
@@ -42,6 +44,21 @@ pub type EvalError(host) {
 pub type Outcome {
   Returned(value: JsVal)
   Threw(error: JsVal)
+}
+
+/// when a script's functions are compiled
+pub type FunctionCompile {
+  /// all of them when the script loads
+  AtLoad
+  /// each on its first call, except the ones the hints name, which are
+  /// compiled when the script loads. Worth it for a large script of which
+  /// little runs: see `learned_hints` for where hints come from
+  OnFirstCall(except: Hints)
+}
+
+/// one script this engine has evaluated
+pub opaque type Script {
+  Script(unit_id: Int, fingerprint: #(Int, Int), compiled_at_load: Set(Int))
 }
 
 pub opaque type Namespace {
@@ -217,6 +234,61 @@ pub fn eval_with(
   )
   let #(completion, st) = entry.run_script(engine.agent, template)
   settle(engine, completion, st, drain)
+}
+
+/// eval_with, choosing when the script's functions are compiled. The Script
+/// names this evaluation to `learned_hints`
+pub fn eval_script(
+  engine: Engine(host),
+  source: String,
+  compile_functions functions: FunctionCompile,
+  drain drain: Drain,
+) -> Result(#(Outcome, Script, Engine(host)), EvalError(host)) {
+  let fingerprint = hints.fingerprint(source)
+  let compile_now = case functions {
+    AtLoad -> None
+    OnFirstCall(except:) -> Some(hints.starts_for(except, fingerprint))
+  }
+  use template <- result.map(
+    compile_task.run(string.byte_size(source), fn() {
+      use #(body, scopes) <- result.try(
+        parser.parse_script(source) |> result.map_error(ParseError),
+      )
+      case compile_now {
+        None -> compiler.compile_script(body, scopes)
+        Some(compile_now) ->
+          compiler.compile_script_lazy(body, scopes, compile_now:)
+      }
+      |> result.map_error(CompileError)
+    }),
+  )
+  let unit_id = rt_store.upcoming_unit_id(engine.agent)
+  let #(completion, st) = entry.run_script(engine.agent, template)
+  let #(outcome, engine) = settle(engine, completion, st, drain)
+  let compiled_at_load = option.unwrap(compile_now, set.new())
+  #(outcome, Script(unit_id:, fingerprint:, compiled_at_load:), engine)
+}
+
+/// The hints `script` was loaded with, plus every function of it this engine
+/// has compiled on a first call since. Loading the same source with them next
+/// time compiles those functions at load, in the engine everything else is
+/// then made from, and leaves the rest for their first calls.
+///
+/// An engine made from the one that evaluated the script (a deserialized
+/// copy, say) answers for what it compiled itself.
+pub fn learned_hints(engine: Engine(host), script: Script) -> Hints {
+  let compiled =
+    dict.keys(engine.agent.store.meta.lazy_code)
+    |> list.filter_map(fn(key) {
+      case key.0 == script.unit_id {
+        True -> Ok(key.1)
+        False -> Error(Nil)
+      }
+    })
+  hints.learned(
+    script.fingerprint,
+    set.union(script.compiled_at_load, set.from_list(compiled)),
+  )
 }
 
 /// a drain that hands the engine to an embedder loop, which must itself run
