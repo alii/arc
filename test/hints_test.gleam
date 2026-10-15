@@ -2,7 +2,11 @@ import arc/engine.{type Engine, type Script, AtLoad, OnFirstCall, Returned}
 import arc/hints.{type Hints}
 import arc/rt/async as rt_async
 import arc/rt/types.{KStr, classify}
+import gleam/bit_array
 import gleam/dict
+import gleam/int
+import gleam/list
+import gleam/string
 
 const source = "
   function used(a, b) { /* long enough to be worth leaving for later */ return a + b; }
@@ -125,5 +129,35 @@ pub fn a_script_compiled_at_load_learns_nothing_test() {
   let learned = engine.learned_hints(eng, script)
   let #(_, eng) = load(source, learned)
   // so loading lazily with it leaves every function for its first call
+  assert compiled_late(eng) == 2
+}
+
+pub fn a_snapshot_keeps_a_lazy_script_s_text_once_test() {
+  // twenty functions never called, in a script of about 40 KB
+  let functions =
+    list.repeat(Nil, 20)
+    |> list.index_map(fn(_, index) {
+      let n = index + 1
+      "function f"
+      <> int.to_string(n)
+      <> "(a) { /* "
+      <> string.repeat("long enough to be left for later. ", 60)
+      <> "*/ return a + "
+      <> int.to_string(n)
+      <> "; }"
+    })
+    |> string.join("\n")
+  let #(_, eng) = load(functions <> "\n'ab!'", hints.none())
+  let assert Ok(empty) = engine.serialize(engine.new())
+  let assert Ok(kept) = engine.serialize(eng)
+  let added = bit_array.byte_size(kept) - bit_array.byte_size(empty)
+  assert added < 2 * string.byte_size(functions)
+
+  // and a function first called in the engine read back is compiled from it
+  let assert Ok(eng) = engine.deserialize(kept)
+  let eng: Engine(Nil) = eng
+  let assert Ok(#(Returned(value), eng)) =
+    engine.eval(eng, "String(f7(1) + f20(1))")
+  assert classify(value) == KStr("29")
   assert compiled_late(eng) == 2
 }

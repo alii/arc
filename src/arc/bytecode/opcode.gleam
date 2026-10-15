@@ -171,8 +171,10 @@ pub type Op {
   // with the function's packed record as the last thing it captures
   MakeLazyClosure(stub_index: Int, record: BitArray)
   // the whole body of a stub: compiles the function its closure's record
-  // names, out of this unit's text, then runs it
-  CompileSelf(bytes: BitArray, is_module: Bool)
+  // names, out of its unit's text, then runs it
+  CompileSelf
+  // first in a script that leaves functions for later: keeps its text for them
+  KeepUnitText(bytes: BitArray, is_module: Bool)
   BoxLocal(index: Int)
   // slots ascending; an uninit box holds tdz, else the slot's value
   BoxLocals(slots: List(Int), uninit: Bool)

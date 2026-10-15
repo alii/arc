@@ -63,7 +63,7 @@ fn lazy_functions(template: FuncTemplate) -> List(LazyFunction) {
 
 fn is_stub(template: FuncTemplate) -> Bool {
   case tuple_array.to_list(template.bytecode) {
-    [opcode.CompileSelf(..), ..] -> True
+    [opcode.CompileSelf, ..] -> True
     _ -> False
   }
 }

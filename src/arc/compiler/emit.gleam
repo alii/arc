@@ -285,11 +285,10 @@ pub fn function_alone(
 pub fn module(
   items: List(ast.ModuleItem),
   tree: scope.ScopeTree,
-  lazy lazy: Bool,
 ) -> Result(EmitOutput, EmitError) {
   let stmts = ast_util.module_items_to_stmts(items)
   let has_module_using = ast_util.has_using_decl(stmts)
-  let e = Emitter(..new_emitter(tree, root_scope_id), strict: True, lazy:)
+  let e = Emitter(..new_emitter(tree, root_scope_id), strict: True)
   let e = enter_root_scope(e)
 
   use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(

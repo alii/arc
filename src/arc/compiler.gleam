@@ -115,12 +115,7 @@ pub fn compile_function_alone(
     )
     |> result.map_error(AloneCompileError),
   )
-  compile_child(child, tree, scope.root_scope_id, Unit(bytes:, is_module:))
-}
-
-// the text a compile works from, which a function left for later keeps
-type Unit {
-  Unit(bytes: BitArray, is_module: Bool)
+  compile_child(child, tree, scope.root_scope_id)
 }
 
 pub fn error_message(err: CompileError) -> String {
@@ -230,14 +225,8 @@ pub fn compile_module(
       linker_seeded_exports: set.from_list(local_export_names(summary.exports)),
     )
   let tree = scope_analysis.finalize(scopes, opts)
-  use out <- result.map(emit.module(items, tree, lazy: False))
-  let template =
-    finish_top_level(
-      out,
-      lexical.ScriptCode,
-      eval_var_env: None,
-      unit: Unit(bytes: scopes.source, is_module: True),
-    )
+  use out <- result.map(emit.module(items, tree))
+  let template = finish_top_level(out, lexical.ScriptCode, eval_var_env: None)
   let has_tla =
     tuple_array.to_list(template.bytecode)
     |> list.any(fn(op) { op == opcode.Await })
@@ -331,12 +320,7 @@ pub fn compile_eval_direct(
     True -> Ok(Nil)
     False -> check_param_scope_var_conflict(body, caller.param_scope_names)
   })
-  Ok(finish_top_level(
-    out,
-    caller.code_kind,
-    eval_var_env: Some(caller.var_env),
-    unit: Unit(bytes: scopes.source, is_module: False),
-  ))
+  Ok(finish_top_level(out, caller.code_kind, eval_var_env: Some(caller.var_env)))
 }
 
 fn direct_eval_opts(
@@ -394,23 +378,26 @@ fn compile_top_level(
     lazy:,
     compile_now:,
   ))
-  finish_top_level(
-    out,
-    lexical.ScriptCode,
-    eval_var_env: Some(GlobalVarEnv),
-    unit: Unit(bytes: scopes.source, is_module: False),
-  )
+  // functions left for later are compiled from the script's text, so the
+  // script hands it over before anything else
+  let out = case lazy {
+    True ->
+      emit.EmitOutput(..out, code: [
+        opcode.IrFinal(opcode.KeepUnitText(scopes.source, is_module: False)),
+        ..out.code
+      ])
+    False -> out
+  }
+  finish_top_level(out, lexical.ScriptCode, eval_var_env: Some(GlobalVarEnv))
 }
 
 fn finish_top_level(
   out: emit.EmitOutput,
   code_kind: CodeKind,
   eval_var_env eval_var_env: Option(VarEnvKind),
-  unit unit: Unit,
 ) -> FuncTemplate {
   let info = scope.function_info(out.tree, scope.root_scope_id)
-  let functions =
-    compile_children(out.children, out.tree, scope.root_scope_id, unit)
+  let functions = compile_children(out.children, out.tree, scope.root_scope_id)
   let local_names = case eval_var_env, info.contains_direct_eval {
     Some(var_env), True -> Some(eval_name_table(var_env, info))
     _, _ -> None
@@ -505,12 +492,9 @@ fn compile_child(
   child: emit.CompiledChild,
   tree: scope.ScopeTree,
   parent_fn_scope: scope.ScopeId,
-  unit: Unit,
 ) -> FuncTemplate {
   use <- option.lazy_unwrap(
-    option.map(child.lazy, fn(lazy) {
-      stub_template(child, lazy.env_size, unit)
-    }),
+    option.map(child.lazy, fn(lazy) { stub_template(child, lazy.env_size) }),
   )
   let info = scope.function_info(tree, child.scope_id)
   let parent_info = scope.function_info(tree, parent_fn_scope)
@@ -522,7 +506,7 @@ fn compile_child(
     True -> Some(eval_name_table(FrameVarEnv, info))
     False -> None
   }
-  let functions = compile_children(child.functions, tree, child.scope_id, unit)
+  let functions = compile_children(child.functions, tree, child.scope_id)
   // coroutine frames park with raw locals, so they never get registers
   let use_registers =
     option.is_none(local_names) && !child.is_generator && !child.is_async
@@ -556,27 +540,22 @@ fn compile_children(
   children: List(emit.CompiledChild),
   tree: scope.ScopeTree,
   parent_fn_scope: scope.ScopeId,
-  unit: Unit,
 ) -> List(FuncTemplate) {
-  list.map(children, compile_child(_, tree, parent_fn_scope, unit))
+  list.map(children, compile_child(_, tree, parent_fn_scope))
 }
 
 // the template every closure of a lazy function of one kind starts with. Its
 // whole body is "compile me". A closure of it captures env_size values, the
 // last being its function's record; then come the four lexical slots, so the
 // first call finds the function object there whatever the real layout is
-fn stub_template(
-  child: emit.CompiledChild,
-  env_size: Int,
-  unit: Unit,
-) -> FuncTemplate {
+fn stub_template(child: emit.CompiledChild, env_size: Int) -> FuncTemplate {
   FuncTemplate(
     name: None,
     arity: 0,
     length: 0,
     local_count: env_size + lexical.owned_lexical_slot_count,
     bytecode: tuple_array.from_list([
-      opcode.CompileSelf(unit.bytes, unit.is_module),
+      opcode.CompileSelf,
       opcode.Return,
     ]),
     constants: tuple_array.from_list([]),

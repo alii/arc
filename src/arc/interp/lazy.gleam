@@ -8,8 +8,8 @@ import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, FuncTemplate}
 import arc/rt/closure as rt_closure
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, Agent, BytecodeFn, KHandle, SObject,
-  Store, StoreMeta, classify,
+  type Agent, type Handle, type JsVal, type UnitText, Agent, BytecodeFn, KHandle,
+  SObject, Store, StoreMeta, UnitText, classify,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -67,14 +67,17 @@ pub fn make_closure(
 /// text, or takes what another closure of it compiled, and lays the frame out
 /// again for the real code. A stub's frame is its captures, the record last,
 /// then this, the function object, the home object and new.target
-pub fn first_call(
-  state: State,
-  bytes: BitArray,
-  is_module: Bool,
-) -> Result(State, StepExit) {
+pub fn first_call(state: State) -> Result(State, StepExit) {
   let assert lexical.OwnedLexicalSlots(base: env_size) = state.func.lexical
     as "interp: a stub's frame is not laid out as one"
   let agent = state.agent
+  use UnitText(bytes:, is_module:) <- result.try(
+    case dict.get(agent.store.meta.unit_texts, state.unit_id) {
+      Ok(text) -> Ok(text)
+      Error(Nil) ->
+        state.throw_syntax_error(state, "a function's unit kept no text")
+    },
+  )
   use function <- result.try(
     case lazy.unpack(record_at(env_size, state.locals)) {
       Ok(function) -> Ok(function)
@@ -128,6 +131,16 @@ pub fn first_call(
     func: template,
     locals:,
     pc: 0,
+  )
+}
+
+/// the text a unit's functions are compiled from on their first calls
+pub fn keep_unit_text(agent: Agent, unit_id: Int, text: UnitText) -> Agent {
+  let store = agent.store
+  let unit_texts = dict.insert(store.meta.unit_texts, unit_id, text)
+  Agent(
+    ..agent,
+    store: Store(..store, meta: StoreMeta(..store.meta, unit_texts:)),
   )
 }
 

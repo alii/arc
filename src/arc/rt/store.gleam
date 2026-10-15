@@ -44,6 +44,7 @@ pub fn new() -> Store {
       plain_index_protos: dict.new(),
       async_context_mapping: types.mk_undefined(),
       lazy_code: dict.new(),
+      unit_texts: dict.new(),
     ),
   )
 }

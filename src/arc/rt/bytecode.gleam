@@ -337,7 +337,7 @@ pub fn birth_name_and_length(
   env: EnvTuple,
 ) -> #(String, Int) {
   let recorded = case tuple_array.element(1, template.bytecode) {
-    opcode.CompileSelf(..) ->
+    opcode.CompileSelf ->
       lazy.unpack(env_record(env_size(env), env)) |> option.from_result
     _ -> option.None
   }

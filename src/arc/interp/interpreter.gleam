@@ -23,15 +23,15 @@ import arc/bytecode/opcode.{
   IncLocalJump, InitGlobalLex, InitialYield, IterateView, IteratorCheckObject,
   IteratorClose, IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest,
   Jump, JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
-  MakeClosure, MakeLazyClosure, MakeMethod, MakeSuppressed, NewObject,
-  NewObjectShaped, NewObjectWith, NewPrivateName, NewRegExp, ObjectRestCopy,
-  ObjectSpread, Pc, Pop, PopTry, PostDecLocal, PostIncLocal, PrivateInDyn,
-  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutElemPop,
-  PutEvalVar, PutField, PutFieldPop, PutGlobal, PutLocal, PutLocalCheckInit,
-  PutLocalConstField, PutLocalLocalField, PutPrivateFieldDyn, PutSuperValue, Ret,
-  Return, Rot3, Safepoint, SetProto, SetupDerivedClass, Swap, Throw,
-  ThrowConstAssign, ThrowReferenceError, ToObject, ToPropertyKey, ToStringVal,
-  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, UnpackArray, Unrot4,
+  KeepUnitText, MakeClosure, MakeLazyClosure, MakeMethod, MakeSuppressed,
+  NewObject, NewObjectShaped, NewObjectWith, NewPrivateName, NewRegExp,
+  ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry, PostDecLocal, PostIncLocal,
+  PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem,
+  PutElemPop, PutEvalVar, PutField, PutFieldPop, PutGlobal, PutLocal,
+  PutLocalCheckInit, PutLocalConstField, PutLocalLocalField, PutPrivateFieldDyn,
+  PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto, SetupDerivedClass, Swap,
+  Throw, ThrowConstAssign, ThrowReferenceError, ToObject, ToPropertyKey,
+  ToStringVal, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, UnpackArray, Unrot4,
   WithDeleteVar, WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef,
   WithPutRefValue, WithPutVar, Yield, YieldStar,
 }
@@ -3888,7 +3888,19 @@ fn conditional_jump(
 
 fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   case op {
-    CompileSelf(bytes, is_module) -> lazy.first_call(state, bytes, is_module)
+    CompileSelf -> lazy.first_call(state)
+    KeepUnitText(bytes, is_module) ->
+      Ok(
+        State(
+          ..state,
+          agent: lazy.keep_unit_text(
+            state.agent,
+            state.unit_id,
+            types.UnitText(bytes:, is_module:),
+          ),
+          pc: state.pc + 1,
+        ),
+      )
 
     // the loop runs these without ever falling back here
     PushConst(_)

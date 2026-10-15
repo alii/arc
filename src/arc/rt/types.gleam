@@ -2202,7 +2202,14 @@ pub type StoreMeta {
     async_context_mapping: JsVal,
     // functions compiled on first call, by unit and where their text starts
     lazy_code: Dict(#(Int, Int), FuncTemplate),
+    // the text of each unit that left functions for their first calls
+    unit_texts: Dict(Int, UnitText),
   )
+}
+
+/// what a function left for its first call is compiled from
+pub type UnitText {
+  UnitText(bytes: BitArray, is_module: Bool)
 }
 
 // field order is abi (arc_rt_layout.hrl), append only

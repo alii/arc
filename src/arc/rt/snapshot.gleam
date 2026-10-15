@@ -5,10 +5,10 @@ import arc/rt/builtins/regexp as b_regexp
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type Job, type Realm, type ShapeDesc,
-  type Store, Agent, CompiledFn, Handle, HostJob, NativeFn, ReactionJob,
-  RegExpConstructor, RegExpN, RegExpObj, ResolveThenableJob, ResumeCompiled,
-  ResumeFrame, SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator,
-  SObject, SPromiseData, SShapedObject, Store,
+  type Store, type UnitText, Agent, CompiledFn, Handle, HostJob, NativeFn,
+  ReactionJob, RegExpConstructor, RegExpN, RegExpObj, ResolveThenableJob,
+  ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox,
+  SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject, Store,
 }
 import gleam/dict.{type Dict}
 import gleam/list
@@ -17,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 22
+pub const abi_version = 23
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(handle: Handle)
@@ -45,6 +45,7 @@ type StoreImage {
     shapes: Dict(Int, ShapeDesc),
     next_shape: Int,
     next_unit_id: Int,
+    unit_texts: Dict(Int, UnitText),
   )
 }
 
@@ -111,6 +112,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       plain_index_protos: _,
       async_context_mapping: _,
       lazy_code: _,
+      unit_texts:,
     ),
   ) = store
   let microtasks = types.job_queue_to_list(microtasks)
@@ -137,6 +139,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       shapes:,
       next_shape:,
       next_unit_id:,
+      unit_texts:,
     )
   let realms = RealmImage(current: realm, realms:, template_objects:)
   Ok(encode(abi_version, store, realms))
@@ -179,6 +182,7 @@ fn restore(image: StoreImage) -> Store {
     shapes:,
     next_shape:,
     next_unit_id:,
+    unit_texts:,
   ) = image
   let fresh = rt_store.new()
   Store(
@@ -204,6 +208,7 @@ fn restore(image: StoreImage) -> Store {
       next_symbol_id:,
       next_unit_id:,
       unhandled_rejections:,
+      unit_texts:,
     ),
   )
 }

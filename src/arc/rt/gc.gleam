@@ -77,6 +77,7 @@ pub fn agent_roots(st: Agent) -> List(Int) {
       plain_index_protos: _,
       async_context_mapping:,
       lazy_code: _,
+      unit_texts: _,
     ),
   ) = st.store
   let acc = push_refs(async_context_mapping, set.to_list(pinned_roots))
