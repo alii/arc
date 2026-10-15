@@ -87,6 +87,18 @@ pub type FnForm {
   FnDeclaration
   FnExpression
   FnArrow(inherits: ArrowInherits)
+  /// a method of an object literal or a class, from its parameters on; never
+  /// a class constructor
+  FnMethod(params: MethodParams, is_generator: Bool, is_async: Bool)
+}
+
+/// what a method's parameter list must be
+pub type MethodParams {
+  AnyParams
+  // a getter takes none
+  GetterParams
+  // a setter takes exactly one
+  SetterParams
 }
 
 /// the grammar an arrow takes from the code it is written in
@@ -113,6 +125,8 @@ pub type FnSource {
     line: Int,
     form: FnForm,
     strict: Bool,
+    // written inside a class body, whose #names it may use
+    in_class: Bool,
   )
 }
 

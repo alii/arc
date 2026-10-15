@@ -46,7 +46,14 @@ fn alone(
       bit_array.from_string(source),
       is_module: False,
       function: LazyFunction(
-        source: scope.FnSource(start:, end: 0, line:, form:, strict:),
+        source: scope.FnSource(
+          start:,
+          end: 0,
+          line:,
+          form:,
+          strict:,
+          in_class: False,
+        ),
         parent_slots:,
         name:,
         arity: 0,

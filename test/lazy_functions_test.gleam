@@ -1,6 +1,7 @@
 import arc/bytecode/lazy.{type LazyFunction}
 import arc/bytecode/opcode
 import arc/compiler
+import arc/compiler/scope
 import arc/host_hooks
 import arc/internal/tuple_array
 import arc/interp/entry
@@ -268,4 +269,70 @@ pub fn what_a_waiting_function_does_outside_itself_still_counts_test() {
        }).call({ tag: 'yes' }, 1, 2)",
     )
     == Ok(KStr("2,1,2,2,yes2,3"))
+}
+
+pub fn methods_and_class_members_wait_too_test() {
+  let source =
+    "var o = {
+       method(a) { /* long enough to be worth leaving for later */ return a; },
+       get value() { /* long enough to be worth leaving for later */ return 1; },
+       *each() { /* long enough to be worth leaving for a later call */ yield 1; },
+     };
+     class C {
+       constructor() { /* long enough, but a constructor goes with its class */ this.x = 1; }
+       member(a) { /* long enough to be worth leaving for later */ return a; }
+       static made() { /* long enough to be worth leaving for later */ return new C(); }
+     }"
+  let script = compile(source)
+  let forms =
+    list.map(lazy_functions(script), fn(function) { function.source.form })
+  assert forms
+    == [
+      scope.FnMethod(scope.AnyParams, False, False),
+      scope.FnMethod(scope.GetterParams, False, False),
+      scope.FnMethod(scope.AnyParams, True, False),
+      scope.FnMethod(scope.AnyParams, False, False),
+      scope.FnMethod(scope.AnyParams, False, False),
+    ]
+  // the two written in the class say so
+  assert list.map(lazy_functions(script), fn(function) {
+      function.source.in_class
+    })
+    == [False, False, False, True, True]
+}
+
+pub fn a_waiting_method_keeps_its_class_test() {
+  assert run(
+      "(function () {
+         class Base {
+           greet() { /* long enough to be worth leaving for later */ return 'base'; }
+         }
+         class Counter extends Base {
+           #count = 0;
+           static #made = 0;
+           constructor() { super(); Counter.#made++; }
+           bump(by = 1) { /* long enough to be worth leaving for later */ this.#count += by; return this; }
+           get count() { /* long enough to be worth leaving for later */ return this.#count; }
+           greet() { /* long enough to be worth leaving for later */ return super.greet() + '+counter'; }
+           has(other) { /* long enough to be worth leaving for later */ return #count in other; }
+           later() { /* long enough to be worth leaving for later */ return () => this.#count + Counter.#made; }
+           static made() { /* long enough to be worth leaving for later */ return Counter.#made; }
+           *[Symbol.iterator]() { /* long enough to be worth leaving for later */ yield this.#count; }
+         }
+         var c = new Counter();
+         new Counter();
+         var o = {
+           __proto__: { name() { /* long enough to be worth leaving for later */ return 'proto'; } },
+           name() { /* long enough to be worth leaving for later */ return super.name() + '+own'; },
+           get twice() { /* long enough to be worth leaving for later */ return this.name() + this.name(); },
+           set value(v) { /* long enough to be worth leaving for later */ this.kept = v * 2; },
+         };
+         o.value = 21;
+         return [c.bump().bump(3).count, c.greet(), c.has(c), c.has({}), c.later()(), Counter.made(),
+                 [...c].join(''), o.name(), o.twice, o.kept, c.bump.name, Counter.made.name, c.bump.length].join(',');
+       })()",
+    )
+    == Ok(KStr(
+      "4,base+counter,true,false,6,2,4,proto+own,proto+ownproto+own,42,bump,made,0",
+    ))
 }

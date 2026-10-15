@@ -404,6 +404,12 @@ pub fn parse_function_at(
     Parser(
       ..p,
       ctx: GrammarContext(..p.ctx, strict: source.strict || mode == Module),
+      // so a class inside it does not take the #names of the class around
+      // it for undeclared
+      class_body_depth: case source.in_class {
+        True -> 1
+        False -> 0
+      },
       // not the function asked for: only the ones inside it wait
       waiting: case lazy {
         True -> Wait(compile_now: set.from_list([source.start]))
@@ -412,6 +418,35 @@ pub fn parse_function_at(
     )
   let is_async = peek(p) == Async
   case source.form {
+    scope.FnMethod(params:, is_generator:, is_async:) -> {
+      let outer = p
+      let ctx =
+        enter_method_context(
+          p,
+          is_generator:,
+          is_async:,
+          is_constructor: False,
+          has_super_class: False,
+        )
+      use #(p, params, body) <- result.map(
+        method_params_and_body(ctx, case params {
+          scope.GetterParams -> GetPrefix
+          scope.SetterParams -> SetPrefix
+          scope.AnyParams -> NoAccessor
+        })
+        |> restore_context_fn(outer),
+      )
+      #(
+        ast.FunctionLiteral(
+          name: None,
+          params:,
+          body:,
+          is_generator:,
+          is_async:,
+        ),
+        p.scopes,
+      )
+    }
     scope.FnDeclaration -> {
       use #(p, function) <- result.map(parse_function_declaration(
         p,
@@ -527,11 +562,16 @@ fn close_fn(p: Parser, fn_id: scope.ScopeId, outer: Parser) -> #(Parser, Bool) {
   #(Parser(..p, scopes:), waits)
 }
 
-// notes where a plain function starts so it can be parsed again alone. A
-// class body or a with block hands a function more than the note holds
+// notes where a function starts so it can be parsed again alone. A field
+// initialiser, a static block, a with block or the constructor of a derived
+// class (whose super() runs the field initialisers) hands a function more
+// than the note holds
 fn note_fn_source(inner: Parser, outer: Parser, form: scope.FnForm) -> Parser {
   use <- bool.guard(
-    outer.class_body_depth > 0 || scope_builder.with_depth(outer.scopes) > 0,
+    outer.ctx.in_class_field_init
+      || outer.ctx.in_static_block
+      || outer.ctx.allow_super_call
+      || scope_builder.with_depth(outer.scopes) > 0,
     inner,
   )
   let source =
@@ -541,6 +581,7 @@ fn note_fn_source(inner: Parser, outer: Parser, form: scope.FnForm) -> Parser {
       line: line_of(outer),
       form:,
       strict: outer.ctx.strict,
+      in_class: outer.class_body_depth > 0,
     )
   Parser(
     ..inner,
@@ -2872,20 +2913,55 @@ fn parse_method_params_body(
   has_extends has_extends: Bool,
 ) -> Result(#(Parser, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   let is_plain = prefix.accessor == NoAccessor
+  let is_generator = prefix.is_generator && is_plain
+  let is_async = prefix.is_async && is_plain
   let ctx =
     enter_method_context(
       p,
-      is_generator: prefix.is_generator && is_plain,
-      is_async: prefix.is_async && is_plain,
+      is_generator:,
+      is_async:,
       is_constructor: is_constructor && is_plain,
       has_super_class: has_extends,
     )
-  case prefix.accessor {
+  // a constructor is compiled with its class; any other method can be
+  // parsed again alone
+  let ctx = case is_constructor && is_plain {
+    True -> ctx
+    False ->
+      note_fn_source(
+        ctx,
+        p,
+        scope.FnMethod(
+          params: case prefix.accessor {
+            GetPrefix -> scope.GetterParams
+            SetPrefix -> scope.SetterParams
+            NoAccessor -> scope.AnyParams
+          },
+          is_generator:,
+          is_async:,
+        ),
+      )
+  }
+  let fn_id = ctx.scopes.current
+  use #(p_done, params, body) <- result.map(
+    method_params_and_body(ctx, prefix.accessor) |> restore_context_fn(outer),
+  )
+  let #(p_done, forgotten) = close_fn(p_done, fn_id, p)
+  #(p_done, params, case forgotten {
+    True -> []
+    False -> body
+  })
+}
+
+fn method_params_and_body(
+  ctx: Parser,
+  accessor: AccessorPrefix,
+) -> Result(#(Parser, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
+  case accessor {
     GetPrefix -> parse_getter_params_and_body(ctx)
     SetPrefix -> parse_setter_params_and_body(ctx)
     NoAccessor -> parse_function_params_and_body(ctx)
   }
-  |> restore_context_fn(outer)
 }
 
 fn parse_formal_parameters(

@@ -3,9 +3,10 @@ import arc/bytecode/lexical.{
   MethodCode, ScriptCode,
 }
 import arc/compiler/scope.{
-  type BindingKind, type CaptureSeed, type FnSource, ArrowInherits,
+  type BindingKind, type CaptureSeed, type FnSource, AnyParams, ArrowInherits,
   CaptureBinding, CaptureSeed, ConstBinding, FnArrow, FnDeclaration,
-  FnExpression, FnNameBinding, FnSource, LetBinding, ParamBinding, VarBinding,
+  FnExpression, FnMethod, FnNameBinding, FnSource, GetterParams, LetBinding,
+  ParamBinding, SetterParams, VarBinding,
 }
 import gleam/bit_array
 import gleam/int
@@ -40,7 +41,7 @@ pub type LazyFunction {
 /// the parent's slots come first, since making a closure reads only those
 pub fn pack(function: LazyFunction) -> BitArray {
   let LazyFunction(
-    source: FnSource(start:, end:, line:, form:, strict:),
+    source: FnSource(start:, end:, line:, form:, strict:, in_class:),
     parent_slots:,
     name:,
     arity:,
@@ -73,6 +74,15 @@ pub fn pack(function: LazyFunction) -> BitArray {
       + flag(allow_in, 64)
       + flag(in_generator, 128)
       + flag(in_async, 256)
+    FnMethod(params:, is_generator:, is_async:) ->
+      1024
+      + flag(is_generator, 2048)
+      + flag(is_async, 4096)
+      + case params {
+        AnyParams -> 0
+        GetterParams -> 8192
+        SetterParams -> 16_384
+      }
   }
   let name_bytes = case name {
     None -> put(<<>>, 0)
@@ -85,7 +95,7 @@ pub fn pack(function: LazyFunction) -> BitArray {
   |> list.append([
     end - start,
     line,
-    flag(strict, 1) + form_bits,
+    flag(strict, 1) + flag(in_class, 512) + form_bits,
     code_kind_number(code_kind),
     lexical,
     arity,
@@ -125,8 +135,18 @@ pub fn unpack(record: BitArray) -> Result(LazyFunction, Nil) {
     }
   })
   let on = fn(bit: Int) { int.bitwise_and(flags, bit) != 0 }
-  let form = case on(4), on(2) {
-    True, _ ->
+  let form = case on(1024), on(4), on(2) {
+    True, _, _ ->
+      FnMethod(
+        params: case on(8192), on(16_384) {
+          True, _ -> GetterParams
+          False, True -> SetterParams
+          False, False -> AnyParams
+        },
+        is_generator: on(2048),
+        is_async: on(4096),
+      )
+    False, True, _ ->
       FnArrow(ArrowInherits(
         allow_new_target: on(8),
         allow_super_property: on(16),
@@ -135,11 +155,18 @@ pub fn unpack(record: BitArray) -> Result(LazyFunction, Nil) {
         in_generator: on(128),
         in_async: on(256),
       ))
-    False, True -> FnExpression
-    False, False -> FnDeclaration
+    False, False, True -> FnExpression
+    False, False, False -> FnDeclaration
   }
   LazyFunction(
-    source: FnSource(start:, end: start + size, line:, form:, strict: on(1)),
+    source: FnSource(
+      start:,
+      end: start + size,
+      line:,
+      form:,
+      strict: on(1),
+      in_class: on(512),
+    ),
     parent_slots:,
     name:,
     arity:,

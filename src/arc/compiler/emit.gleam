@@ -255,6 +255,7 @@ pub fn function_alone(
     scope.FnExpression ->
       FnExpr(self_name: ast.binding_name(written), is_generator:, is_async:)
     scope.FnArrow(_) -> Arrow(is_async:)
+    scope.FnMethod(..) -> Method(is_generator:, is_async:)
   }
   // an arrow takes its code kind from here; the others set their own
   let root = Emitter(..new_emitter(tree, root_scope_id), strict:, code_kind:)
@@ -2551,47 +2552,11 @@ fn compile_function_body(
         StmtsBody(stmts:) -> stmts
         FieldInitsBody(..) -> []
       }
-      let layout = param_layout(params, is_arrow)
-      let code_kind = case is_arrow {
-        True -> parent.code_kind
-        False -> lexical.FunctionCode
-      }
-      let tree = parent.scope_tree
-      let info = scope.function_info(tree, fn_id)
-      let own = scope.get(tree, fn_id)
-      let captured =
-        set.from_list(list.map(info.captures, fn(capture) { capture.name }))
-      let free =
-        list.sort(set.to_list(info.free), string.compare)
-        |> list.map(fn(free_name) {
-          use <- bool.guard(!set.contains(captured, free_name), None)
-          let assert Ok(binding) = dict.get(own.bindings, free_name)
-            as "emit: a captured name is not bound in its function's scope"
-          Some(scope.CaptureSeed(binding.boxed, binding.declared_kind))
-        })
-      let parent_slots =
-        list.map(info.captures, fn(capture) { capture.parent_slot })
-        |> list.append(scope.lexical_capture_parent_slots(
-          info,
-          scope.function_info(tree, parent.fn_scope),
-        ))
-      let record =
-        lazy.pack(LazyFunction(
-          source:,
-          parent_slots:,
-          name:,
-          arity: list.length(layout.fixed),
-          length: expected_argument_count(layout.fixed),
-          free: lazy.pack_free(free),
-          lexical: {
-            use ref <- lazy.pack_lexical
-            case dict.has_key(info.lexical_captures, ref) {
-              True -> Some(lexical.refs_get(info.lexical_boxed, ref))
-              False -> None
-            }
-          },
-          code_kind:,
-        ))
+      let code_kind = waiting_code_kind(parent, shape)
+      let info = scope.function_info(parent.scope_tree, fn_id)
+      let own = scope.get(parent.scope_tree, fn_id)
+      let #(record, captured) =
+        waiting_record(parent, fn_id, source, name, params, shape)
       // name, arity and length are in the record, so stubs differ in little
       let child =
         CompiledChild(
@@ -2618,11 +2583,73 @@ fn compile_function_body(
             capture.name == "arguments"
           }),
           code_kind:,
-          lazy: Some(LazyChild(record:, env_size: list.length(parent_slots) + 1)),
+          lazy: Some(LazyChild(record:, env_size: captured + 1)),
         )
       Ok(#(child, Emitter(..parent, child_fn_cursor: rest)))
     }
   }
+}
+
+fn waiting_code_kind(
+  parent: Emitter,
+  shape: FunctionShape,
+) -> lexical.CodeKind {
+  case shape {
+    Arrow(..) -> parent.code_kind
+    Method(..) -> lexical.MethodCode
+    FnDecl(..) | FnExpr(..) | ClassCtor(..) | ClassInitFn ->
+      lexical.FunctionCode
+  }
+}
+
+// the record a closure of the child function fn_id carries when the function
+// waits for its first call, and how many values such a closure captures
+fn waiting_record(
+  parent: Emitter,
+  fn_id: ScopeId,
+  source: scope.FnSource,
+  name: Option(String),
+  params: List(ast.Pattern),
+  shape: FunctionShape,
+) -> #(BitArray, Int) {
+  let layout = param_layout(params, traits_of(shape).is_arrow)
+  let tree = parent.scope_tree
+  let info = scope.function_info(tree, fn_id)
+  let own = scope.get(tree, fn_id)
+  let captured =
+    set.from_list(list.map(info.captures, fn(capture) { capture.name }))
+  let free =
+    list.sort(set.to_list(info.free), string.compare)
+    |> list.map(fn(free_name) {
+      use <- bool.guard(!set.contains(captured, free_name), None)
+      let assert Ok(binding) = dict.get(own.bindings, free_name)
+        as "emit: a captured name is not bound in its function's scope"
+      Some(scope.CaptureSeed(binding.boxed, binding.declared_kind))
+    })
+  let parent_slots =
+    list.map(info.captures, fn(capture) { capture.parent_slot })
+    |> list.append(scope.lexical_capture_parent_slots(
+      info,
+      scope.function_info(tree, parent.fn_scope),
+    ))
+  let record =
+    lazy.pack(LazyFunction(
+      source:,
+      parent_slots:,
+      name:,
+      arity: list.length(layout.fixed),
+      length: expected_argument_count(layout.fixed),
+      free: lazy.pack_free(free),
+      lexical: {
+        use ref <- lazy.pack_lexical
+        case dict.has_key(info.lexical_captures, ref) {
+          True -> Some(lexical.refs_get(info.lexical_boxed, ref))
+          False -> None
+        }
+      },
+      code_kind: waiting_code_kind(parent, shape),
+    ))
+  #(record, list.length(parent_slots))
 }
 
 // how a closure of this child, which sits at index, is made
@@ -2642,6 +2669,7 @@ fn waiting_source(
     FnDecl(..), [fn_id, ..rest]
     | FnExpr(..), [fn_id, ..rest]
     | Arrow(..), [fn_id, ..rest]
+    | Method(..), [fn_id, ..rest]
     -> {
       let info = scope.function_info(parent.scope_tree, fn_id)
       use <- bool.guard(!info.waits, None)
