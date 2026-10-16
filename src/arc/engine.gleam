@@ -79,6 +79,14 @@ pub fn new() -> Engine(host) {
   from_agent(rt_builtins.new_agent(host_hooks.default()))
 }
 
+/// Keeps everything alive now for good: later garbage collections leave it
+/// alone and walk only what was made since. Call it once the code every user
+/// of this engine shares has been loaded, before handing the engine on.
+/// Nothing kept is ever freed, and a snapshot does not carry the mark.
+pub fn keep_forever(engine: Engine(host)) -> Engine(host) {
+  Engine(..engine, agent: rt_gc.keep_all(engine.agent))
+}
+
 fn from_agent(st: Agent) -> Engine(host) {
   Engine(
     agent: entry.link(st),

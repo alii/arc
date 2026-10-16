@@ -32,7 +32,7 @@
 -define(STORE_META, 15).
 -define(STORE_SIZE, 15).
 -define(STOREMETA_PLAIN_INDEX_PROTOS, 12).
--define(STOREMETA_SIZE, 15).
+-define(STOREMETA_SIZE, 16).
 %% arena marker for a freed cell id
 -define(STORE_FREE_CELL, js_free).
 

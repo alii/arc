@@ -2204,7 +2204,14 @@ pub type StoreMeta {
     lazy_code: Dict(#(Int, Int), FuncTemplate),
     // the text of each unit that left functions for their first calls
     unit_texts: Dict(Int, UnitText),
+    kept: Kept,
   )
+}
+
+/// cells an embedder asked to keep for good: ids below `below`, as `cells`
+/// held them then; a full gc leaves them alone. `below` 0 is nothing kept
+pub type Kept {
+  Kept(below: Int, cells: Arena(Cell), weak_ids: List(Int), count: Int)
 }
 
 /// what a function left for its first call is compiled from

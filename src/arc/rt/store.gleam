@@ -45,6 +45,7 @@ pub fn new() -> Store {
       async_context_mapping: types.mk_undefined(),
       lazy_code: dict.new(),
       unit_texts: dict.new(),
+      kept: types.Kept(below: 0, cells: arena.new(), weak_ids: [], count: 0),
     ),
   )
 }

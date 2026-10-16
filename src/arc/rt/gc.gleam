@@ -13,10 +13,10 @@ import arc/rt/types.{
   BooleanObj, BoundFn, BytecodeFn, CompiledFn, DataViewObj, DateObj, Dense,
   DisposableStackObj, ErrorObj, FinalizationRegistryObj, GeneratorObj, Handle,
   Handler, HostObj, IcCall, IcGlobal, IcInit, IcLiteral, IcOff, IcRead,
-  IdentityPassThrough, IntlObj, IteratorHelperObj, KHandle, MapIterator, MapObj,
-  ModuleNamespace, NativeFn, NoElements, NumberObj, Ordinary, PromiseFulfilled,
-  PromiseObj, PromisePending, PromiseReaction, PromiseRejected, ProxyObj,
-  RawJsonObj, RegExpObj, Registration, ResumeCompiled, ResumeFrame,
+  IdentityPassThrough, IntlObj, IteratorHelperObj, KHandle, Kept, MapIterator,
+  MapObj, ModuleNamespace, NativeFn, NoElements, NumberObj, Ordinary,
+  PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejected,
+  ProxyObj, RawJsonObj, RegExpObj, Registration, ResumeCompiled, ResumeFrame,
   SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject,
   SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, Store,
   StringIterator, StringObj, SymbolObj, TemporalObj, ThrowerPassThrough,
@@ -78,6 +78,7 @@ pub fn agent_roots(st: Agent) -> List(Int) {
       async_context_mapping:,
       lazy_code: _,
       unit_texts: _,
+      kept: _,
     ),
   ) = st.store
   let acc = push_refs(async_context_mapping, set.to_list(pinned_roots))
@@ -392,8 +393,32 @@ pub fn collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
   }
 }
 
-// full; no renumbering, dead ids dropped, next_id falls past highest survivor
+// full; with cells kept for good only the ids above them are walked
 pub fn collect(st: Agent, extra_roots: List(Handle)) -> Agent {
+  case st.store.meta.kept.below {
+    0 -> collect_all(st, extra_roots)
+    _ -> collect_above_kept(st, extra_roots)
+  }
+}
+
+/// Everything alive now is kept for good. Later full gcs leave it alone and
+/// walk only what was made since.
+pub fn keep_all(st: Agent) -> Agent {
+  let st = collect_all(st, [])
+  let store = st.store
+  let meta = store.meta
+  let kept =
+    Kept(
+      below: store.next_id,
+      cells: store.cells,
+      weak_ids: meta.old_weak_ids,
+      count: meta.live_count,
+    )
+  Agent(..st, store: Store(..store, meta: types.StoreMeta(..meta, kept:)))
+}
+
+// no renumbering, dead ids dropped, next_id falls past highest survivor
+fn collect_all(st: Agent, extra_roots: List(Handle)) -> Agent {
   let store = st.store
   let roots = list.fold(extra_roots, agent_roots(st), fn(a, h) { [h.id, ..a] })
   let live = mark_reachable(store.cells, roots, dict.new())
@@ -422,22 +447,94 @@ pub fn collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   )
 }
 
+fn collect_above_kept(st: Agent, extra_roots: List(Handle)) -> Agent {
+  let store = st.store
+  let meta = store.meta
+  let Kept(below:, cells: before, weak_ids:, count:) = meta.kept
+  let Above(cells:, weak_ids:, survivors:, next_id:) =
+    collect_above(st, extra_roots, below, before, weak_ids, fn(_) { True })
+  let live_count = count + survivors
+  Agent(
+    ..st,
+    store: Store(
+      ..store,
+      cells:,
+      next_id:,
+      alloc_since_gc: 0,
+      ics: dict.filter(store.ics, fn(_, entry) { is_read_ic(entry) }),
+      plain_write_protos: dict.new(),
+      meta: types.StoreMeta(
+        ..meta,
+        live_count:,
+        old_gen: cells,
+        young_start: next_id,
+        old_weak_ids: weak_ids,
+        major_live: live_count,
+        minors_since_major: 0,
+        plain_index_protos: dict.new(),
+      ),
+    ),
+  )
+}
+
 // young ids are young_start and up; old cells reach them only if written since
 fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
   let store = st.store
   let meta = store.meta
-  let w = meta.young_start
+  let Above(cells:, weak_ids:, survivors:, next_id: _) =
+    collect_above(
+      st,
+      extra_roots,
+      meta.young_start,
+      meta.old_gen,
+      meta.old_weak_ids,
+      holds_weak_targets,
+    )
+  Agent(
+    ..st,
+    store: Store(
+      ..store,
+      cells:,
+      alloc_since_gc: 0,
+      meta: types.StoreMeta(
+        ..meta,
+        live_count: meta.live_count + survivors,
+        old_gen: cells,
+        young_start: store.next_id,
+        old_weak_ids: weak_ids,
+        minors_since_major: meta.minors_since_major + 1,
+      ),
+    ),
+  )
+}
+
+// next_id is one past the highest survivor
+type Above {
+  Above(cells: Arena(Cell), weak_ids: List(Int), survivors: Int, next_id: Int)
+}
+
+// a gc of the ids from w up; cells below w reach them only where they differ
+// from `before`. Weak containers that `prunes` picks lose their dead entries
+fn collect_above(
+  st: Agent,
+  extra_roots: List(Handle),
+  w: Int,
+  before: Arena(Cell),
+  weak: List(Int),
+  prunes: fn(Cell) -> Bool,
+) -> Above {
+  let store = st.store
   let cells = store.cells
   let roots = list.fold(extra_roots, agent_roots(st), fn(a, h) { [h.id, ..a] })
   let roots =
-    list.fold(arena.diff_below(w, meta.old_gen, cells), roots, fn(acc, id) {
-      case arena.get_option(id, cells), arena.get_option(id, meta.old_gen) {
+    list.fold(arena.diff_below(w, before, cells), roots, fn(acc, id) {
+      case arena.get_option(id, cells), arena.get_option(id, before) {
         Some(cell), Some(before) -> diff_refs(before, cell, acc)
         Some(cell), None -> push_cell_refs(cell, acc)
         None, _ -> acc
       }
     })
-  let #(live, weak) = mark_young(cells, roots, w, dict.new(), meta.old_weak_ids)
+  let #(live, weak) = mark_young(cells, roots, w, dict.new(), weak)
   let is_live = fn(id) { id < w || marked(id, live) }
   let kept = case dict.size(live) * 2 > store.next_id - w {
     True -> reset_dead(cells, w, store.next_id, live)
@@ -452,31 +549,27 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
     list.fold(weak, #(kept, []), fn(acc, id) {
       let #(kept, weak) = acc
       case arena.get_option(id, kept) {
-        Some(SObject(kind: WeakRefObj(..), ..) as cell)
-        | Some(SObject(kind: FinalizationRegistryObj(..), ..) as cell) -> #(
-          arena.set(id, prune_weak_cell(cell, is_live), kept),
-          [id, ..weak],
-        )
-        Some(_) -> #(kept, [id, ..weak])
+        Some(cell) ->
+          case prunes(cell) {
+            True -> #(arena.set(id, prune_weak_cell(cell, is_live), kept), [
+              id,
+              ..weak
+            ])
+            False -> #(kept, [id, ..weak])
+          }
         None -> acc
       }
     })
-  Agent(
-    ..st,
-    store: Store(
-      ..store,
-      cells: kept,
-      alloc_since_gc: 0,
-      meta: types.StoreMeta(
-        ..meta,
-        live_count: meta.live_count + dict.size(live),
-        old_gen: kept,
-        young_start: store.next_id,
-        old_weak_ids: weak,
-        minors_since_major: meta.minors_since_major + 1,
-      ),
-    ),
-  )
+  let next_id = dict.fold(live, w, fn(top, id, _) { int.max(top, id + 1) })
+  Above(cells: kept, weak_ids: weak, survivors: dict.size(live), next_id:)
+}
+
+fn holds_weak_targets(cell: Cell) -> Bool {
+  case cell {
+    SObject(kind: WeakRefObj(..), ..)
+    | SObject(kind: FinalizationRegistryObj(..), ..) -> True
+    _ -> False
+  }
 }
 
 fn reset_dead(
