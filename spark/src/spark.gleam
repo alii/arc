@@ -395,6 +395,11 @@ pub fn engine(rt: Runtime(host)) -> Engine(host) {
   rt.engine
 }
 
+/// Keeps everything loaded so far for good, see `engine.keep_forever`.
+pub fn keep_forever(rt: Runtime(host)) -> Runtime(host) {
+  Runtime(..rt, engine: engine.keep_forever(rt.engine))
+}
+
 /// the require scripts see
 pub fn require_function(rt: Runtime(host)) -> JsVal {
   rt.core.require
