@@ -49,8 +49,7 @@ frame_locals({}, {owned_lexical_slots, _}, This, FnObj, Home, NT, Args, Arity, L
     list_to_tuple([This, FnObj, Home, NT | slots(Args, Arity, LC - 4)]);
 frame_locals(Env, {owned_lexical_slots, _}, This, FnObj, Home, NT, Args, Arity, LC) ->
     N = tuple_size(Env),
-    list_to_tuple(tuple_to_list(Env)
-                  ++ [This, FnObj, Home, NT | slots(Args, Arity, LC - 4 - N)]);
+    list_to_tuple(onto(Env, N, [This, FnObj, Home, NT | slots(Args, Arity, LC - 4 - N)]));
 %% arrows own no this slots
 frame_locals({}, _, _, _, _, _, _, 0, 0) ->
     {};
@@ -99,7 +98,11 @@ frame_locals(Env, _Lexical, _This, _FnObj, _Home, _NT, [], 0, LC)
     Env;
 frame_locals(Env, _Lexical, _This, _FnObj, _Home, _NT, Args, Arity, LC) ->
     N = tuple_size(Env),
-    list_to_tuple(tuple_to_list(Env) ++ slots(Args, Arity, LC - N)).
+    list_to_tuple(onto(Env, N, slots(Args, Arity, LC - N))).
+
+%% the first N elements of Tuple, in order, in front of Tail
+onto(_, 0, Tail) -> Tail;
+onto(Tuple, N, Tail) -> onto(Tuple, N - 1, [element(N, Tuple) | Tail]).
 
 %% duplicate param names own fewer slots than arity
 slots(Args, Arity, Room) when Room >= Arity -> fit(Args, Arity, Room - Arity);
@@ -128,14 +131,24 @@ sloppy_this(_, _) -> miss.
 flush_registers(L, A, B, R0, R1) ->
     put_reg(put_reg(L, A, R0), B, R1).
 
+%% a register that was only read still holds what its slot does; floats are
+%% always written, since not every vm tells 0.0 from -0.0 with =:=
 put_reg(L, S, _) when S < 0 -> L;
-put_reg(L, S, V) -> setelement(S + 1, L, V).
+put_reg(L, S, V) when is_float(V) -> setelement(S + 1, L, V);
+put_reg(L, S, V) ->
+    case element(S + 1, L) =:= V of
+        true -> L;
+        false -> setelement(S + 1, L, V)
+    end.
 
 %% what a closure captured: the leading run of its frame's locals
 captured(_, 0) -> {};
 captured(Locals, Count) ->
-    list_to_tuple(lists:sublist(tuple_to_list(Locals), Count)).
+    list_to_tuple(onto(Locals, Count, [])).
 
 %% the locals at Slots, in order, then Last
 captured_with(Locals, Slots, Last) ->
-    list_to_tuple([element(I + 1, Locals) || I <- Slots] ++ [Last]).
+    list_to_tuple(at(Locals, Slots, Last)).
+
+at(_, [], Last) -> [Last];
+at(Locals, [I | Slots], Last) -> [element(I + 1, Locals) | at(Locals, Slots, Last)].
