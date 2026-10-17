@@ -129,6 +129,37 @@ pub fn guarded3(
   guard_state(guard3(f, state.agent, a, b), state)
 }
 
+// guarded2, but the agent is handed on, so a step that makes several calls
+// builds its State once at the end
+pub fn then2(
+  state: State,
+  agent: Agent,
+  f: fn(Agent, a) -> #(v, Agent),
+  a: a,
+  then: fn(v, Agent) -> Result(r, StepExit),
+) -> Result(r, StepExit) {
+  case guard2(f, agent, a) {
+    Value(value:, agent:) -> then(value, agent)
+    Thrown(thrown:, agent:) ->
+      Error(state.Threw(thrown, state.with_agent(state, agent)))
+  }
+}
+
+pub fn then3(
+  state: State,
+  agent: Agent,
+  f: fn(Agent, a, b) -> #(v, Agent),
+  a: a,
+  b: b,
+  then: fn(v, Agent) -> Result(r, StepExit),
+) -> Result(r, StepExit) {
+  case guard3(f, agent, a, b) {
+    Value(value:, agent:) -> then(value, agent)
+    Thrown(thrown:, agent:) ->
+      Error(state.Threw(thrown, state.with_agent(state, agent)))
+  }
+}
+
 pub fn guarded4(
   state: State,
   f: fn(Agent, a, b, c) -> #(v, Agent),

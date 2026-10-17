@@ -6389,29 +6389,35 @@ fn pure_binop_general(
   op: binop.PureBinOp,
   left: JsVal,
   right: JsVal,
-) -> Result(#(JsVal, State), StepExit) {
+  then: fn(JsVal, Agent) -> Result(r, StepExit),
+) -> Result(r, StepExit) {
   let cmp = fn(f) {
-    use #(r, state) <- result.map(guarded3(state, f, left, right))
-    #(mk_bool(r == 1), state)
+    use r, agent <- guard.then3(state, state.agent, f, left, right)
+    then(mk_bool(r == 1), agent)
   }
   case op {
-    binop.Arith(binop.Sub) -> guarded3(state, rt_ops.sub, left, right)
-    binop.Arith(binop.Mul) -> guarded3(state, rt_ops.mul, left, right)
-    binop.Arith(binop.Div) -> guarded3(state, rt_ops.div, left, right)
-    binop.Arith(binop.Mod) -> guarded3(state, rt_ops.mod, left, right)
-    binop.Arith(binop.Exp) -> guarded3(state, rt_ops.pow, left, right)
+    binop.Arith(binop.Sub) ->
+      guard.then3(state, state.agent, rt_ops.sub, left, right, then)
+    binop.Arith(binop.Mul) ->
+      guard.then3(state, state.agent, rt_ops.mul, left, right, then)
+    binop.Arith(binop.Div) ->
+      guard.then3(state, state.agent, rt_ops.div, left, right, then)
+    binop.Arith(binop.Mod) ->
+      guard.then3(state, state.agent, rt_ops.mod, left, right, then)
+    binop.Arith(binop.Exp) ->
+      guard.then3(state, state.agent, rt_ops.pow, left, right, then)
     binop.Bitwise(binop.BitAnd) ->
-      guarded3(state, rt_ops.bitand_general, left, right)
+      guard.then3(state, state.agent, rt_ops.bitand_general, left, right, then)
     binop.Bitwise(binop.BitOr) ->
-      guarded3(state, rt_ops.bitor_general, left, right)
+      guard.then3(state, state.agent, rt_ops.bitor_general, left, right, then)
     binop.Bitwise(binop.BitXor) ->
-      guarded3(state, rt_ops.bitxor_general, left, right)
+      guard.then3(state, state.agent, rt_ops.bitxor_general, left, right, then)
     binop.Bitwise(binop.ShiftLeft) ->
-      guarded3(state, rt_ops.shl_general, left, right)
+      guard.then3(state, state.agent, rt_ops.shl_general, left, right, then)
     binop.Bitwise(binop.ShiftRight) ->
-      guarded3(state, rt_ops.shr_general, left, right)
+      guard.then3(state, state.agent, rt_ops.shr_general, left, right, then)
     binop.Bitwise(binop.ShiftRightUnsigned) ->
-      guarded3(state, rt_ops.ushr_general, left, right)
+      guard.then3(state, state.agent, rt_ops.ushr_general, left, right, then)
     binop.Compare(binop.Less) -> cmp(rt_ops.lt_i32)
     binop.Compare(binop.LessEq) -> cmp(rt_ops.le_i32)
     binop.Compare(binop.Greater) -> cmp(rt_ops.gt_i32)
@@ -6419,9 +6425,9 @@ fn pure_binop_general(
     binop.Equality(binop.LooseEq) -> cmp(rt_ops.eq_i32_general)
     binop.Equality(binop.LooseNotEq) -> cmp(rt_ops.neq_i32)
     binop.Equality(binop.StrictEq) ->
-      Ok(#(mk_bool(rt_val.strict_eq(left, right)), state))
+      then(mk_bool(rt_val.strict_eq(left, right)), state.agent)
     binop.Equality(binop.StrictNotEq) ->
-      Ok(#(mk_bool(!rt_val.strict_eq(left, right)), state))
+      then(mk_bool(!rt_val.strict_eq(left, right)), state.agent)
   }
 }
 
@@ -6475,14 +6481,14 @@ fn get_elem_step(
         "Cannot read properties of " <> rt_val.nullish_label(receiver),
       )
     _ -> {
-      use #(pk, state) <- result.try(guarded2(state, rt_val.to_property_key, k))
-      use #(val, state) <- result.map(guarded3(
+      use pk, agent <- guard.then2(
         state,
-        rt_obj.get_prop,
-        receiver,
-        pk,
-      ))
-      State(..state, stack: [val, ..rest], pc: state.pc + 1)
+        state.agent,
+        rt_val.to_property_key,
+        k,
+      )
+      use val, agent <- guard.then3(state, agent, rt_obj.get_prop, receiver, pk)
+      Ok(State(..state, agent:, stack: [val, ..rest], pc: state.pc + 1))
     }
   }
 }
@@ -6571,8 +6577,8 @@ fn binop_step(
   right: JsVal,
   rest: List(JsVal),
 ) -> Result(State, StepExit) {
-  use #(r, state) <- result.map(binop_value(state, kind, left, right))
-  State(..state, stack: [r, ..rest], pc: state.pc + 1)
+  use r, agent <- binop_value(state, kind, left, right)
+  Ok(State(..state, agent:, stack: [r, ..rest], pc: state.pc + 1))
 }
 
 fn binop_put_step(
@@ -6583,9 +6589,9 @@ fn binop_put_step(
   rest: List(JsVal),
   dst: Int,
 ) -> Result(State, StepExit) {
-  use #(r, state) <- result.map(binop_value(state, kind, left, right))
+  use r, agent <- binop_value(state, kind, left, right)
   let locals = tuple_array.set_unchecked(dst, r, state.locals)
-  State(..state, stack: rest, locals:, pc: state.pc + 1)
+  Ok(State(..state, agent:, stack: rest, locals:, pc: state.pc + 1))
 }
 
 fn binop_value(
@@ -6593,22 +6599,30 @@ fn binop_value(
   kind: binop.ClassifiedBinOp,
   left: JsVal,
   right: JsVal,
-) -> Result(#(JsVal, State), StepExit) {
+  then: fn(JsVal, Agent) -> Result(State, StepExit),
+) -> Result(State, StepExit) {
   case kind {
     binop.InstanceOfOp -> {
-      use #(r, state) <- result.map(guarded3(
+      use r, agent <- guard.then3(
         state,
+        state.agent,
         rt_ops.instance_of,
         left,
         right,
-      ))
-      #(mk_bool(r), state)
+      )
+      then(mk_bool(r), agent)
     }
     binop.InOp ->
       case rt_val.is_object(right) {
         True -> {
-          use #(r, state) <- result.map(guarded3(state, rt_ops.in, left, right))
-          #(mk_bool(r), state)
+          use r, agent <- guard.then3(
+            state,
+            state.agent,
+            rt_ops.in,
+            left,
+            right,
+          )
+          then(mk_bool(r), agent)
         }
         False ->
           state.throw_type_error(
@@ -6619,8 +6633,9 @@ fn binop_value(
               <> inspect(state, right),
           )
       }
-    binop.AddOp -> guarded3(state, rt_ops.add, left, right)
-    binop.PureOp(op) -> pure_binop_general(state, op, left, right)
+    binop.AddOp ->
+      guard.then3(state, state.agent, rt_ops.add, left, right, then)
+    binop.PureOp(op) -> pure_binop_general(state, op, left, right, then)
   }
 }
 
@@ -6633,10 +6648,10 @@ fn fused_cmp_jump(
   when when: Bool,
 ) -> Result(State, StepExit) {
   let next_pc = state.pc + 1
-  use #(r, state) <- result.map(pure_binop_general(state, kind, left, right))
+  use r, agent <- pure_binop_general(state, kind, left, right)
   case rt_val.to_boolean(r) == when {
-    True -> State(..state, pc: target)
-    False -> State(..state, pc: next_pc)
+    True -> Ok(State(..state, agent:, pc: target))
+    False -> Ok(State(..state, agent:, pc: next_pc))
   }
 }
 
