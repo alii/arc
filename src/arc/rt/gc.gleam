@@ -539,7 +539,7 @@ fn collect_above(
   let kept = case dict.size(live) * 2 > store.next_id - w {
     True -> reset_dead(cells, w, store.next_id, live)
     False ->
-      list.sort(dict.keys(live), int.compare)
+      ascending(dict.keys(live))
       |> list.fold(arena.truncate(w, cells), fn(acc, id) {
         arena.set(id, arena.get(id, cells), acc)
       })
@@ -637,6 +637,9 @@ fn is_read_ic(entry: IcEntry) -> Bool {
     IcCall(..) | IcInit(..) | IcGlobal(..) -> False
   }
 }
+
+@external(erlang, "lists", "sort")
+fn ascending(ids: List(Int)) -> List(Int)
 
 // hot: probed once per heap edge
 @external(erlang, "maps", "is_key")
