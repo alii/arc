@@ -48,7 +48,7 @@ own_data(Props, K) ->
 has_property(St, Key, {?HANDLE_TAG, Id}) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, _, _} = K} ->
             has_walk(Cells, arc_rt_arena_ffi:get(Id, Cells), K, ?MAX_PROTO_HOPS);
         {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} ->
             case arc_rt_arena_ffi:get(Id, Cells) of
@@ -66,7 +66,7 @@ has_property(_, _, _) -> miss.
 
 has_walk(_, _, _, 0) -> miss;
 has_walk(Cells, {?SSHAPEDOBJECT_TAG, _, Proto, _, Offs}, K, Fuel) ->
-    case is_map_key(element(2, K), Offs) of
+    case is_map_key(?KEY_TEXT(K), Offs) of
         true -> true;
         false -> has_next(Cells, Proto, K, Fuel)
     end;
@@ -136,8 +136,8 @@ private_define(Store, {?HANDLE_TAG, Id}, Name, V) when tuple_size(Store) =:= ?ST
     end;
 private_define(_, _, _, _) -> miss.
 
-private_key(B) when is_binary(B) -> {?KEY_PRIVATE, B};
-private_key({?STR_TAG, B, _, _}) -> {?KEY_PRIVATE, B};
+private_key(B) when is_binary(B) -> arc_bytecode_key_ffi:private(B);
+private_key({?STR_TAG, B, _, _}) -> arc_bytecode_key_ffi:private(B);
 private_key(_) -> miss.
 
 %% accessor a plain chain lookup of K finds, else no_accessor
@@ -148,7 +148,7 @@ find_accessor(_, _, _) -> no_accessor.
 
 accessor_walk(_, _, _, 0) -> no_accessor;
 accessor_walk(Cells, {?SSHAPEDOBJECT_TAG, _, Proto, _, Offs}, K, Fuel) ->
-    case is_map_key(element(2, K), Offs) of
+    case is_map_key(?KEY_TEXT(K), Offs) of
         true -> no_accessor;
         false -> accessor_next(Cells, Proto, K, Fuel)
     end;
@@ -180,14 +180,14 @@ get_global(St, Lex, Name) ->
             end;
         _ ->
             {?HANDLE_TAG, G} = element(?REALM_GLOBAL_OBJECT, element(?AGENT_REALM, St)),
-            object_get(element(?AGENT_STORE, St), G, {?KEY_NAMED, Name}, miss)
+            object_get(element(?AGENT_STORE, St), G, arc_bytecode_key_ffi:named(Name), miss)
     end.
 
 %% §9.1.1.4.5 setmutablebinding on the global object
 put_global(Store, Lex, Global, Name, V, Strict) ->
     case is_map_key(Name, Lex) of
         true -> miss;
-        false -> put_field(Store, Global, {?KEY_NAMED, Name}, V, not Strict)
+        false -> put_field(Store, Global, arc_bytecode_key_ffi:named(Name), V, not Strict)
     end.
 
 %% getters miss so the general path passes the primitive as this
@@ -200,7 +200,7 @@ object_get(Store, Id, K, Absent) ->
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs} ->
-            KeyBin = element(2, K),
+            KeyBin = ?KEY_TEXT(K),
             case Offs of
                 #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
                 _ -> proto_get(Cells, Proto, K, ?MAX_PROTO_HOPS, Absent)
@@ -218,7 +218,7 @@ object_get(Store, Id, K, Absent) ->
 chain_get(Cells, Cell, K, Fuel, Absent) ->
     case Cell of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs} ->
-            KeyBin = element(2, K),
+            KeyBin = ?KEY_TEXT(K),
             case Offs of
                 #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
                 _ -> proto_get(Cells, Proto, K, Fuel, Absent)
@@ -257,8 +257,7 @@ named_virtual(_, _) -> miss.
 named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K, ?LENGTH_KEY).
 
 birth_plain(Birth, K) ->
-    ?LAZY_KEY_IS_PLAIN(Birth, K, ?LENGTH_KEY, {?KEY_NAMED, <<"name">>},
-                       {?KEY_NAMED, <<"prototype">>}).
+    ?LAZY_KEY_IS_PLAIN(Birth, K, ?LENGTH_KEY, ?NAME_KEY, ?PROTOTYPE_KEY).
 
 %% holes miss so the full path walks the proto chain
 get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
@@ -315,7 +314,7 @@ get_elem(_, S, Idx) when is_integer(Idx), ?IS_STR(S) ->
     end;
 get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, _, _} = K} ->
             object_get(Store, element(?HANDLE_ID, Obj), K, undefined);
         {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
         _ -> miss
@@ -371,7 +370,7 @@ put_field(Store, {?HANDLE_TAG, Id}, K, V, Create)
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Cell ->
-            KeyBin = element(2, K),
+            KeyBin = ?KEY_TEXT(K),
             case Offs of
                 #{KeyBin := Off} ->
                     NewCell = setelement(?SSHAPEDOBJECT_SLOTS, Cell,
@@ -449,7 +448,7 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V)
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Cell
           when element(1, K) =:= ?KEY_NAMED ->
-            KeyBin = element(2, K),
+            KeyBin = ?KEY_TEXT(K),
             case Offs of
                 #{KeyBin := Off} ->
                     NewCell = setelement(?SSHAPEDOBJECT_SLOTS, Cell,
@@ -530,11 +529,11 @@ literal_pairs([K | Keys], [V | Stack], Seq, Acc) ->
     literal_pairs(Keys, Stack, Seq - 1, [{K, ?PLAIN_PROPERTY(V, Seq)} | Acc]);
 literal_pairs([], Stack, _, Acc) -> {Acc, Stack}.
 
-chain_takes_write(Store, _, {?SOME, {?HANDLE_TAG, PId}}, {?KEY_NAMED, KB})
+chain_takes_write(Store, _, {?SOME, {?HANDLE_TAG, PId}}, {?KEY_NAMED, _, KB})
   when is_map_key(PId, element(?STORE_PLAIN_WRITE_PROTOS, Store)),
        byte_size(KB) =/= 9 orelse KB =/= <<"__proto__">> ->
     true;
-chain_takes_write(Store, Cells, Proto, {?KEY_NAMED, _} = K) ->
+chain_takes_write(Store, Cells, Proto, {?KEY_NAMED, _, _} = K) ->
     arc_rt_obj_ffi:chain_takes_named_write(Store, Cells, Proto, K);
 chain_takes_write(Store, Cells, Proto, {?KEY_INDEX, Idx}) ->
     arc_rt_obj_ffi:chain_takes_index_write(Store, Cells, Proto, Idx).
@@ -581,7 +580,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
     end;
 put_elem(Store, {?HANDLE_TAG, Id} = Obj, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, _, _} = K} ->
             case put_field(Store, Obj, K, V, true) of
                 miss -> put_first_key(Store, Id, K, V);
                 Store1 -> Store1

@@ -1,6 +1,6 @@
 // module registry caches live as private-keyed props on the global
 
-import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/key.{type PropertyKey, named}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -11,27 +11,27 @@ import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 fn status_property() -> PropertyKey {
-  key.Private("arc_module_status")
+  key.private("arc_module_status")
 }
 
 fn errors_property() -> PropertyKey {
-  key.Private("arc_module_errors")
+  key.private("arc_module_errors")
 }
 
 fn namespaces_property() -> PropertyKey {
-  key.Private("arc_module_namespaces")
+  key.private("arc_module_namespaces")
 }
 
 fn deferred_property() -> PropertyKey {
-  key.Private("arc_module_deferred")
+  key.private("arc_module_deferred")
 }
 
 fn pending_property() -> PropertyKey {
-  key.Private("arc_module_pending")
+  key.private("arc_module_pending")
 }
 
 fn referrer_property() -> PropertyKey {
-  key.Private("arc_module_referrer")
+  key.private("arc_module_referrer")
 }
 
 const referrer_key = "active"
@@ -189,7 +189,7 @@ fn cache_object(st: Agent, property: PropertyKey) -> Option(Handle) {
 
 fn read_entry(st: Agent, property: PropertyKey, key: String) -> Option(JsVal) {
   use cache <- option.then(cache_object(st, property))
-  case rt_obj.ordinary_own_property(st, cache, StringKey(Named(key))) {
+  case rt_obj.ordinary_own_property(st, cache, StringKey(named(key))) {
     Some(DataProperty(value:, ..)) -> Some(value)
     _ -> None
   }
@@ -227,7 +227,7 @@ fn write_entry(
       #(cache, st)
     }
   }
-  put_hidden_property(st, cache, Named(key), val)
+  put_hidden_property(st, cache, named(key), val)
 }
 
 // bypasses [[DefineOwnProperty]] so a frozen global cannot block it
@@ -254,7 +254,7 @@ fn clear_entry(st: Agent, property: PropertyKey, key: String) -> Agent {
   case cache_object(st, property) {
     None -> st
     Some(cache) -> {
-      let #(deleted, st) = rt_obj.delete_prop(st, cache, StringKey(Named(key)))
+      let #(deleted, st) = rt_obj.delete_prop(st, cache, StringKey(named(key)))
       case deleted {
         True -> st
         False -> panic as "arc/module/registry: cache entry refused deletion"

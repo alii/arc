@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/host.{AlreadySettled, Context, Resumed, StaleTicket}
 import arc/interp/safepoint
 import arc/rt/async as rt_async
@@ -31,7 +31,7 @@ fn recorder(ctx: host.Context(Nil)) -> #(JsVal, host.Context(Nil)) {
       rt_obj.set_prop(
         st,
         global(st, "globalThis").0,
-        StringKey(Named("seen")),
+        StringKey(named("seen")),
         host.first_arg(args),
       )
     #(Ok(mk_undefined()), Context(..ctx, agent: st))

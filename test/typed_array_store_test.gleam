@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/engine
 import arc/rt/obj as rt_obj
 import arc/rt/types.{type JsValKind, DataProperty, JFloat, KNum, KStr, StringKey}
@@ -12,7 +12,7 @@ fn global_after(source: String, name: String) -> JsValKind {
     rt_obj.get_own_property(
       engine.agent(eng),
       engine.global(eng),
-      StringKey(Named(name)),
+      StringKey(named(name)),
     )
   rt_helpers.classify(v)
 }

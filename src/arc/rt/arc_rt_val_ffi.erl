@@ -118,7 +118,7 @@ property_key_of(N)
 property_key_of(B) when is_binary(B) ->
     {?STRINGKEY_TAG, canonical_key_bin(B)};
 property_key_of({?STR_TAG, B, _, _}) ->
-    {?STRINGKEY_TAG, {?KEY_NAMED, B}};
+    {?STRINGKEY_TAG, arc_bytecode_key_ffi:named(B)};
 property_key_of({js_sym, S}) ->
     {?SYMBOLKEY_TAG, S};
 property_key_of(_) -> miss.
@@ -128,12 +128,12 @@ canonical_key_bin(<<C, _/binary>> = B) when C >= $0, C =< $9 ->
         N when N >= 0, N =< ?MAX_ARRAY_INDEX ->
             case integer_to_binary(N) =:= B of
                 true -> {?KEY_INDEX, N};
-                false -> {?KEY_NAMED, B}
+                false -> arc_bytecode_key_ffi:named(B)
             end;
-        _ -> {?KEY_NAMED, B}
-    catch _:_ -> {?KEY_NAMED, B}
+        _ -> arc_bytecode_key_ffi:named(B)
+    catch _:_ -> arc_bytecode_key_ffi:named(B)
     end;
-canonical_key_bin(B) -> {?KEY_NAMED, B}.
+canonical_key_bin(B) -> arc_bytecode_key_ffi:named(B).
 
 %% not a jsval, classify has no clause for it
 mk_hole() -> ?ELEMS_HOLE.

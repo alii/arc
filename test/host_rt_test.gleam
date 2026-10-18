@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/host.{Context}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -404,7 +404,7 @@ pub fn with_context_runs_body_and_drains_test() {
             rt_obj.set_prop(
               st,
               global(st, "shared").0,
-              StringKey(Named("v")),
+              StringKey(named("v")),
               host.first_arg(args),
             )
           #(Ok(mk_undefined()), Context(..ctx, agent: st))

@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/buffer
 import arc/rt/builtins/common
@@ -253,7 +253,7 @@ fn max_byte_length_option(st: Agent, options: JsVal) -> #(Option(Int), Agent) {
   case classify(options) {
     KHandle(_) -> {
       let #(max_val, st) =
-        rt_obj.get_prop(st, options, StringKey(Named("maxByteLength")))
+        rt_obj.get_prop(st, options, StringKey(names.max_byte_length))
       case classify(max_val) {
         KUndef -> #(None, st)
         _ -> {
@@ -774,7 +774,7 @@ fn species_constructor(
   o: JsVal,
   default_ctor: Handle,
 ) -> #(JsVal, Agent) {
-  let #(c, st) = rt_obj.get_prop(st, o, StringKey(Named("constructor")))
+  let #(c, st) = rt_obj.get_prop(st, o, StringKey(names.constructor))
   case classify(c) {
     KUndef -> #(mk_object(default_ctor), st)
     KHandle(_) -> {

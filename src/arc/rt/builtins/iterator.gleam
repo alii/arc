@@ -1,5 +1,6 @@
 import arc/bytecode/error_kind.{RangeError, TypeError}
-import arc/bytecode/key.{Named}
+import arc/bytecode/key
+import arc/bytecode/names
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/async as rt_async
 import arc/rt/buffer
@@ -1407,7 +1408,7 @@ fn ignore_proto_setter(
         False -> {
           let val = first_arg_or_undefined(args)
           let key = case which {
-            IgnoreSetCtor -> StringKey(Named("constructor"))
+            IgnoreSetCtor -> StringKey(names.constructor)
             IgnoreSetTag -> SymbolKey(symbol_to_string_tag)
           }
           let #(ok, st) =
@@ -1655,14 +1656,14 @@ fn zip_options(
   case classify(options) {
     KUndef -> #(ShortestOption, st)
     KHandle(_) -> {
-      let #(mode_v, st) = rt_obj.get_prop(st, options, StringKey(Named("mode")))
+      let #(mode_v, st) = rt_obj.get_prop(st, options, StringKey(names.mode))
       case classify(mode_v) {
         KUndef -> #(ShortestOption, st)
         KStr("shortest") -> #(ShortestOption, st)
         KStr("strict") -> #(StrictOption, st)
         KStr("longest") -> {
           let #(pad, st) =
-            rt_obj.get_prop(st, options, StringKey(Named("padding")))
+            rt_obj.get_prop(st, options, StringKey(names.padding))
           case classify(pad) {
             KUndef | KHandle(_) -> #(LongestOption(padding: pad), st)
             _ ->

@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key
+import arc/bytecode/names
 import arc/internal/tree_array
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -84,7 +85,7 @@ pub fn dispatch(
     PromiseThen -> then(st, this, args)
     PromiseCatch -> {
       let on_rejected = first_arg_or_undefined(args)
-      call_method(st, this, StringKey(Named("then")), [
+      call_method(st, this, StringKey(names.then), [
         mk_undefined(),
         on_rejected,
       ])
@@ -267,7 +268,7 @@ fn finally(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       #(tf, cf, st)
     }
   }
-  call_method(st, this, StringKey(Named("then")), [
+  call_method(st, this, StringKey(names.then), [
     then_finally,
     catch_finally,
   ])
@@ -297,7 +298,7 @@ fn finally_wrapper(
         0,
       )
   }
-  call_method(st, p, StringKey(Named("then")), [handler])
+  call_method(st, p, StringKey(names.then), [handler])
 }
 
 fn resolve_static(
@@ -315,7 +316,7 @@ fn resolve_static(
 fn promise_resolve(st: Agent, c: JsVal, x: JsVal) -> #(JsVal, Agent) {
   case rt_async.as_promise(st, x) {
     Some(_) -> {
-      let #(ctor, st) = rt_obj.get_prop(st, x, StringKey(Named("constructor")))
+      let #(ctor, st) = rt_obj.get_prop(st, x, StringKey(names.constructor))
       case ctor == c {
         True -> #(x, st)
         False -> resolve_with_constructor(st, c, x)
@@ -589,7 +590,7 @@ fn combinator_loop(
       let #(next_promise, st) = call(st, promise_resolve, c, [v])
       let #(on_fulfilled, on_rejected, st) = make_handlers(st, index)
       let #(_, st) =
-        call_method(st, next_promise, StringKey(Named("then")), [
+        call_method(st, next_promise, StringKey(names.then), [
           on_fulfilled,
           on_rejected,
         ])
@@ -769,7 +770,7 @@ fn perform_all_keyed_loop(
           }
           let st = increment_counter(st, loop.remaining_h)
           let #(_, st) =
-            call_method(st, next_promise, StringKey(Named("then")), [
+            call_method(st, next_promise, StringKey(names.then), [
               on_fulfilled,
               on_rejected,
             ])
@@ -1018,7 +1019,7 @@ fn capability_executor(
 }
 
 fn get_promise_resolve(st: Agent, c: JsVal) -> #(JsVal, Agent) {
-  let #(resolve_fn, st) = rt_obj.get_prop(st, c, StringKey(Named("resolve")))
+  let #(resolve_fn, st) = rt_obj.get_prop(st, c, StringKey(names.resolve))
   case is_callable(st, resolve_fn) {
     True -> #(resolve_fn, st)
     False -> rt_val.throw_type_error(st, "Promise resolve is not a function")
@@ -1043,7 +1044,7 @@ fn is_plain_promise(st: Agent, o: JsVal) -> Bool {
       case rt_store.cell_get(st, h) {
         SObject(kind: types.PromiseObj(..), proto: Some(p), props:, ..) ->
           p == st.realm.promise.prototype
-          && !dict.has_key(props, Named("constructor"))
+          && !dict.has_key(props, names.constructor)
         _ -> False
       }
     _ -> False
@@ -1055,7 +1056,7 @@ fn species_constructor_generic(
   o: JsVal,
   default: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(c, st) = rt_obj.get_prop(st, o, StringKey(Named("constructor")))
+  let #(c, st) = rt_obj.get_prop(st, o, StringKey(names.constructor))
   case classify(c) {
     types.KUndef -> #(default, st)
     KHandle(_) -> {

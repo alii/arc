@@ -1,5 +1,5 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
-import arc/bytecode/key
+import arc/bytecode/names
 import arc/internal/int_math.{floor_div}
 import arc/internal/temporal_calendar
 import arc/rt/builtins/options.{get_options_object}
@@ -265,8 +265,7 @@ pub fn read_date_time_fields(
   }
   let #(second, st) = read_int_field(st, bag, "second")
   let #(time_zone_value, st) = case read_tz {
-    True ->
-      rt_val.get_named(st, types.mk_object(bag), key.Named("timeZone"), None)
+    True -> rt_val.get_named(st, types.mk_object(bag), names.time_zone, None)
     False -> #(mk_undefined(), st)
   }
   let #(year, st) = read_int_field(st, bag, "year")
@@ -289,8 +288,7 @@ pub fn read_date_time_fields(
 }
 
 fn read_bag_offset(st: Agent, bag: Handle) -> #(Option(Int), Agent) {
-  let #(v, st) =
-    rt_val.get_named(st, types.mk_object(bag), key.Named("offset"), None)
+  let #(v, st) = rt_val.get_named(st, types.mk_object(bag), names.offset, None)
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {

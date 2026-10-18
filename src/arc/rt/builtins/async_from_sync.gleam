@@ -1,6 +1,6 @@
 // §27.1.6 %asyncfromsynciteratorprototype% methods
 
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
@@ -90,8 +90,8 @@ fn forward_to_sync_iterator(
   }
   let #(method, st) = case kind {
     ForwardNext -> #(sync.next_method, st)
-    ForwardReturn -> rt_obj.get_prop(st, sync_iter, StringKey(Named("return")))
-    ForwardThrow -> rt_obj.get_prop(st, sync_iter, StringKey(Named("throw")))
+    ForwardReturn -> rt_obj.get_prop(st, sync_iter, StringKey(names.return))
+    ForwardThrow -> rt_obj.get_prop(st, sync_iter, StringKey(names.throw))
   }
   case kind, rt_val.is_callable(st, method) {
     ForwardReturn, False -> {
@@ -143,9 +143,9 @@ fn forward_continuation(
   cap_reject cap_reject: JsVal,
 ) -> #(JsVal, Agent) {
   let result = mk_object(result_h)
-  let #(done_v, st) = rt_obj.get_prop(st, result, StringKey(Named("done")))
+  let #(done_v, st) = rt_obj.get_prop(st, result, StringKey(names.done))
   let done = rt_val.to_boolean(done_v)
-  let #(inner, st) = rt_obj.get_prop(st, result, StringKey(Named("value")))
+  let #(inner, st) = rt_obj.get_prop(st, result, StringKey(names.value))
   let #(on_fulfilled, st) =
     common.alloc_native_closure(st, IteratorN(AsyncFromSyncUnwrap(done:)), 1)
   let #(on_rejected, st) = case done || !close_on_rejection {

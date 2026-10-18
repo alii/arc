@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key.{Index}
+import arc/bytecode/names
 import arc/internal/digits
 import arc/internal/gregorian.{days_from_civil}
 import arc/internal/int_math.{floor_div, pow10}
@@ -854,7 +855,7 @@ fn canonical_tag_or_throw(st: Agent, s: String) -> #(String, Agent) {
 
 fn locale_list_from_object(st: Agent, h: Handle) -> #(List(String), Agent) {
   let o = mk_object(h)
-  let #(len_v, st) = rt_obj.get_prop(st, o, StringKey(Named("length")))
+  let #(len_v, st) = rt_obj.get_prop(st, o, StringKey(names.length))
   let #(len_n, st) = rt_val.to_number(st, len_v)
   let len = rt_val.jsnum_to_length(len_n)
   locale_list_from_object_loop(st, o, 0, len, [])
@@ -4780,7 +4781,7 @@ fn string_list_from_iterable(
       use Nil <- helpers.guard(rt_val.is_object(iter), fn() {
         rt_val.throw_type_error(st, "iterator result is not an object")
       })
-      let #(next_fn, st) = rt_obj.get_prop(st, iter, StringKey(Named("next")))
+      let #(next_fn, st) = rt_obj.get_prop(st, iter, StringKey(names.next))
       iterate_strings(st, iter, next_fn, [])
     }
   }
@@ -4796,11 +4797,11 @@ fn iterate_strings(
   use Nil <- helpers.guard(rt_val.is_object(step), fn() {
     rt_val.throw_type_error(st, "iterator result is not an object")
   })
-  let #(done, st) = rt_obj.get_prop(st, step, StringKey(Named("done")))
+  let #(done, st) = rt_obj.get_prop(st, step, StringKey(names.done))
   case rt_val.to_boolean(done) {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(v, st) = rt_obj.get_prop(st, step, StringKey(Named("value")))
+      let #(v, st) = rt_obj.get_prop(st, step, StringKey(names.value))
       case classify(v) {
         KStr(s) -> iterate_strings(st, iter, next_fn, [s, ..acc])
         _ ->

@@ -2619,12 +2619,7 @@ fn resume_state_term(n: Int) -> anf.Build(ir.Value) {
 }
 
 fn key_named(s: String) -> anf.Build(ir.Value) {
-  use inner <- anf.then(
-    anf.make_tuple([
-      ir.ConstAtom("named"),
-      ir.ConstBinary(bit_array.from_string(s)),
-    ]),
-  )
+  use inner <- anf.then(anf.let_(anf.wire_named(s)))
   anf.make_tuple([ir.ConstAtom("string_key"), inner])
 }
 
@@ -2632,13 +2627,8 @@ fn get_named(obj: ir.Value, name: String) -> anf.Build(ir.Value) {
   use site <- anf.then(fn(e: Emitter, k) {
     k(e.next_ic_site, state.Emitter(..e, next_ic_site: e.next_ic_site + 1))
   })
-  use key <- anf.then(anf.named_key(bit_array.from_string(name)))
+  use key <- anf.then(anf.let_(anf.wire_named(name)))
   anf.host("get_named_site", [obj, key, ir.ConstI32(site)])
-}
-
-fn key_named_dyn(bin: ir.Value) -> anf.Build(ir.Value) {
-  use inner <- anf.then(anf.make_tuple([ir.ConstAtom("named"), bin]))
-  anf.make_tuple([ir.ConstAtom("string_key"), inner])
 }
 
 fn iter_hint(kind: state.CoroutineKind) -> ir.Value {
@@ -2712,7 +2702,6 @@ fn emit_delegate_arm(
     use mode_ne0 <- anf.then(
       anf.let_(ir.Num(ir.INe(ir.W32), [mode_i32, ir.ConstI32(resume_next)])),
     )
-    let mbin = fn(s) { ir.Values([ir.ConstBinary(bit_array.from_string(s))]) }
     use meth <- anf.then(anf.let_if(
       mode_ne0,
       {
@@ -2721,13 +2710,13 @@ fn emit_delegate_arm(
             mode_i32,
             [ir.TTerm],
             [
-              ir.SwitchArm(resume_throw, mbin("throw")),
-              ir.SwitchArm(resume_return, mbin("return")),
+              ir.SwitchArm(resume_throw, anf.wire_named("throw")),
+              ir.SwitchArm(resume_return, anf.wire_named("return")),
             ],
-            mbin("next"),
+            anf.wire_named("next"),
           )),
         )
-        use key <- anf.then(key_named_dyn(mname))
+        use key <- anf.then(anf.make_tuple([ir.ConstAtom("string_key"), mname]))
         anf.host("get_prop_untyped_key", [inner, key])
       },
       get_named(iterator, "next"),
@@ -3468,10 +3457,7 @@ fn named_key_tuple(s: String) -> ir.Expr {
   let inner_n = "_nk_" <> s
   ir.Let(
     [inner_n],
-    ir.TermOp(ir.MakeTuple, [
-      ir.ConstAtom("named"),
-      ir.ConstBinary(bit_array.from_string(s)),
-    ]),
+    anf.wire_named(s),
     ir.TermOp(ir.MakeTuple, [ir.ConstAtom("string_key"), ir.Var(inner_n)]),
   )
 }

@@ -1,4 +1,4 @@
-import arc/bytecode/key
+import arc/bytecode/names
 import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
@@ -414,7 +414,7 @@ pub fn method(
             rt_val.get_named(
               st,
               types.mk_object(oh),
-              key.Named("timeZone"),
+              names.time_zone,
               option.None,
             )
           let #(tz, st) = case classify(tz_val) {
@@ -426,7 +426,7 @@ pub fn method(
             rt_val.get_named(
               st,
               types.mk_object(oh),
-              key.Named("plainTime"),
+              names.plain_time,
               option.None,
             )
           #(tz, plain_time, st)

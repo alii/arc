@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
@@ -129,7 +129,7 @@ fn set_constructor(
     KUndef | KNull -> #(set_h, st)
     _ -> {
       let iterable = first_arg_or_undefined(args)
-      let #(adder, st) = rt_obj.get_prop(st, set_v, StringKey(Named("add")))
+      let #(adder, st) = rt_obj.get_prop(st, set_v, StringKey(names.add))
       case rt_val.is_callable(st, adder) {
         False ->
           rt_val.throw_type_error(st, "'add' property of Set is not a function")
@@ -524,7 +524,7 @@ fn get_set_record(
   use Nil <- helpers.guard(rt_val.is_object(other), fn() {
     rt_val.throw_type_error(st, "other is not an object")
   })
-  let #(raw_size, st) = rt_obj.get_prop(st, other, StringKey(Named("size")))
+  let #(raw_size, st) = rt_obj.get_prop(st, other, StringKey(names.size))
   let #(num, st) = rt_val.to_number(st, raw_size)
   use Nil <- helpers.guard(num != JNan, fn() {
     rt_val.throw_type_error(st, "size is NaN")
@@ -533,9 +533,9 @@ fn get_set_record(
   use Nil <- helpers.guard(int_size >= 0, fn() {
     rt_val.throw_range_error(st, "size is negative")
   })
-  let #(has, st) = rt_obj.get_prop(st, other, StringKey(Named("has")))
+  let #(has, st) = rt_obj.get_prop(st, other, StringKey(names.has))
   use has <- helpers.require_callable(st, has, fn() { "has is not a function" })
-  let #(keys, st) = rt_obj.get_prop(st, other, StringKey(Named("keys")))
+  let #(keys, st) = rt_obj.get_prop(st, other, StringKey(names.keys))
   use keys <- helpers.require_callable(st, keys, fn() {
     "keys is not a function"
   })
@@ -548,7 +548,7 @@ fn get_keys_iterator(st: Agent, rec: SetRecord) -> #(IteratorRecord, Agent) {
   use Nil <- helpers.guard(rt_val.is_object(iter), fn() {
     rt_val.throw_type_error(st, "keys() did not return an object")
   })
-  let #(next_fn, st) = rt_obj.get_prop(st, iter, StringKey(Named("next")))
+  let #(next_fn, st) = rt_obj.get_prop(st, iter, StringKey(names.next))
   use Nil <- helpers.guard(rt_val.is_callable(st, next_fn), fn() {
     rt_val.throw_type_error(st, "iterator.next is not a function")
   })

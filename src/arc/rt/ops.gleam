@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/rt/js_string
 import arc/rt/limits
 import arc/rt/obj as rt_obj
@@ -73,7 +73,7 @@ pub fn ordinary_has_instance(
             st.store.ops.get_prop(
               st,
               mk_object(ctor),
-              StringKey(Named("prototype")),
+              StringKey(names.prototype),
             )
           case classify(proto_val) {
             KHandle(proto_h) -> proto_walk(st, obj_h, proto_h, 10_000)

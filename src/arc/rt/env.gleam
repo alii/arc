@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, AccessorProperty, DataProperty, KHandle,
@@ -14,7 +14,7 @@ pub fn with_has_binding(
   name: String,
 ) -> #(Bool, Agent) {
   let recv = mk_object(obj)
-  let #(found, st) = rt_obj.has_prop(st, recv, StringKey(Named(name)))
+  let #(found, st) = rt_obj.has_prop(st, recv, StringKey(named(name)))
   case found {
     False -> #(False, st)
     True -> {
@@ -23,7 +23,7 @@ pub fn with_has_binding(
       case classify(unscopables) {
         KHandle(_) -> {
           let #(blocked, st) =
-            rt_obj.get_prop(st, unscopables, StringKey(Named(name)))
+            rt_obj.get_prop(st, unscopables, StringKey(named(name)))
           #(!rt_val.to_boolean(blocked), st)
         }
         _ -> #(True, st)
@@ -40,7 +40,7 @@ pub fn with_get_binding_value(
   strict strict: Bool,
 ) -> #(JsVal, Agent) {
   let recv = mk_object(obj)
-  let key = StringKey(Named(name))
+  let key = StringKey(named(name))
   let #(still, st) = rt_obj.has_prop(st, recv, key)
   case still, strict {
     False, True -> rt_val.throw_reference_error(st, name <> " is not defined")
@@ -58,7 +58,7 @@ pub fn with_set_mutable_binding(
   strict strict: Bool,
 ) -> Agent {
   let recv = mk_object(obj)
-  let key = StringKey(Named(name))
+  let key = StringKey(named(name))
   let #(still, st) = rt_obj.has_prop(st, recv, key)
   let st = case still, strict {
     False, True -> rt_val.throw_reference_error(st, name <> " is not defined")
@@ -81,7 +81,7 @@ pub fn with_delete_binding(
   obj: Handle,
   name: String,
 ) -> #(Bool, Agent) {
-  rt_obj.delete_prop(st, obj, StringKey(Named(name)))
+  rt_obj.delete_prop(st, obj, StringKey(named(name)))
 }
 
 // §9.1.1.4.17; deviation: non-extensible global skips the typeerror
@@ -91,7 +91,7 @@ pub fn create_global_var_binding(
   deletable deletable: Bool,
 ) -> Agent {
   let global = st.realm.global_object
-  let key = StringKey(Named(name))
+  let key = StringKey(named(name))
   let #(own, st) = rt_obj.get_own_property(st, global, key)
   case own {
     Some(_) -> st
@@ -118,7 +118,7 @@ pub fn create_global_fn_binding(
   deletable deletable: Bool,
 ) -> Agent {
   let global = st.realm.global_object
-  let key = StringKey(Named(name))
+  let key = StringKey(named(name))
   let #(own, st) = rt_obj.get_own_property(st, global, key)
   let define = fn(st) {
     let #(_, st) =
@@ -155,7 +155,7 @@ fn not_definable(st: Agent, name: String) -> a {
 
 // §9.1.1.4.7 object record half
 pub fn delete_global_var(st: Agent, name: String) -> #(Bool, Agent) {
-  rt_obj.delete_prop(st, st.realm.global_object, StringKey(Named(name)))
+  rt_obj.delete_prop(st, st.realm.global_object, StringKey(named(name)))
 }
 
 // §19.2.1.3 sloppy direct eval var scope, never escapes to js
@@ -164,14 +164,14 @@ pub fn new_eval_env(st: Agent) -> #(Handle, Agent) {
 }
 
 pub fn eval_env_lookup(st: Agent, env: Handle, name: String) -> Option(JsVal) {
-  case rt_obj.ordinary_own_property(st, env, StringKey(Named(name))) {
+  case rt_obj.ordinary_own_property(st, env, StringKey(named(name))) {
     Some(DataProperty(value:, ..)) -> Some(value)
     _ -> None
   }
 }
 
 pub fn eval_env_has(st: Agent, env: Handle, name: String) -> Bool {
-  option.is_some(rt_obj.ordinary_own_property(st, env, StringKey(Named(name))))
+  option.is_some(rt_obj.ordinary_own_property(st, env, StringKey(named(name))))
 }
 
 pub fn eval_env_set(
@@ -184,7 +184,7 @@ pub fn eval_env_set(
     rt_obj.define_own_data(
       st,
       env,
-      StringKey(Named(name)),
+      StringKey(named(name)),
       value,
       writable: True,
       enumerable: True,

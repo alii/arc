@@ -9,7 +9,6 @@
 
 -include("arc_rt_layout.hrl").
 
--define(NAMED_KEY(Name), {?KEY_NAMED, <<Name>>}).
 
 plain_iter_record(St, {?ITERATORRECORD_TAG, Iter, Next} = R) ->
     {plain_record, false, R,
@@ -18,7 +17,7 @@ plain_iter_record(St, {?HANDLE_TAG, Id}) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _,
-         #{?NAMED_KEY("done") := DoneP, ?NAMED_KEY("iterator") := IterP, ?NAMED_KEY("next") := NextP},
+         #{?DONE_KEY := DoneP, ?ITERATOR_KEY := IterP, ?NEXT_KEY := NextP},
          _, _, _}
           when element(1, DoneP) =:= ?DATAPROPERTY_TAG,
                element(1, IterP) =:= ?DATAPROPERTY_TAG,
@@ -71,7 +70,7 @@ iter_step(Store, {?HANDLE_TAG, RecId}) ->
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(RecId, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _,
-         #{?NAMED_KEY("iterator") := IP, ?NAMED_KEY("next") := NP}, _, _, _}
+         #{?ITERATOR_KEY := IP, ?NEXT_KEY := NP}, _, _, _}
           when element(1, IP) =:= ?DATAPROPERTY_TAG,
                element(1, NP) =:= ?DATAPROPERTY_TAG ->
             case {element(?DATAPROPERTY_VALUE, NP), element(?DATAPROPERTY_VALUE, IP)} of
@@ -188,7 +187,7 @@ pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok, View) ->
         true ->
             case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells)} of
                 {{?SOBJECT_TAG, _, _, _, Syms, _, _},
-                 {?SOBJECT_TAG, _, _, #{?NAMED_KEY("next") := NP}, _, _, _}}
+                 {?SOBJECT_TAG, _, _, #{?NEXT_KEY := NP}, _, _, _}}
                   when element(1, NP) =:= ?DATAPROPERTY_TAG ->
                     N = element(?DATAPROPERTY_VALUE, NP),
                     case lists:keyfind(?SYMBOL_ITERATOR, 1, Syms) of
@@ -221,9 +220,9 @@ view_iter_start(St, {?HANDLE_TAG, Id} = V, View) ->
     end;
 view_iter_start(_, _, _) -> miss.
 
-view_key(?VIEW_KEYS) -> ?NAMED_KEY("keys");
-view_key(?VIEW_VALUES) -> ?NAMED_KEY("values");
-view_key(?VIEW_ENTRIES) -> ?NAMED_KEY("entries").
+view_key(?VIEW_KEYS) -> ?KEYS_KEY;
+view_key(?VIEW_VALUES) -> ?VALUES_KEY;
+view_key(?VIEW_ENTRIES) -> ?ENTRIES_KEY.
 
 %% Set.prototype.keys is the values function
 view_class(?ARRAYOBJ_TAG, View) ->
@@ -261,7 +260,7 @@ view_pristine(Realm, Cells, V, Proto, Class, IterProto, Key, ViewTok, NextTok, V
             case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells),
                   arc_rt_arena_ffi:get(Base, Cells)} of
                 {{?SOBJECT_TAG, _, _, #{Key := MP}, _, _, _},
-                 {?SOBJECT_TAG, _, {?SOME, BaseH}, #{?NAMED_KEY("next") := NP}, IterSyms, _, _},
+                 {?SOBJECT_TAG, _, {?SOME, BaseH}, #{?NEXT_KEY := NP}, IterSyms, _, _},
                  {?SOBJECT_TAG, _, _, _, BaseSyms, _, _}}
                   when element(1, MP) =:= ?DATAPROPERTY_TAG,
                        element(1, NP) =:= ?DATAPROPERTY_TAG ->
@@ -427,7 +426,7 @@ lacks_return(_, ?NONE) -> true;
 lacks_return(Cells, {?SOME, {?HANDLE_TAG, Id}}) ->
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _}
-          when not is_map_key(?NAMED_KEY("return"), Props) ->
+          when not is_map_key(?RETURN_KEY, Props) ->
             lacks_return(Cells, Proto);
         _ -> false
     end.

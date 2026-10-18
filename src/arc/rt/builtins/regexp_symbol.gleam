@@ -1,6 +1,7 @@
 // §22.2.6 regexp.prototype [symbol.*] methods and the regexp string iterator
 
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key.{Index, named}
+import arc/bytecode/names
 import arc/internal/bytes
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -152,7 +153,7 @@ fn advance_if_empty(
   case match_text {
     "" -> {
       let #(li_v, st) =
-        rt_val.get_named(st, mk_object(h), key.Named("lastIndex"), None)
+        rt_val.get_named(st, mk_object(h), names.last_index, None)
       let #(this_index, st) = rt_val.to_length(st, li_v)
       set_last_index(st, h, mk_int(bytes.next_char_boundary(s, this_index)))
     }
@@ -167,7 +168,7 @@ pub fn symbol_search(
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.search]")
   let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
-  let #(previous, st) = rt_val.get_named(st, this, key.Named("lastIndex"), None)
+  let #(previous, st) = rt_val.get_named(st, this, names.last_index, None)
   let st = set_unless_same_value(st, h, previous, mk_int(0))
   let #(pristine, st) = pristine_exec(st, h)
   case pristine {
@@ -184,7 +185,7 @@ pub fn symbol_search(
       let st = restore_last_index(st, h, previous)
       case classify(result) {
         KNull -> #(mk_int(-1), st)
-        _ -> rt_val.get_named(st, result, key.Named("index"), None)
+        _ -> rt_val.get_named(st, result, names.index, None)
       }
     }
   }
@@ -192,7 +193,7 @@ pub fn symbol_search(
 
 fn restore_last_index(st: Agent, h: Handle, previous: JsVal) -> Agent {
   let #(current, st) =
-    rt_val.get_named(st, mk_object(h), key.Named("lastIndex"), None)
+    rt_val.get_named(st, mk_object(h), names.last_index, None)
   set_unless_same_value(st, h, current, previous)
 }
 
@@ -379,18 +380,18 @@ fn process_replace_results(
   case results {
     [] -> #(mk_string(acc <> bytes.drop_start(s, next_pos)), st)
     [result, ..rest] -> {
-      let #(len_v, st) = rt_val.get_named(st, result, key.Named("length"), None)
+      let #(len_v, st) = rt_val.get_named(st, result, names.length, None)
       let #(result_length, st) = rt_val.to_length(st, len_v)
       let n_captures = int.max(result_length - 1, 0)
       let #(m_v, st) = rt_obj.get_prop(st, result, StringKey(Index(0)))
       let #(matched, st) = rt_val.to_string(st, m_v)
-      let #(pos_v, st) = rt_val.get_named(st, result, key.Named("index"), None)
+      let #(pos_v, st) = rt_val.get_named(st, result, names.index, None)
       let #(pos_raw, st) = rt_val.to_integer_or_infinity(st, pos_v)
       let position = int.clamp(pos_raw, 0, length_s)
       let #(captures, st) =
         collect_coerced_captures(st, result, 1, n_captures, [])
       let #(named_captures, st) =
-        rt_val.get_named(st, result, key.Named("groups"), None)
+        rt_val.get_named(st, result, names.groups, None)
       let #(replacement, st) =
         compute_replacement(
           st,
@@ -502,7 +503,7 @@ fn expand_segments(
         substitution.Text(text) ->
           expand_segments(st, rest, ctx, nc, [text, ..acc])
         substitution.NamedGroup(name) -> {
-          let #(cap, st) = rt_val.get_named(st, nc, key.Named(name), None)
+          let #(cap, st) = rt_val.get_named(st, nc, key.named(name), None)
           case classify(cap) {
             KUndef -> expand_segments(st, rest, ctx, nc, ["", ..acc])
             _ -> {
@@ -705,7 +706,7 @@ fn symbol_split_loop(
           )
         _ -> {
           let #(li_v, st) =
-            rt_val.get_named(st, splitter, key.Named("lastIndex"), None)
+            rt_val.get_named(st, splitter, names.last_index, None)
           let #(e0, st) = rt_val.to_length(st, li_v)
           let e = int.min(e0, size)
           case e == p {
@@ -728,8 +729,7 @@ fn symbol_split_loop(
               case count == lim {
                 True -> realm_ops.new_array(st, list.reverse(acc))
                 False -> {
-                  let #(len_v, st) =
-                    rt_val.get_named(st, z, key.Named("length"), None)
+                  let #(len_v, st) = rt_val.get_named(st, z, names.length, None)
                   let #(z_len, st) = rt_val.to_length(st, len_v)
                   let n_caps = int.max(z_len - 1, 0)
                   let #(acc, count, hit, st) =
@@ -794,7 +794,7 @@ pub fn symbol_match_all(
   let #(c, st) = species_constructor(st, mk_object(h), realm.regexp.constructor)
   let #(flags, st) = read_flags(st, this)
   let #(m_h, st) = rt_call.construct(st, c, [this, mk_string(flags)], c)
-  let #(li_v, st) = rt_val.get_named(st, this, key.Named("lastIndex"), None)
+  let #(li_v, st) = rt_val.get_named(st, this, names.last_index, None)
   let #(last_index, st) = rt_val.to_length(st, li_v)
   let st = set_last_index(st, m_h, mk_int(last_index))
   let global = has_flag(flags, "g")
@@ -902,7 +902,7 @@ type RegExpIterState {
 fn read_iter_state(st: Agent, h: Handle) -> Option(RegExpIterState) {
   case rt_store.cell_get(st, h) {
     SObject(props:, ..) -> {
-      use m <- option.then(case dict.get(props, Named(iter_matcher_key)) {
+      use m <- option.then(case dict.get(props, named(iter_matcher_key)) {
         Ok(types.DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(mh) -> Some(mh)
@@ -910,7 +910,7 @@ fn read_iter_state(st: Agent, h: Handle) -> Option(RegExpIterState) {
           }
         _ -> None
       })
-      use s <- option.then(case dict.get(props, Named(iter_subject_key)) {
+      use s <- option.then(case dict.get(props, named(iter_subject_key)) {
         Ok(types.DataProperty(value:, ..)) ->
           case classify(value) {
             types.KStr(s) -> Some(s)
@@ -918,11 +918,11 @@ fn read_iter_state(st: Agent, h: Handle) -> Option(RegExpIterState) {
           }
         _ -> None
       })
-      use g <- option.then(case dict.get(props, Named(iter_global_key)) {
+      use g <- option.then(case dict.get(props, named(iter_global_key)) {
         Ok(types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
         _ -> None
       })
-      use d <- option.map(case dict.get(props, Named(iter_done_key)) {
+      use d <- option.map(case dict.get(props, named(iter_done_key)) {
         Ok(types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
         _ -> None
       })
@@ -936,13 +936,13 @@ fn mark_iter_done(st: Agent, h: Handle) -> Agent {
   rt_store.cell_update(st, h, fn(cell) {
     case cell {
       SObject(props:, ..) ->
-        case dict.get(props, Named(iter_done_key)) {
+        case dict.get(props, named(iter_done_key)) {
           Ok(types.DataProperty(seq:, ..)) ->
             SObject(
               ..cell,
               props: dict.insert(
                 props,
-                Named(iter_done_key),
+                named(iter_done_key),
                 types.plain_property(mk_bool(True), seq),
               ),
             )

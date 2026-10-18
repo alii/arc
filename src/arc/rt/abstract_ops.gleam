@@ -1,6 +1,7 @@
 // spec abstract operations shared by rt and builtins
 
-import arc/bytecode/key.{Named}
+import arc/bytecode/key
+import arc/bytecode/names
 import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -44,7 +45,7 @@ pub fn is_array_handle(st: Agent, h: Handle) -> Bool {
 
 // §7.3.18 lengthofarraylike
 pub fn length_of_array_like(st: Agent, obj: JsVal) -> #(Int, Agent) {
-  let #(len_v, st) = rt_obj.get_prop(st, obj, StringKey(Named("length")))
+  let #(len_v, st) = rt_obj.get_prop(st, obj, StringKey(names.length))
   rt_val.to_length(st, len_v)
 }
 

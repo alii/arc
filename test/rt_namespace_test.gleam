@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -82,8 +82,8 @@ pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
   let #(keys, st) = rt_obj.own_keys(st, ns_h)
   assert keys
     == [
-      StringKey(Named("a")),
-      StringKey(Named("b")),
+      StringKey(named("a")),
+      StringKey(named("b")),
       SymbolKey(types.symbol_to_string_tag),
     ]
   let st = rt_store.cell_set(st, box_b, SBox(mk_int(3)))

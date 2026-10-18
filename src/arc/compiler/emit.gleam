@@ -3487,7 +3487,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           let count = list.length(keys)
           case rest, count <= limits.max_shape_slots {
             [], True -> {
-              let names = list.map(members, fn(m) { key.Named(m.name) })
+              let names = list.map(members, fn(m) { key.named(m.name) })
               Ok(emit_op(e, opcode.NewObjectShaped(names, count, span.start)))
             }
             // what follows would only take the shape apart again
@@ -4262,7 +4262,7 @@ fn literal_key(
   use name <- option.then(name)
   use <- bool.guard(name == "__proto__" || set.contains(seen, name), None)
   case key.canonical(name) {
-    key.Named(_) as pk -> Some(#(name, pk))
+    key.Named(..) as pk -> Some(#(name, pk))
     _ -> None
   }
 }

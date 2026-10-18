@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/internal/digits
 import arc/internal/gregorian.{civil_from_days, days_from_year}
 import arc/internal/int_math.{floor_div, floor_mod}
@@ -1100,7 +1100,7 @@ fn date_to_json(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 fn invoke_to_iso_string(st: Agent, obj: JsVal) -> #(JsVal, Agent) {
-  let #(method, st) = rt_obj.get_prop(st, obj, StringKey(Named("toISOString")))
+  let #(method, st) = rt_obj.get_prop(st, obj, StringKey(names.to_iso_string))
   case rt_val.is_callable(st, method) {
     True -> rt_call.call(st, method, obj, [])
     False -> rt_val.throw_type_error(st, "toISOString is not a function")

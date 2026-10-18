@@ -236,10 +236,23 @@
 -define(KEY_PRIVATE, private).
 -define(STRINGKEY_TAG, string_key).
 -define(SYMBOLKEY_TAG, symbol_key).
--define(KEY_TEXT(K), element(2, K)).
--define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
--define(NAME_KEY, {?KEY_NAMED, <<"name">>}).
--define(PROTOTYPE_KEY, {?KEY_NAMED, <<"prototype">>}).
+%% named and private keys are {Tag, Id, Text}
+-define(KEY_ID(K), element(2, K)).
+-define(KEY_TEXT(K), element(3, K)).
+%% ids as arc_bytecode_key_ffi:named/1 gives them, checked by arc_rt_layout_test
+-define(LENGTH_KEY, {?KEY_NAMED, 450907079707063178, <<"length">>}).
+-define(NAME_KEY, {?KEY_NAMED, 174053263642217938, <<"name">>}).
+-define(PROTOTYPE_KEY, {?KEY_NAMED, 351306839192840530, <<"prototype">>}).
+-define(CALLEE_KEY, {?KEY_NAMED, 258180192190089946, <<"callee">>}).
+-define(PROTO_KEY, {?KEY_NAMED, 285587656632664716, <<"__proto__">>}).
+-define(TO_JSON_KEY, {?KEY_NAMED, 559356507754130940, <<"toJSON">>}).
+-define(DONE_KEY, {?KEY_NAMED, 101593477352523290, <<"done">>}).
+-define(ITERATOR_KEY, {?KEY_NAMED, 425897015423828150, <<"iterator">>}).
+-define(NEXT_KEY, {?KEY_NAMED, 112767222323064210, <<"next">>}).
+-define(KEYS_KEY, {?KEY_NAMED, 292975467517734398, <<"keys">>}).
+-define(VALUES_KEY, {?KEY_NAMED, 198364448712980398, <<"values">>}).
+-define(ENTRIES_KEY, {?KEY_NAMED, 565934447722088750, <<"entries">>}).
+-define(RETURN_KEY, {?KEY_NAMED, 464278738730347786, <<"return">>}).
 %% SymbolId for Symbol.iterator
 -define(SYMBOL_ITERATOR, {well_known_symbol, sym_iterator}).
 
@@ -355,7 +368,7 @@
                      %% starts with a small letter
                      ?TYPEDARRAYOBJ_TAG ->
                          case K of
-                             {?KEY_NAMED, <<KeyC, _/binary>>}
+                             {?KEY_NAMED, _, <<KeyC, _/binary>>}
                                when KeyC >= $a, KeyC =< $z -> true;
                              _ -> false
                          end;

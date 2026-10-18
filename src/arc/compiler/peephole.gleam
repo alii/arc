@@ -386,7 +386,7 @@ fn peephole(
       ..rest
     ] ->
       case key.canonical(name) {
-        key.Named(_) as k ->
+        key.Named(..) as k ->
           peephole(rest, consts, [IrFinal(opcode.GetFieldCall1(k, a)), ..acc])
         k ->
           peephole(rest, consts, [
@@ -410,7 +410,7 @@ fn peephole(
       ..rest
     ] ->
       case key.canonical(name) {
-        key.Named(_) as k ->
+        key.Named(..) as k ->
           peephole(rest, consts, [
             IrFinal(opcode.GetLocalFieldCall(i, k)),
             ..acc
@@ -424,7 +424,7 @@ fn peephole(
       }
     [IrGetFieldKeep(name), IrFinal(opcode.CallMethod(0)), ..rest] ->
       case key.canonical(name) {
-        key.Named(_) as k ->
+        key.Named(..) as k ->
           peephole(rest, consts, [IrFinal(opcode.GetFieldCall(k)), ..acc])
         k ->
           peephole(rest, consts, [
@@ -451,7 +451,7 @@ fn peephole(
       ..rest
     ] ->
       case key.canonical(name) {
-        key.Named(_) as k ->
+        key.Named(..) as k ->
           peephole(rest, consts, [
             IrFinal(opcode.PutLocalLocalField(o, v, k)),
             ..acc
@@ -472,7 +472,7 @@ fn peephole(
       ..rest
     ] ->
       case key.canonical(name) {
-        key.Named(_) as k ->
+        key.Named(..) as k ->
           peephole(rest, consts, [
             IrFinal(opcode.PutLocalConstField(o, c, k)),
             ..acc

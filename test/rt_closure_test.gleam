@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
+import arc/bytecode/names
 import arc/compiler
 import arc/internal/tuple_array
 import arc/parser
@@ -40,7 +41,7 @@ fn make(source: String, name: String) -> #(Handle, Agent) {
 }
 
 fn own_handle(st: Agent, h: Handle, key: String) -> Result(Handle, Nil) {
-  case rt_obj.ordinary_own_property(st, h, StringKey(Named(key))) {
+  case rt_obj.ordinary_own_property(st, h, StringKey(named(key))) {
     Some(DataProperty(value:, ..)) ->
       case classify(value) {
         KHandle(p) -> Ok(p)
@@ -67,18 +68,18 @@ pub fn plain_function_shape_test() {
   let #(keys, st) = rt_obj.own_keys(st, f)
   assert keys
     == [
-      StringKey(Named("length")),
-      StringKey(Named("name")),
-      StringKey(Named("prototype")),
+      StringKey(names.length),
+      StringKey(names.name),
+      StringKey(names.prototype),
     ]
   let assert Some(DataProperty(value: len, writable: False, ..)) =
-    rt_obj.ordinary_own_property(st, f, StringKey(Named("length")))
+    rt_obj.ordinary_own_property(st, f, StringKey(names.length))
   assert classify(len) == KNum(JInt(2))
   let assert Some(DataProperty(value: name, ..)) =
-    rt_obj.ordinary_own_property(st, f, StringKey(Named("name")))
+    rt_obj.ordinary_own_property(st, f, StringKey(names.name))
   assert classify(name) == KStr("Foo")
   let assert Some(DataProperty(writable: True, configurable: False, ..)) =
-    rt_obj.ordinary_own_property(st, f, StringKey(Named("prototype")))
+    rt_obj.ordinary_own_property(st, f, StringKey(names.prototype))
   let assert Ok(proto) = own_handle(st, f, "prototype")
   assert proto_of(st, proto) == st.realm.object.prototype
   assert own_handle(st, proto, "constructor") == Ok(f)
@@ -95,26 +96,26 @@ pub fn birth_props_precede_later_props_test() {
     rt_obj.define_own_data(
       st,
       f,
-      StringKey(Named("sooner")),
+      StringKey(named("sooner")),
       types.mk_undefined(),
       writable: True,
       enumerable: True,
       configurable: True,
     )
   let #(prototype, st) =
-    rt_obj.get_prop(st, types.mk_object(f), StringKey(Named("prototype")))
+    rt_obj.get_prop(st, types.mk_object(f), StringKey(names.prototype))
   let assert KHandle(proto) = classify(prototype)
   let assert Some(DataProperty(
     writable: True,
     enumerable: False,
     configurable: True,
     ..,
-  )) = rt_obj.ordinary_own_property(st, proto, StringKey(Named("constructor")))
+  )) = rt_obj.ordinary_own_property(st, proto, StringKey(names.constructor))
   let #(_, st) =
     rt_obj.define_own_data(
       st,
       f,
-      StringKey(Named("later")),
+      StringKey(named("later")),
       types.mk_undefined(),
       writable: True,
       enumerable: True,
@@ -124,7 +125,7 @@ pub fn birth_props_precede_later_props_test() {
     rt_obj.define_own_data(
       st,
       proto,
-      StringKey(Named("method")),
+      StringKey(named("method")),
       types.mk_undefined(),
       writable: True,
       enumerable: True,
@@ -133,14 +134,14 @@ pub fn birth_props_precede_later_props_test() {
   let #(keys, st) = rt_obj.own_keys(st, f)
   assert keys
     == [
-      StringKey(Named("length")),
-      StringKey(Named("name")),
-      StringKey(Named("prototype")),
-      StringKey(Named("sooner")),
-      StringKey(Named("later")),
+      StringKey(names.length),
+      StringKey(names.name),
+      StringKey(names.prototype),
+      StringKey(named("sooner")),
+      StringKey(named("later")),
     ]
   let #(pkeys, st) = rt_obj.own_keys(st, proto)
-  assert pkeys == [StringKey(Named("constructor")), StringKey(Named("method"))]
+  assert pkeys == [StringKey(names.constructor), StringKey(named("method"))]
   let assert Ok(t) = find(compile("function Bar() {}"), "Bar")
   let #(g, st) =
     rt_closure.new_bytecode_function(st, t, bytecode.env_from_list([]), 0)
@@ -148,7 +149,7 @@ pub fn birth_props_precede_later_props_test() {
     rt_obj.define_own_data(
       st,
       g,
-      StringKey(Named("z")),
+      StringKey(named("z")),
       types.mk_undefined(),
       writable: True,
       enumerable: True,
@@ -157,17 +158,17 @@ pub fn birth_props_precede_later_props_test() {
   let #(gkeys, _) = rt_obj.own_keys(st, g)
   assert gkeys
     == [
-      StringKey(Named("length")),
-      StringKey(Named("name")),
-      StringKey(Named("prototype")),
-      StringKey(Named("z")),
+      StringKey(names.length),
+      StringKey(names.name),
+      StringKey(names.prototype),
+      StringKey(named("z")),
     ]
 }
 
 pub fn class_constructor_prototype_not_writable_test() {
   let #(c, st) = make("class C { constructor() {} }", "C")
   let assert Some(DataProperty(writable: False, configurable: False, ..)) =
-    rt_obj.ordinary_own_property(st, c, StringKey(Named("prototype")))
+    rt_obj.ordinary_own_property(st, c, StringKey(names.prototype))
   let assert Ok(proto) = own_handle(st, c, "prototype")
   assert own_handle(st, proto, "constructor") == Ok(c)
   let assert SObject(kind: BytecodeFn(home_object: Some(home), ..), ..) =
@@ -179,7 +180,7 @@ pub fn generator_function_shape_test() {
   let #(g, st) = make("function* gen() {}", "gen")
   assert proto_of(st, g) == st.realm.generator_fn.prototype
   let assert Some(DataProperty(writable: True, ..)) =
-    rt_obj.ordinary_own_property(st, g, StringKey(Named("prototype")))
+    rt_obj.ordinary_own_property(st, g, StringKey(names.prototype))
   let assert Ok(proto) = own_handle(st, g, "prototype")
   assert proto_of(st, proto) == st.realm.generator.prototype
   assert own_handle(st, proto, "constructor") == Error(Nil)
@@ -198,22 +199,20 @@ pub fn async_generator_function_shape_test() {
 pub fn async_function_has_no_prototype_test() {
   let #(a, st) = make("async function af() {}", "af")
   assert proto_of(st, a) == st.realm.async_fn.prototype
-  assert rt_obj.ordinary_own_property(st, a, StringKey(Named("prototype")))
-    == None
+  assert rt_obj.ordinary_own_property(st, a, StringKey(names.prototype)) == None
   let assert SObject(kind: BytecodeFn(home_object: None, ..), ..) =
     rt_store.cell_get(st, a)
 }
 
 pub fn arrow_and_method_have_no_prototype_test() {
   let #(arrow, st) = make("var arrow = () => 1;", "arrow")
-  assert rt_obj.ordinary_own_property(st, arrow, StringKey(Named("prototype")))
+  assert rt_obj.ordinary_own_property(st, arrow, StringKey(names.prototype))
     == None
   let assert SObject(kind: BytecodeFn(flags: af, ..), ..) =
     rt_store.cell_get(st, arrow)
   assert af.is_arrow
   let #(m, st) = make("var o = { m() {} };", "m")
-  assert rt_obj.ordinary_own_property(st, m, StringKey(Named("prototype")))
-    == None
+  assert rt_obj.ordinary_own_property(st, m, StringKey(names.prototype)) == None
   let assert SObject(kind: BytecodeFn(flags: mf, ..), ..) =
     rt_store.cell_get(st, m)
   assert !mf.is_arrow && !mf.is_constructor

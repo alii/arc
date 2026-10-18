@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/internal/unsafe
 import arc/interp/safepoint
@@ -42,7 +42,7 @@ pub fn global(st: Agent, name: String) -> #(JsVal, Agent) {
 }
 
 pub fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
-  rt_obj.get_prop(st, recv, StringKey(Named(name)))
+  rt_obj.get_prop(st, recv, StringKey(named(name)))
 }
 
 pub fn call_method(

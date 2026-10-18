@@ -1,5 +1,5 @@
 import arc/bytecode/error_kind.{TypeError}
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/bytecode/opcode.{
   AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
 }
@@ -290,7 +290,7 @@ fn delegate_method(
     state,
     rt_obj.get_prop,
     iterator,
-    StringKey(Named(name)),
+    StringKey(named(name)),
   ))
   case classify(method) {
     KUndef | KNull -> #(None, state)

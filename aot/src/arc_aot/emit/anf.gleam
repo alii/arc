@@ -127,7 +127,9 @@ pub fn make_tuple(vs: List(ir.Value)) -> Build(ir.Value) {
 
 /// the key of a property whose name is known now, as the object kernels take it
 pub fn named_key(name: BitArray) -> Build(ir.Value) {
-  make_tuple([ir.ConstAtom("named"), ir.ConstBinary(name)])
+  let assert Ok(name) = bit_array.to_string(name)
+    as "anf.named_key: a static property name is not text"
+  let_(wire_named(name))
 }
 
 pub fn tuple_get(v: ir.Value, i: Int) -> ir.Expr {
@@ -698,11 +700,7 @@ pub fn object_key_lit(pk: ast.PropertyName) -> Build(ir.Value) {
       }
     ast.NumberName(value: ast.InfiniteNumber, ..) -> wire_named("Infinity")
     ast.BigIntName(value: n, ..) -> wire_prop_key(key.index(n))
-    ast.PrivateName(name:, ..) ->
-      ir.TermOp(ir.MakeTuple, [
-        ir.ConstAtom("private"),
-        ir.ConstBinary(bit_array.from_string(name)),
-      ])
+    ast.PrivateName(name:, ..) -> wire_prop_key(key.private(name))
     ast.ComputedName(..) ->
       panic as "object_key_lit: ComputedName routes through host(to_property_key)"
   }
@@ -713,10 +711,16 @@ pub fn object_key_lit(pk: ast.PropertyName) -> Build(ir.Value) {
 fn wire_prop_key(k: key.PropertyKey) -> ir.Expr {
   case k {
     key.Index(n) -> wire_index(n)
-    key.Named(s) -> wire_named(s)
-    key.Private(text) ->
+    key.Named(id, name) ->
+      ir.TermOp(ir.MakeTuple, [
+        ir.ConstAtom("named"),
+        ir.ConstI64(id),
+        ir.ConstBinary(bit_array.from_string(name)),
+      ])
+    key.Private(id, text) ->
       ir.TermOp(ir.MakeTuple, [
         ir.ConstAtom("private"),
+        ir.ConstI64(id),
         ir.ConstBinary(bit_array.from_string(text)),
       ])
   }
@@ -726,9 +730,6 @@ fn wire_index(n: Int) -> ir.Expr {
   ir.TermOp(ir.MakeTuple, [ir.ConstAtom("index"), ir.ConstI64(n)])
 }
 
-fn wire_named(s: String) -> ir.Expr {
-  ir.TermOp(ir.MakeTuple, [
-    ir.ConstAtom("named"),
-    ir.ConstBinary(bit_array.from_string(s)),
-  ])
+pub fn wire_named(s: String) -> ir.Expr {
+  wire_prop_key(key.named(s))
 }

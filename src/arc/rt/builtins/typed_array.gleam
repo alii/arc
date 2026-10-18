@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key.{Index}
+import arc/bytecode/names
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/buffer
 import arc/rt/builtins/array_buffer as b_array_buffer
@@ -83,11 +84,7 @@ pub fn init(
   let #(values_prop, st) = rt_store.builtin_property(st, mk_object(values_h))
   // tostring is the same object as array.prototype.tostring
   let #(array_to_string, st) =
-    rt_obj.get_prop(
-      st,
-      mk_object(array.prototype),
-      StringKey(Named("toString")),
-    )
+    rt_obj.get_prop(st, mk_object(array.prototype), StringKey(names.to_string))
   let #(to_string_prop, st) = rt_store.builtin_property(st, array_to_string)
   let #(methods, st) =
     common.alloc_methods(st, function_proto, [
@@ -2386,7 +2383,7 @@ fn proto_to_locale_string_loop(
         ..acc
       ])
     False -> {
-      let #(m, st) = rt_obj.get_prop(st, el, StringKey(Named("toLocaleString")))
+      let #(m, st) = rt_obj.get_prop(st, el, StringKey(names.to_locale_string))
       let #(res, st) = rt_call.call(st, m, el, [locales_v, options_v])
       let #(s, st) = rt_val.to_string(st, res)
       proto_to_locale_string_loop(st, view, k + 1, locales_v, options_v, [
@@ -2404,8 +2401,7 @@ fn species_ctor_for(
   kind: TypedArrayKind,
 ) -> #(Option(JsVal), Agent) {
   let default_ctor = typed_array_pair(st, kind).constructor
-  let #(ctor, st) =
-    rt_obj.get_prop(st, exemplar, StringKey(Named("constructor")))
+  let #(ctor, st) = rt_obj.get_prop(st, exemplar, StringKey(names.constructor))
   case classify(ctor) {
     KUndef -> #(None, st)
     KHandle(_) -> {

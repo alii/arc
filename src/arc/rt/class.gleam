@@ -1,4 +1,5 @@
-import arc/bytecode/key.{type PropertyKey, Named, Private, private_display_name}
+import arc/bytecode/key.{type PropertyKey, private, private_display_name}
+import arc/bytecode/names
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -71,8 +72,7 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
             "Class extends value is not a constructor or null",
           )
         True -> {
-          let #(pp, st) =
-            rt_obj.get_prop(st, super, StringKey(Named("prototype")))
+          let #(pp, st) = rt_obj.get_prop(st, super, StringKey(names.prototype))
           case classify(pp) {
             KHandle(pph) -> #(Some(pph), parent_h, st)
             KNull -> #(None, parent_h, st)
@@ -118,7 +118,7 @@ pub fn setup(st: Agent, ctor: Handle, super: JsVal) -> #(Handle, Agent) {
     rt_obj.define_own_data(
       st,
       ctor,
-      StringKey(Named("prototype")),
+      StringKey(names.prototype),
       mk_object(proto),
       writable: False,
       enumerable: False,
@@ -128,7 +128,7 @@ pub fn setup(st: Agent, ctor: Handle, super: JsVal) -> #(Handle, Agent) {
     rt_obj.define_own_data(
       st,
       proto,
-      StringKey(Named("constructor")),
+      StringKey(names.constructor),
       mk_object(ctor),
       writable: True,
       enumerable: False,
@@ -229,7 +229,7 @@ pub fn private_field_add(
 ) -> Agent {
   let text = priv_key_text(priv_key)
   let st = check_private_add(st, obj, text)
-  write_private_data(st, obj, Private(text), v, writable: True)
+  write_private_data(st, obj, private(text), v, writable: True)
 }
 
 // §7.3.29; home_object already set at class definition
@@ -241,7 +241,7 @@ pub fn private_method_add(
   kind: MethodInstallKind,
 ) -> Agent {
   let text = priv_key_text(priv_key)
-  let key = Private(text)
+  let key = private(text)
   case kind {
     // non-writable so private set rejects methods
     InstallMethod -> {
@@ -273,7 +273,7 @@ pub fn private_method_add(
 }
 
 fn check_private_add(st: Agent, obj: Handle, text: String) -> Agent {
-  case rt_obj.ordinary_own_property(st, obj, StringKey(Private(text))) {
+  case rt_obj.ordinary_own_property(st, obj, StringKey(private(text))) {
     Some(_) -> throw_private_double_init(st, text, "")
     None ->
       case rt_obj.ordinary_is_extensible(st, obj) {
@@ -372,7 +372,7 @@ pub fn private_get(st: Agent, obj: JsVal, priv_key: JsVal) -> #(JsVal, Agent) {
   let text = priv_key_text(priv_key)
   case classify(obj) {
     KHandle(h) ->
-      case rt_obj.ordinary_own_property(st, h, StringKey(Private(text))) {
+      case rt_obj.ordinary_own_property(st, h, StringKey(private(text))) {
         Some(DataProperty(value:, ..)) -> #(value, st)
         Some(AccessorProperty(get: Some(getter), ..)) ->
           st.store.ops.call(st, getter, obj, [])
@@ -409,7 +409,7 @@ pub fn private_set(
   v: JsVal,
 ) -> #(JsVal, Agent) {
   let text = priv_key_text(priv_key)
-  let key = Private(text)
+  let key = private(text)
   case classify(obj) {
     KHandle(h) ->
       case rt_obj.ordinary_own_property(st, h, StringKey(key)) {
@@ -476,7 +476,7 @@ pub fn private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
       option.is_some(rt_obj.ordinary_own_property(
         st,
         h,
-        StringKey(Private(text)),
+        StringKey(private(text)),
       ))
     _ ->
       rt_val.throw_type_error(

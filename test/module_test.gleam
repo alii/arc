@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/interp/entry
 import arc/module
 import arc/module/dynamic_import
@@ -51,7 +51,7 @@ fn bundle(entry_source: String) -> module.ModuleBundle {
 }
 
 fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
-  rt_obj.get_prop(st, recv, StringKey(Named(name)))
+  rt_obj.get_prop(st, recv, StringKey(named(name)))
 }
 
 pub fn link_builds_namespaces_over_live_cells_test() {

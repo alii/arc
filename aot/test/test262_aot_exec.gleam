@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/host
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/parser
@@ -477,7 +477,7 @@ fn print_native(
     rt_obj.set_prop(
       st,
       mk_object(st.realm.global_object),
-      StringKey(Named(print_output)),
+      StringKey(named(print_output)),
       mk_string(str),
     )
   #(Ok(mk_undefined()), host.Context(..ctx, agent: st))
@@ -492,7 +492,7 @@ fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
 }
 
 fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
-  case rt_obj.ordinary_own_property(st, h, StringKey(Named(key))) {
+  case rt_obj.ordinary_own_property(st, h, StringKey(named(key))) {
     Some(DataProperty(value: val, ..)) -> Some(val)
     Some(_) -> None
     None -> option.then(ordinary_proto(st, h), get_data(st, _, key))

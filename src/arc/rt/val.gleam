@@ -4,7 +4,8 @@ import arc/bytecode/error_kind.{
   type ErrorKind, type JsError, JsError, RangeError, ReferenceError, SyntaxError,
   TypeError,
 }
-import arc/bytecode/key.{type PropertyKey, Index, Named, array_index_of_float}
+import arc/bytecode/key.{type PropertyKey, Index, array_index_of_float, named}
+import arc/bytecode/names
 import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -278,7 +279,7 @@ fn call_primitive_methods(
     [] -> throw_type_error(st, "Cannot convert object to primitive value")
     [name, ..rest] -> {
       let ops = st.store.ops
-      let #(method, st) = get_named(st, receiver, Named(name), None)
+      let #(method, st) = get_named(st, receiver, named(name), None)
       case is_callable(st, method) {
         True -> {
           let #(result, st) = ops.call(st, method, receiver, [])
@@ -480,11 +481,11 @@ fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
     KNum(JFloat(f)) ->
       case array_index_of_float(f) {
         Some(i) -> #(StringKey(Index(i)), st)
-        None -> #(StringKey(Named(js_format_float(f))), st)
+        None -> #(StringKey(key.named(js_format_float(f))), st)
       }
-    KNum(JNan) -> #(StringKey(Named("NaN")), st)
-    KNum(JPosInf) -> #(StringKey(Named("Infinity")), st)
-    KNum(JNegInf) -> #(StringKey(Named("-Infinity")), st)
+    KNum(JNan) -> #(StringKey(names.nan), st)
+    KNum(JPosInf) -> #(StringKey(names.infinity), st)
+    KNum(JNegInf) -> #(StringKey(names.neg_infinity), st)
     KStr(s) -> #(StringKey(key.canonical(s)), st)
     _ -> {
       let #(s, st) = to_string(st, v)

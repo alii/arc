@@ -57,10 +57,10 @@ list_from_array_like(St, {?HANDLE_TAG, Id}) ->
          {?ELEMS_DENSE, A}, _}
           when map_size(Props) =:= 2, (Mapped =:= ?NONE orelse Mapped =:= {?SOME, []}) ->
             case Props of
-                #{{?KEY_NAMED, <<"length">>} := Prop}
+                #{?LENGTH_KEY := Prop}
                   when element(1, Prop) =:= ?DATAPROPERTY_TAG,
                        is_integer(element(?DATAPROPERTY_VALUE, Prop)),
-                       is_map_key({?KEY_NAMED, <<"callee">>}, Props) ->
+                       is_map_key(?CALLEE_KEY, Props) ->
                     dense_list(A, element(?DATAPROPERTY_VALUE, Prop));
                 _ -> miss
             end;
@@ -119,7 +119,7 @@ instance_of(St, V, {?HANDLE_TAG, CId}, Sym) ->
                     case V of
                         {?HANDLE_TAG, VId} ->
                             case element(?SOBJECT_PROPS, Cell) of
-                                #{{?KEY_NAMED, <<"prototype">>} := Prop}
+                                #{?PROTOTYPE_KEY := Prop}
                                   when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                                     case element(?DATAPROPERTY_VALUE, Prop) of
                                         {?HANDLE_TAG, PId} ->

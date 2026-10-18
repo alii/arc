@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
+import arc/bytecode/names
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
@@ -97,7 +98,7 @@ pub fn install_262_and_create_realm_test() {
   assert get(st, dollar, "global") == mk_object(st.realm.global_object)
   let #(agent_obj, st) = rt_obj.new_object_literal(st)
   let #(_, st) =
-    rt_obj.set_prop(st, dollar, StringKey(Named("agent")), agent_obj)
+    rt_obj.set_prop(st, dollar, StringKey(named("agent")), agent_obj)
   let #(child, st) = rt_helpers.call_method(st, dollar, "createRealm", [])
   assert st.realm.id == 0
   assert dict.size(st.realms) == 2
@@ -180,7 +181,7 @@ pub fn stack_setter_uses_its_own_realm_test() {
       rt_obj.ordinary_own_property(
         st,
         r.error.prototype,
-        StringKey(Named("stack")),
+        StringKey(names.stack),
       )
     s
   }
@@ -229,7 +230,7 @@ pub fn species_create_ignores_a_foreign_array_constructor_test() {
   let #(arr, st) = rt_obj.new_array(st, [mk_int(1)])
   let other_array = mk_object(other.array.constructor)
   let #(_, st) =
-    rt_obj.set_prop(st, arr, StringKey(Named("constructor")), other_array)
+    rt_obj.set_prop(st, arr, StringKey(names.constructor), other_array)
   let #(identity, st) =
     rt_helpers.func(st, fn(st, args) {
       let assert [v, ..] = args

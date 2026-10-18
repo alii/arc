@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key
+import arc/bytecode/names
 import arc/internal/utf16
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
@@ -1002,7 +1003,7 @@ fn string_raw(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     [_, ..rest] -> rest
     [] -> []
   }
-  let #(raw_val, st) = rt_obj.get_prop(st, template, StringKey(Named("raw")))
+  let #(raw_val, st) = rt_obj.get_prop(st, template, StringKey(names.raw))
   let #(literal_count, st) = rt_abstract_ops.length_of_array_like(st, raw_val)
   case literal_count {
     0 -> #(mk_string(""), st)
@@ -1170,7 +1171,7 @@ fn require_global_when_regexp(
   case is_re {
     False -> st
     True -> {
-      let #(flags, st) = rt_obj.get_prop(st, val, StringKey(Named("flags")))
+      let #(flags, st) = rt_obj.get_prop(st, val, StringKey(names.flags))
       let flags = rt_val.require_object_coercible(st, flags)
       let #(s, st) = rt_val.to_string(st, flags)
       case b_regexp.has_flag(s, "g") {

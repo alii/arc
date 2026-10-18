@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
@@ -121,7 +121,7 @@ fn map_constructor(
     KUndef | KNull -> #(map_h, st)
     _ -> {
       let iterable = first_arg_or_undefined(args)
-      let #(adder, st) = rt_obj.get_prop(st, map, StringKey(Named("set")))
+      let #(adder, st) = rt_obj.get_prop(st, map, StringKey(names.set))
       case rt_val.is_callable(st, adder) {
         False ->
           rt_val.throw_type_error(st, "'set' property of Map is not a function")

@@ -22,7 +22,7 @@ plain_key(_, Prop, Acc) when element(?DATAPROPERTY_ENUMERABLE, Prop) =:= false -
     Acc;
 plain_key({?KEY_INDEX, I}, _, {Idx, Named}) ->
     {[I | Idx], Named};
-plain_key({?KEY_NAMED, _} = K, Prop, {Idx, Named}) ->
+plain_key({?KEY_NAMED, _, _} = K, Prop, {Idx, Named}) ->
     {Idx, [{element(?DATAPROPERTY_SEQ, Prop), K} | Named]};
 plain_key(_, _, Acc) ->
     Acc.
@@ -90,13 +90,13 @@ key(<<C, _/binary>> = B) when ?DIGIT(C) ->
         N when N >= 0, N =< ?MAX_ARRAY_INDEX ->
             case integer_to_binary(N) =:= B of
                 true -> {?KEY_INDEX, N};
-                false -> {?KEY_NAMED, B}
+                false -> arc_bytecode_key_ffi:named(B)
             end;
-        _ -> {?KEY_NAMED, B}
+        _ -> arc_bytecode_key_ffi:named(B)
     catch
-        error:badarg -> {?KEY_NAMED, B}
+        error:badarg -> arc_bytecode_key_ffi:named(B)
     end;
-key(B) -> {?KEY_NAMED, B}.
+key(B) -> arc_bytecode_key_ffi:named(B).
 -define(PLAIN(C), (C =/= $" andalso C =/= $\\ andalso C >= 16#20)).
 
 %% src: keep source slices for the reviver context
@@ -367,7 +367,7 @@ plain_stringify(St, V, Gap) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     {?HANDLE_TAG, OP} = element(?BUILTINPAIR_PROTOTYPE, element(?REALM_OBJECT, Realm)),
     {?HANDLE_TAG, AP} = element(?BUILTINPAIR_PROTOTYPE, element(?REALM_ARRAY, Realm)),
-    TJ = {?KEY_NAMED, <<"toJSON">>},
+    TJ = ?TO_JSON_KEY,
     Clean = fun(Id) ->
         case arc_rt_arena_ffi:get(Id, Cells) of
             {?SOBJECT_TAG, _, _, Props, _, _, _} -> not is_map_key(TJ, Props);
@@ -407,7 +407,7 @@ enc({?HANDLE_TAG, Id}, {Cells, OP, AP, _} = Cx, Ind, Seen) ->
             enc_object(Pairs, Cx, Ind, [Id | Seen]);
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, ?ELEMS_NONE, _}
           when (Proto =:= {?SOME, {?HANDLE_TAG, OP}} orelse Proto =:= ?NONE),
-               not is_map_key({?KEY_NAMED, <<"toJSON">>}, Props) ->
+               not is_map_key(?TO_JSON_KEY, Props) ->
             enc_object(plain_pairs(Props), Cx, Ind, [Id | Seen]);
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, {?SOME, {?HANDLE_TAG, AP}}, Props, _, Els, _}
           when map_size(Props) =:= 0 ->
@@ -426,7 +426,7 @@ plain_pairs(Props) ->
     Idx = lists:sort([{N, P} || {{?KEY_INDEX, N}, P} <- L]),
     Named = lists:sort(fun({_, A}, {_, B}) ->
                 element(?DATAPROPERTY_SEQ, A) =< element(?DATAPROPERTY_SEQ, B) end,
-                       [{B, P} || {{?KEY_NAMED, B}, P} <- L]),
+                       [{B, P} || {{?KEY_NAMED, _, B}, P} <- L]),
     [{key_text(K), value_of(P)} || {K, P} <- Idx ++ Named, enumerable(P)].
 
 key_text(N) when is_integer(N) -> integer_to_binary(N);

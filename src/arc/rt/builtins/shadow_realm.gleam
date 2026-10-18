@@ -1,5 +1,5 @@
 import arc/bytecode/error_kind.{TypeError}
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/compiler
 import arc/parser
 import arc/rt/async as rt_async
@@ -199,9 +199,9 @@ fn copy_name_and_length(
 ) -> #(#(String, JsVal), Agent) {
   let target_v = mk_object(target)
   let #(len_desc, st) =
-    rt_obj.get_own_property(st, target, StringKey(Named("length")))
+    rt_obj.get_own_property(st, target, StringKey(names.length))
   let #(len_val, st) = case len_desc {
-    Some(_) -> rt_obj.get_prop(st, target_v, StringKey(Named("length")))
+    Some(_) -> rt_obj.get_prop(st, target_v, StringKey(names.length))
     None -> #(mk_undefined(), st)
   }
   let length = case classify(len_val) {
@@ -209,7 +209,7 @@ fn copy_name_and_length(
     KNum(n) -> mk_int(int.max(rt_val.jsnum_to_integer_or_infinity(n), 0))
     _ -> mk_int(0)
   }
-  let #(name_val, st) = rt_obj.get_prop(st, target_v, StringKey(Named("name")))
+  let #(name_val, st) = rt_obj.get_prop(st, target_v, StringKey(names.name))
   let name = case classify(name_val) {
     KStr(s) -> s
     _ -> ""

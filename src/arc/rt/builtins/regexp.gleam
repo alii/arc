@@ -1,4 +1,5 @@
-import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/key.{type PropertyKey, named}
+import arc/bytecode/names
 import arc/internal/bytes
 import arc/internal/digits
 import arc/internal/unsafe
@@ -214,8 +215,7 @@ fn regexp_call(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case pattern_is_regexp, classify(flags) {
     True, KUndef -> {
-      let #(ctor, st) =
-        rt_val.get_named(st, pattern, key.Named("constructor"), None)
+      let #(ctor, st) = rt_val.get_named(st, pattern, names.constructor, None)
       case rt_val.same_value(ctor, new_target) {
         True -> #(pattern, st)
         False -> construct(st)
@@ -241,12 +241,10 @@ fn construct_regexp(
     None ->
       case pattern_is_regexp {
         True -> {
-          let #(p, st) =
-            rt_val.get_named(st, pattern, key.Named("source"), None)
+          let #(p, st) = rt_val.get_named(st, pattern, names.source, None)
           case classify(flags) {
             KUndef -> {
-              let #(f, st) =
-                rt_val.get_named(st, pattern, key.Named("flags"), None)
+              let #(f, st) = rt_val.get_named(st, pattern, names.flags, None)
               #(p, f, st)
             }
             _ -> #(p, flags, st)
@@ -433,7 +431,7 @@ fn verify_pristine(
   st: Agent,
   props: Dict(PropertyKey, Property),
 ) -> #(Bool, Agent) {
-  let exec = case dict.get(props, Named("exec")) {
+  let exec = case dict.get(props, names.exec) {
     Ok(DataProperty(value:, ..)) -> is_intrinsic_exec(st, value)
     _ -> False
   }
@@ -650,7 +648,7 @@ fn build_flags(
     [] -> #(mk_string(acc), st)
     [flag, ..rest] -> {
       let #(v, st) =
-        rt_val.get_named(st, this, Named(flag_property(flag)), None)
+        rt_val.get_named(st, this, named(flag_property(flag)), None)
       let acc = case rt_val.to_boolean(v) {
         True -> acc <> flag_char(flag)
         False -> acc
@@ -676,7 +674,7 @@ fn to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         "RegExp.prototype.toString called on non-object",
       )
   }
-  let #(src_v, st) = rt_val.get_named(st, this, key.Named("source"), None)
+  let #(src_v, st) = rt_val.get_named(st, this, names.source, None)
   let #(src, st) = rt_val.to_string(st, src_v)
   let #(flags, st) = read_flags(st, this)
   #(mk_string("/" <> src <> "/" <> flags), st)
@@ -823,7 +821,7 @@ pub fn regexp_exec_compiled(
 )
 
 pub fn set_last_index(st: Agent, h: Handle, v: JsVal) -> Agent {
-  rt_obj.set_named(st, mk_object(h), key.Named("lastIndex"), v, strict: True)
+  rt_obj.set_named(st, mk_object(h), names.last_index, v, strict: True)
 }
 
 pub fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
@@ -848,7 +846,7 @@ fn regexp_exec_mode(
   mode: ExecMode,
 ) -> #(JsVal, Agent) {
   let h = require_object(st, rx, ".exec")
-  let #(exec_fn, st) = rt_val.get_named(st, rx, key.Named("exec"), None)
+  let #(exec_fn, st) = rt_val.get_named(st, rx, names.exec, None)
   let receiver = rt_store.cell_get(st, h)
   case receiver, is_intrinsic_exec(st, exec_fn) {
     SObject(kind: RegExpObj(..), ..), True -> builtin_exec_mode(st, h, s, mode)
@@ -913,8 +911,7 @@ pub fn builtin_exec_ranges(
   h: Handle,
   s: String,
 ) -> #(MatchRanges, String, Agent) {
-  let #(li_v, st) =
-    rt_val.get_named(st, mk_object(h), key.Named("lastIndex"), None)
+  let #(li_v, st) = rt_val.get_named(st, mk_object(h), names.last_index, None)
   let #(last_index, st) = rt_val.to_length(st, li_v)
   // re-read after the get, a getter may have recompiled
   let #(flags, compiled, st) = matcher(st, h)
@@ -1159,7 +1156,7 @@ fn alloc_array_with_props(
   let props =
     list.index_map(entries, fn(entry, i) {
       let #(name, value) = entry
-      #(Named(name), types.plain_property(value, seq + i))
+      #(named(name), types.plain_property(value, seq + i))
     })
   SObject(
     kind: ArrayObj(list.length(values)),
@@ -1298,7 +1295,7 @@ fn intrinsic_getter(
   name: String,
   expected: RegExpNative,
 ) -> Bool {
-  case dict.get(props, Named(name)) {
+  case dict.get(props, named(name)) {
     Ok(types.AccessorProperty(get: Some(g), ..)) ->
       case classify(g) {
         KHandle(gh) ->
@@ -1322,7 +1319,7 @@ pub fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
   case pristine {
     Some(flags) -> #(flags, st)
     None -> {
-      let #(flags_v, st) = rt_val.get_named(st, rx, key.Named("flags"), None)
+      let #(flags_v, st) = rt_val.get_named(st, rx, names.flags, None)
       rt_val.to_string(st, flags_v)
     }
   }
@@ -1333,7 +1330,7 @@ pub fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
   let proto = st.realm.regexp.prototype
   case rt_store.cell_get(st, h) {
     SObject(kind: RegExpObj(..), proto: Some(p), props:, ..) if p == proto ->
-      case dict.has_key(props, Named("exec")) {
+      case dict.has_key(props, names.exec) {
         True -> #(False, st)
         False -> proto_pristine(st)
       }
@@ -1347,7 +1344,7 @@ pub fn species_constructor(
   o: JsVal,
   default_ctor: Handle,
 ) -> #(JsVal, Agent) {
-  let #(c, st) = rt_val.get_named(st, o, key.Named("constructor"), None)
+  let #(c, st) = rt_val.get_named(st, o, names.constructor, None)
   case classify(c) {
     KUndef -> #(mk_object(default_ctor), st)
     KHandle(_) -> {

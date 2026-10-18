@@ -1,4 +1,5 @@
-import arc/bytecode/key.{type PropertyKey, Index, Named, Private}
+import arc/bytecode/key.{type PropertyKey, Index, Named, Private, named}
+import arc/bytecode/names
 import arc/internal/ordered_entries
 import arc/rt/buffer
 import arc/rt/elements
@@ -84,7 +85,7 @@ fn inspect_object(
         ArrayObj(length:) -> inspect_array(st, elements, length, depth, visited)
         CompiledFn(..) | BytecodeFn(..) | NativeFn(..) | BoundFn(..) -> {
           let name = case
-            rt_obj.ordinary_own_property(st, h, types.StringKey(Named("name")))
+            rt_obj.ordinary_own_property(st, h, types.StringKey(names.name))
           {
             Some(DataProperty(value:, ..)) ->
               case classify(value) {
@@ -288,7 +289,7 @@ fn ordered_property_pairs(
       let #(idx, named) = acc
       case key {
         Index(i) -> #([#(i, prop), ..idx], named)
-        Named(_) | Private(_) -> #(idx, [#(key, prop), ..named])
+        Named(..) | Private(..) -> #(idx, [#(key, prop), ..named])
       }
     })
   let idx =
@@ -357,7 +358,7 @@ fn error_property(
   use <- bool.guard(fuel <= 0, None)
   case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
     SObject(props:, proto:, ..) ->
-      case dict.get(props, Named(key)) {
+      case dict.get(props, named(key)) {
         Ok(DataProperty(value:, ..)) ->
           case classify(value) {
             KStr(s) -> Some(s)

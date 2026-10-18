@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
@@ -66,7 +66,7 @@ pub fn install_test262(st: Agent, realm: Realm) -> #(Handle, Agent) {
     rt_obj.define_own_data(
       st,
       realm.global_object,
-      StringKey(Named("$262")),
+      StringKey(named("$262")),
       mk_object(h),
       writable: True,
       enumerable: True,
@@ -118,7 +118,7 @@ fn create_test262_realm(
 }
 
 fn own_data(st: Agent, h: Handle, name: String) -> Option(JsVal) {
-  case rt_obj.ordinary_own_property(st, h, StringKey(Named(name))) {
+  case rt_obj.ordinary_own_property(st, h, StringKey(named(name))) {
     Some(DataProperty(value:, ..)) -> Some(value)
     _ -> None
   }

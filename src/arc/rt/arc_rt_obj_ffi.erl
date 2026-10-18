@@ -25,7 +25,6 @@
                    with_cells/2, with_props/2, with_value/2,
                    bump_epoch_if_global/2]}).
 
--define(PROTO_KEY, {?KEY_NAMED, <<"__proto__">>}).
 -define(IC_READ_WAYS, 8).
 
 %% nested constant array literals arrive as {js_alit, Elems}
@@ -254,7 +253,7 @@ set_prop_new(St, Store, Cells, Id, Cell, K, V)
 %% true when no proto can intercept a plain write at k, memo in plain_write_protos
 chain_takes_named_write(_, _, ?NONE, _) -> true;
 chain_takes_named_write(Store, Cells, {?SOME, {?HANDLE_TAG, PId}} = Proto,
-                        {?KEY_NAMED, KB} = K)
+                        {?KEY_NAMED, _, KB} = K)
   when byte_size(KB) =/= 9; KB =/= <<"__proto__">> ->
     case is_map_key(PId, element(?STORE_PLAIN_WRITE_PROTOS, Store)) of
         true -> true;
@@ -356,9 +355,9 @@ create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
     Cells = element(?STORE_CELLS, Store),
     Cell = arc_rt_arena_ffi:get(Id, Cells),
     R = case PK of
-        {?KEY_NAMED, _} when element(1, Cell) =:= ?SSHAPEDOBJECT_TAG ->
+        {?KEY_NAMED, _, _} when element(1, Cell) =:= ?SSHAPEDOBJECT_TAG ->
             shaped_define(element(?STORE_SHAPES, Store), Cell, PK, V);
-        {?KEY_NAMED, _} when element(1, Cell) =:= ?SOBJECT_TAG ->
+        {?KEY_NAMED, _, _} when element(1, Cell) =:= ?SOBJECT_TAG ->
             case named_plain(element(?SOBJECT_KIND, Cell), PK) of
                 true -> plain_define(Cell, PK, V, Store);
                 false -> miss
@@ -465,7 +464,7 @@ get_elem(St, Recv, Idx)
     get_elem(St, Recv, trunc(Idx));
 get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, _, _} = K} ->
             Store = element(?AGENT_STORE, St),
             Cells = element(?STORE_CELLS, Store),
             case named_read(Cells, element(?STORE_SHAPES, Store),
@@ -587,7 +586,7 @@ set_elem(St, Recv, Idx, V)
     set_elem(St, Recv, trunc(Idx), V);
 set_elem(St, Recv = {?HANDLE_TAG, Id}, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, _, _} = K} ->
             set_prop_own_data(St, Recv, K, V);
         {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} -> index_write(St, Id, Idx, V);
         _ -> miss
@@ -797,7 +796,7 @@ plain_chain_ids(Cells, Shapes, {?SOME, {?HANDLE_TAG, PId}}, Fuel, Ids) when Fuel
 plain_chain_ids(_, _, _, _, _) -> false.
 
 props_all_plain_writable(none) -> true;
-props_all_plain_writable({{?KEY_NAMED, _} = K, Prop, I}) ->
+props_all_plain_writable({{?KEY_NAMED, _, _} = K, Prop, I}) ->
     case Prop of
         {?DATAPROPERTY_TAG, _, true, _, _, _} -> props_all_plain_writable(maps:next(I));
         _ when K =:= ?PROTO_KEY -> props_all_plain_writable(maps:next(I));
@@ -880,8 +879,8 @@ plain_copy_data_props(_, _, _) -> copy_miss.
 
 %% follows shape transitions that exist already; the long way makes new ones
 shaped_merge([], _, Sid, Offs, Slots) -> {Sid, Offs, Slots};
-shaped_merge([{{?KEY_NAMED, <<"__proto__">>}, _} | _], _, _, _, _) -> miss;
-shaped_merge([{{?KEY_NAMED, KB}, V} | Rest], Shapes, Sid, Offs, Slots) ->
+shaped_merge([{?PROTO_KEY, _} | _], _, _, _, _) -> miss;
+shaped_merge([{{?KEY_NAMED, _, KB}, V} | Rest], Shapes, Sid, Offs, Slots) ->
     case Offs of
         #{KB := Off} ->
             shaped_merge(Rest, Shapes, Sid, Offs, ?SLOT_SET(Slots, Off, V));
@@ -905,11 +904,11 @@ source_pairs({?SOBJECT_TAG, ?ORDINARY, _, Props, [], ?ELEMS_NONE, _}) ->
              || {K, P} <- Sorted, element(?DATAPROPERTY_ENUMERABLE, P) =:= true]
     end;
 source_pairs({?SSHAPEDOBJECT_TAG, _, _, Slots, Offs}) ->
-    [{{?KEY_NAMED, KB}, ?SLOT_AT(Slots, Off)}
+    [{arc_bytecode_key_ffi:named(KB), ?SLOT_AT(Slots, Off)}
      || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))];
 source_pairs(_) -> miss.
 
-plain_named({{?KEY_NAMED, _}, P}) -> element(1, P) =:= ?DATAPROPERTY_TAG;
+plain_named({{?KEY_NAMED, _, _}, P}) -> element(1, P) =:= ?DATAPROPERTY_TAG;
 plain_named(_) -> false.
 
 merge_pairs([], Props, Seq) -> {Props, Seq};
@@ -957,7 +956,7 @@ for_in_add(Cells, Proto, Enum, Hidden, Seen, Acc, Fuel) ->
 for_in_named([], Enum, Hidden) ->
     Sorted = lists:sort(fun({A, _}, {B, _}) -> A =< B end, Enum),
     {[K || {_, K} <- Sorted], Hidden};
-for_in_named([{{?KEY_NAMED, K}, P} | Rest], Enum, Hidden) ->
+for_in_named([{{?KEY_NAMED, _, K}, P} | Rest], Enum, Hidden) ->
     case element(?DATAPROPERTY_ENUMERABLE, P) of
         true ->
             for_in_named(Rest, [{element(?DATAPROPERTY_SEQ, P), K} | Enum], Hidden);
@@ -980,7 +979,7 @@ plain_own_enum_pairs(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_SIZE 
                             element(?DATAPROPERTY_SEQ, A) =< element(?DATAPROPERTY_SEQ, B)
                         end, maps:to_list(Props)),
                     {plain_pairs, [{KB, element(?DATAPROPERTY_VALUE, P)}
-                                  || {{?KEY_NAMED, KB}, P} <- L,
+                                  || {{?KEY_NAMED, _, KB}, P} <- L,
                                      element(?DATAPROPERTY_ENUMERABLE, P) =:= true]}
             end;
         _ -> miss

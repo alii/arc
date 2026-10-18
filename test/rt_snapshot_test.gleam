@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/rt/async as rt_async
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/lang as rt_lang
@@ -26,11 +26,11 @@ pub fn roundtrip_keeps_globals_and_properties_test() {
   let st = rt_lang.global_set(st, <<"n">>, mk_int(42))
   let st = rt_lang.global_set(st, <<"s">>, mk_string("hello"))
   let #(obj, st) = rt_obj.new_object_literal(st)
-  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(Named("a")), mk_int(1))
+  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(named("a")), mk_int(1))
   let #(inner, st) = rt_obj.new_object_literal(st)
   let #(_, st) =
-    rt_obj.set_prop(st, inner, StringKey(Named("c")), mk_string("deep"))
-  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(Named("b")), inner)
+    rt_obj.set_prop(st, inner, StringKey(named("c")), mk_string("deep"))
+  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(named("b")), inner)
   let st = rt_lang.global_set(st, <<"obj">>, obj)
 
   let st = roundtrip(st)

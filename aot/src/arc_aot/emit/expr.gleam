@@ -2790,7 +2790,7 @@ fn plain_member_name(key: ast.PropertyName) -> Option(String) {
     ast.IdentifierName(name:, ..) -> Some(name)
     ast.StringName(value:, ..) ->
       case key.canonical(value) {
-        key.Named(_) -> Some(value)
+        key.Named(..) -> Some(value)
         _ -> None
       }
     _ -> None

@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key.{Index}
+import arc/bytecode/names
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
@@ -487,7 +488,7 @@ fn get_own_prop_descriptors(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     KStr(s) -> {
       let keys =
         list.append(string_index_object_keys(0, utf8.length(s)), [
-          StringKey(Named("length")),
+          StringKey(names.length),
         ])
       let #(result_h, st) = rt_obj.new_object(st, Some(object_proto))
       let st =
@@ -713,7 +714,7 @@ fn object_value_of(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn object_to_locale_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KNull | KUndef -> rt_val.throw_type_error(st, cannot_convert)
-    _ -> rt_call.call_method(st, this, StringKey(Named("toString")), [])
+    _ -> rt_call.call_method(st, this, StringKey(names.to_string), [])
   }
 }
 

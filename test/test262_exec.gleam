@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/compiler
 import arc/compiler/compile_task
 import arc/host
@@ -688,7 +688,7 @@ fn print_native(
   let #(str, st) = rt_val.to_string(ctx.agent, host.first_arg(args))
   let global = mk_object(st.realm.global_object)
   let #(_ok, st) =
-    rt_obj.set_prop(st, global, StringKey(Named(print_output)), mk_string(str))
+    rt_obj.set_prop(st, global, StringKey(named(print_output)), mk_string(str))
   done(ctx, st)
 }
 
@@ -712,7 +712,7 @@ fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
 }
 
 fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
-  case rt_obj.ordinary_own_property(st, h, StringKey(Named(key))) {
+  case rt_obj.ordinary_own_property(st, h, StringKey(named(key))) {
     Some(DataProperty(value: val, ..)) -> Some(val)
     Some(_) -> None
     None -> option.then(ordinary_proto(st, h), get_data(st, _, key))
@@ -1062,7 +1062,7 @@ fn agent_leaving_native(
 
 fn agent_hidden_handle(st: Agent, this: JsVal, name: String) -> Option(Handle) {
   use this_h <- option.then(rt_val.handle_of(this))
-  case rt_obj.ordinary_own_property(st, this_h, StringKey(Named(name))) {
+  case rt_obj.ordinary_own_property(st, this_h, StringKey(named(name))) {
     Some(DataProperty(value:, ..)) -> rt_val.handle_of(value)
     _ -> None
   }

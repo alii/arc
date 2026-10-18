@@ -1516,13 +1516,7 @@ fn for_lhs_member_put(
           ))
       }
     ast.Dot(name:, ..) -> {
-      use inner, e <- cps.let_(
-        e,
-        ir.TermOp(ir.MakeTuple, [
-          ir.ConstAtom("named"),
-          ir.ConstBinary(bit_array.from_string(name)),
-        ]),
-      )
+      use inner, e <- cps.let_(e, anf.wire_named(name))
       use key, e <- cps.let_(
         e,
         ir.TermOp(ir.MakeTuple, [ir.ConstAtom("string_key"), inner]),

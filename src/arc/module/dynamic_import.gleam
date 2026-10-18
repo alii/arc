@@ -1,7 +1,7 @@
 // §13.3.10 import calls, failures reject the promise
 
 import arc/bytecode/error_kind.{SyntaxError, TypeError}
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/module/loader
 import arc/module/registry
 import arc/parser/ast.{type ImportAttribute, ImportAttribute}
@@ -232,7 +232,7 @@ fn import_attributes(
     KUndef -> #([], st)
     KHandle(_) -> {
       let #(attributes_obj, st) =
-        rt_obj.get_prop(st, options, StringKey(Named("with")))
+        rt_obj.get_prop(st, options, StringKey(names.with))
       case classify(attributes_obj) {
         KUndef -> #([], st)
         KHandle(h) -> {

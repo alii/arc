@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/rt/bytecode.{type EnvTuple, type FnFlags, type FuncTemplate}
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -112,7 +112,7 @@ fn new_with_eager_prototype(
         unit_id:,
         birth: BirthPending(None),
       )
-    let props = dict.from_list([#(Named("prototype"), prototype_prop)])
+    let props = dict.from_list([#(names.prototype, prototype_prop)])
     #(
       types.SObject(
         kind: kind,

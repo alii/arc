@@ -33,7 +33,6 @@ own_read(Els, Idx) ->
 
 elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
--define(CALLEE_KEY, {?KEY_NAMED, <<"callee">>}).
 
 %% §7.3.19 createlistfromarraylike for plain arrays and arguments, else miss
 arg_list(St, {?HANDLE_TAG, Id}) ->

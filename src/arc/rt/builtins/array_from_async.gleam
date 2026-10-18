@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Named, max_array_length}
+import arc/bytecode/key.{max_array_length}
+import arc/bytecode/names
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -140,7 +141,7 @@ fn from_async_closure(
         _ -> rt_val.throw_type_error(st, "The iterator is not an object")
       }
       let #(next_method, st) =
-        rt_obj.get_prop(st, iter_val, StringKey(Named("next")))
+        rt_obj.get_prop(st, iter_val, StringKey(names.next))
       from_async_iterate(
         st,
         c,
@@ -247,8 +248,7 @@ fn from_async_next_steps(
     KHandle(_) -> st
     _ -> rt_val.throw_type_error(st, "Iterator result is not an object")
   }
-  let #(done_val, st) =
-    rt_obj.get_prop(st, next_result, StringKey(Named("done")))
+  let #(done_val, st) = rt_obj.get_prop(st, next_result, StringKey(names.done))
   case rt_val.to_boolean(done_val) {
     True -> {
       let st = from_async_set_length(st, ctx.target, ctx.k)
@@ -256,7 +256,7 @@ fn from_async_next_steps(
     }
     False -> {
       let #(next_value, st) =
-        rt_obj.get_prop(st, next_result, StringKey(Named("value")))
+        rt_obj.get_prop(st, next_result, StringKey(names.value))
       case ctx.map_fn {
         None -> from_async_define_and_continue(st, ctx, next_value)
         Some(map_fn) ->
@@ -356,7 +356,7 @@ fn call_return_method(st: Agent, iter: JsVal) -> #(Option(JsVal), Agent) {
     KHandle(_) -> {
       let got =
         attempt_value(st, fn(st) {
-          rt_obj.get_prop(st, iter, StringKey(Named("return")))
+          rt_obj.get_prop(st, iter, StringKey(names.return))
         })
       case got {
         Error(#(_inner_thrown, st)) -> #(None, st)
@@ -520,7 +520,7 @@ fn from_async_set_length(st: Agent, target: JsVal, n: Int) -> Agent {
   case classify(target) {
     KHandle(_) -> {
       let #(ok, st) =
-        rt_obj.set_prop(st, target, StringKey(Named("length")), mk_int(n))
+        rt_obj.set_prop(st, target, StringKey(names.length), mk_int(n))
       case ok {
         True -> st
         False ->

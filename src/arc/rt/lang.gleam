@@ -1,4 +1,5 @@
-import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/key.{type PropertyKey}
+import arc/bytecode/names
 import arc/bytecode/opcode.{type IterView, EntriesView, KeysView, ValuesView}
 import arc/internal/unsafe
 import arc/rt/async as rt_async
@@ -31,11 +32,11 @@ pub type IterHint {
   Async
 }
 
-const iterator_key = StringKey(Named("iterator"))
+const iterator_key = StringKey(names.iterator)
 
-const next_key = StringKey(Named("next"))
+const next_key = StringKey(names.next)
 
-const done_key = StringKey(Named("done"))
+const done_key = StringKey(names.done)
 
 pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let store = st.store
@@ -43,7 +44,7 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let props =
     dict.from_list([
       #(
-        Named("iterator"),
+        names.iterator,
         types.DataProperty(
           value: rec.iterator,
           writable: True,
@@ -53,7 +54,7 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
         ),
       ),
       #(
-        Named("next"),
+        names.next,
         types.DataProperty(
           value: rec.next_method,
           writable: True,
@@ -63,7 +64,7 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
         ),
       ),
       #(
-        Named("done"),
+        names.done,
         types.DataProperty(
           value: mk_bool(False),
           writable: True,
@@ -118,7 +119,7 @@ fn record_props(
 fn parts_of(
   props: Dict(PropertyKey, types.Property),
 ) -> Option(IteratorRecord) {
-  case dict.get(props, Named("iterator")), dict.get(props, Named("next")) {
+  case dict.get(props, names.iterator), dict.get(props, names.next) {
     Ok(DataProperty(value: iterator, ..)),
       Ok(DataProperty(value: next_method, ..))
     -> Some(IteratorRecord(iterator:, next_method:))
@@ -152,7 +153,7 @@ fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
 fn record_fields(st: Agent, rec: JsVal) -> Option(#(Bool, IteratorRecord)) {
   case record_props(st, rec) {
     Some(props) ->
-      case dict.get(props, Named("done")), parts_of(props) {
+      case dict.get(props, names.done), parts_of(props) {
         Ok(DataProperty(value: done, ..)), Some(record) ->
           Some(#(rt_val.to_boolean(done), record))
         _, _ -> None
@@ -245,7 +246,7 @@ fn protocol_step(
     case done {
       True -> #(#(True, mk_undefined()), st)
       False -> {
-        let #(v, st) = rt_obj.get_prop(st, result, StringKey(Named("value")))
+        let #(v, st) = rt_obj.get_prop(st, result, StringKey(names.value))
         #(#(False, v), st)
       }
     }
@@ -417,7 +418,7 @@ pub fn get_template_object(
         rt_obj.define_own_data(
           st,
           tpl_h,
-          StringKey(Named("raw")),
+          StringKey(names.raw),
           raw_v,
           writable: False,
           enumerable: False,
@@ -576,7 +577,7 @@ pub fn closable_record(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
     rt_obj.get_prop(
       st,
       mk_object(array_iter_proto(st, rec)),
-      StringKey(Named("return")),
+      StringKey(names.return),
     )
   case classify(ret) {
     KUndef | KNull -> #(mk_undefined(), st)
@@ -649,6 +650,6 @@ pub fn global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
 fn binary_key(name: BitArray) -> PropertyKey {
   case bit_array.to_string(name) {
     Ok(s) -> key.canonical(s)
-    Error(Nil) -> Named("")
+    Error(Nil) -> names.empty
   }
 }

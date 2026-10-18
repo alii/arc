@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key.{Index, named}
+import arc/bytecode/names
 import arc/interp/guard
 import arc/interp/kernel
 import arc/rt/obj as rt_obj
@@ -46,38 +47,37 @@ pub fn compare_and_equality_test() {
 pub fn get_and_put_field_test() {
   let st = rt_helpers.agent()
   let #(obj, st) = rt_obj.new_object_literal(st)
-  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(Named("x")), mk_int(42))
-  assert classify(kernel.get_field(st, obj, key.Named("x"))) == KNum(JInt(42))
-  assert classify(kernel.get_field(st, obj, key.Named("missing"))) == KUndef
-  let assert KHandle(_) =
-    classify(kernel.get_field(st, obj, key.Named("constructor")))
-  assert is_miss(kernel.get_field(st, obj, key.Named("__proto__")))
-  assert classify(kernel.get_field(st, mk_string("héllo"), key.Named("length")))
+  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(named("x")), mk_int(42))
+  assert classify(kernel.get_field(st, obj, key.named("x"))) == KNum(JInt(42))
+  assert classify(kernel.get_field(st, obj, key.named("missing"))) == KUndef
+  let assert KHandle(_) = classify(kernel.get_field(st, obj, names.constructor))
+  assert is_miss(kernel.get_field(st, obj, names.proto))
+  assert classify(kernel.get_field(st, mk_string("héllo"), names.length))
     == KNum(JInt(5))
   let assert KHandle(_) =
-    classify(kernel.get_field(st, mk_string("s"), key.Named("slice")))
-  assert classify(kernel.get_field(st, mk_string("s"), key.Named("nope")))
+    classify(kernel.get_field(st, mk_string("s"), key.named("slice")))
+  assert classify(kernel.get_field(st, mk_string("s"), key.named("nope")))
     == KUndef
   let assert KHandle(_) =
-    classify(kernel.get_field(st, mk_int(1), key.Named("toFixed")))
-  assert is_miss(kernel.get_field(st, mk_string("s"), key.Named("__proto__")))
-  assert is_miss(kernel.get_field(st, mk_undefined(), key.Named("x")))
+    classify(kernel.get_field(st, mk_int(1), key.named("toFixed")))
+  assert is_miss(kernel.get_field(st, mk_string("s"), names.proto))
+  assert is_miss(kernel.get_field(st, mk_undefined(), key.named("x")))
   assert kernel.type_of(st.store, obj) == "object"
   assert kernel.type_of(st.store, mk_int(0)) == "number"
   let store =
-    kernel.put_field(st.store, obj, key.Named("x"), mk_int(43), create: True)
+    kernel.put_field(st.store, obj, key.named("x"), mk_int(43), create: True)
   assert !is_miss(store)
   let st = types.Agent(..st, store:)
-  let #(v, st) = rt_obj.get_prop(st, obj, StringKey(Named("x")))
+  let #(v, st) = rt_obj.get_prop(st, obj, StringKey(named("x")))
   assert classify(v) == KNum(JInt(43))
   let store =
-    kernel.put_field(st.store, obj, key.Named("y"), mk_int(1), create: True)
+    kernel.put_field(st.store, obj, key.named("y"), mk_int(1), create: True)
   assert !is_miss(store)
   let st = types.Agent(..st, store:)
   let #(keys, st) = rt_obj.own_keys(st, handle_of(obj))
-  assert keys == [StringKey(Named("x")), StringKey(Named("y"))]
+  assert keys == [StringKey(named("x")), StringKey(named("y"))]
   let #(desc, st) =
-    rt_obj.get_own_property(st, handle_of(obj), StringKey(Named("y")))
+    rt_obj.get_own_property(st, handle_of(obj), StringKey(named("y")))
   let assert Some(types.DataProperty(
     writable: True,
     enumerable: True,
@@ -87,7 +87,7 @@ pub fn get_and_put_field_test() {
   assert is_miss(kernel.put_field(
     st.store,
     obj,
-    key.Named("__proto__"),
+    names.proto,
     mk_int(1),
     create: True,
   ))
@@ -95,7 +95,7 @@ pub fn get_and_put_field_test() {
   assert is_miss(kernel.put_field(
     st.store,
     obj,
-    key.Named("z"),
+    key.named("z"),
     mk_int(1),
     create: True,
   ))
@@ -111,7 +111,7 @@ pub fn get_and_put_elem_test() {
   let store = kernel.put_elem(st.store, arr, mk_int(2), mk_int(30))
   assert !is_miss(store)
   let st = types.Agent(..st, store:)
-  let #(len, st) = rt_obj.get_prop(st, arr, StringKey(Named("length")))
+  let #(len, st) = rt_obj.get_prop(st, arr, StringKey(names.length))
   assert classify(len) == KNum(JInt(3))
   assert is_miss(kernel.put_elem(st.store, arr, mk_int(5), mk_int(1)))
 }
@@ -175,7 +175,7 @@ pub fn put_elem_frozen_length_on_append_misses_test() {
     rt_obj.define_own_data(
       st,
       handle_of(arr),
-      StringKey(Named("length")),
+      StringKey(names.length),
       mk_int(2),
       writable: False,
       enumerable: False,
@@ -211,7 +211,7 @@ pub fn put_elem_past_index_range_misses_test() {
   let #(arr, st) = rt_obj.new_array(st, [])
   let #(_, st) = rt_obj.set_prop(st, arr, StringKey(Index(100_000)), mk_int(1))
   let #(_, st) =
-    rt_obj.set_prop(st, arr, StringKey(Named("length")), mk_int(4_294_967_295))
+    rt_obj.set_prop(st, arr, StringKey(names.length), mk_int(4_294_967_295))
   assert is_miss(kernel.put_elem(
     st.store,
     arr,
@@ -230,10 +230,10 @@ pub fn guard_catches_js_throw_test() {
   let st = rt_helpers.agent()
   let #(obj, st) = rt_obj.new_object_literal(st)
   let assert guard.Value(value:, agent: _) =
-    guard.guard3(rt_obj.get_prop, st, obj, StringKey(Named("nope")))
+    guard.guard3(rt_obj.get_prop, st, obj, StringKey(named("nope")))
   assert classify(value) == KUndef
   let assert guard.Thrown(agent: st, thrown:) =
-    guard.guard3(rt_obj.get_prop, st, mk_undefined(), StringKey(Named("x")))
+    guard.guard3(rt_obj.get_prop, st, mk_undefined(), StringKey(named("x")))
   let #(msg, _) = rt_val.to_string(st, thrown)
   assert msg == "TypeError: Cannot read properties of undefined (reading 'x')"
 }

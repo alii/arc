@@ -1,4 +1,5 @@
-import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/key.{type PropertyKey, named}
+import arc/bytecode/names
 import arc/internal/tree_array
 import arc/internal/unsafe
 import arc/rt/bytecode.{type FnFlags, FnFlags}
@@ -256,7 +257,7 @@ fn proxy_trap(
     )
   })
   let #(trap, st) =
-    rt_obj.get_prop(st, mk_object(handler), StringKey(Named(name)))
+    rt_obj.get_prop(st, mk_object(handler), StringKey(named(name)))
   case classify(trap) {
     KUndef | KNull -> #(None, st)
     _ ->
@@ -562,7 +563,7 @@ pub fn get_prototype_from_constructor(
   case classify(constructor) {
     KHandle(ctor_h) -> {
       let #(proto, st) =
-        rt_obj.get_prop(st, constructor, StringKey(Named("prototype")))
+        rt_obj.get_prop(st, constructor, StringKey(names.prototype))
       case classify(proto) {
         KHandle(h) -> #(h, st)
         _ -> #(intrinsic(function_realm(st, ctor_h)), st)
@@ -662,7 +663,7 @@ pub fn async_generator_fn_prototype(st: Agent, realm: types.Realm) -> Handle {
     rt_obj.ordinary_own_property(
       st,
       realm.async_gen.constructor,
-      StringKey(Named("prototype")),
+      StringKey(names.prototype),
     )
   {
     Some(DataProperty(value:, ..)) ->
@@ -871,7 +872,7 @@ pub fn new_closure(
         rt_obj.define_own_data(
           st,
           h,
-          StringKey(Named("prototype")),
+          StringKey(names.prototype),
           mk_object(own_proto),
           writable: True,
           enumerable: False,
@@ -931,9 +932,9 @@ pub fn bound_new(
 ) -> #(Handle, Agent) {
   let target_v = mk_object(target)
   let #(own_length, st) =
-    rt_obj.get_own_property(st, target, StringKey(Named("length")))
+    rt_obj.get_own_property(st, target, StringKey(names.length))
   let #(target_len, st) = case own_length {
-    Some(_) -> rt_obj.get_prop(st, target_v, StringKey(Named("length")))
+    Some(_) -> rt_obj.get_prop(st, target_v, StringKey(names.length))
     None -> #(mk_undefined(), st)
   }
   let n_args = list.length(bound_args)
@@ -943,8 +944,7 @@ pub fn bound_new(
       mk_int(int.max(rt_val.jsnum_to_integer_or_infinity(n) - n_args, 0))
     _ -> mk_int(0)
   }
-  let #(target_name, st) =
-    rt_obj.get_prop(st, target_v, StringKey(Named("name")))
+  let #(target_name, st) = rt_obj.get_prop(st, target_v, StringKey(names.name))
   let target_name = case classify(target_name) {
     KStr(s) -> s
     _ -> ""

@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/engine.{ModuleReturned, Returned}
 import arc/host.{type Context, Context}
 import arc/module/loader
@@ -15,7 +15,7 @@ fn get(
   recv: JsVal,
   name: String,
 ) -> #(JsVal, Context(host)) {
-  let #(v, st) = rt_obj.get_prop(ctx.agent, recv, StringKey(Named(name)))
+  let #(v, st) = rt_obj.get_prop(ctx.agent, recv, StringKey(named(name)))
   #(v, Context(..ctx, agent: st))
 }
 

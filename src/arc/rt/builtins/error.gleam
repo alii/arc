@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
+import arc/bytecode/names
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
@@ -318,12 +319,12 @@ fn install_error_cause(
 ) -> #(Handle, Agent) {
   case classify(options) {
     KHandle(_) -> {
-      let #(has, st) = rt_obj.has_prop(st, options, StringKey(Named("cause")))
+      let #(has, st) = rt_obj.has_prop(st, options, StringKey(names.cause))
       case has {
         False -> #(h, st)
         True -> {
           let #(cause, st) =
-            rt_obj.get_prop(st, options, StringKey(Named("cause")))
+            rt_obj.get_prop(st, options, StringKey(names.cause))
           let #(cp, st) = rt_store.builtin_property(st, cause)
           let st = common.add_named_property(st, h, "cause", cp)
           #(h, st)
@@ -339,7 +340,7 @@ fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
     Some(h) if fuel > 0 ->
       case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
         SObject(proto: parent, ..) ->
-          case rt_obj.ordinary_own_property(st, h, StringKey(Named("name"))) {
+          case rt_obj.ordinary_own_property(st, h, StringKey(names.name)) {
             Some(DataProperty(value: v, ..)) ->
               case classify(v) {
                 KStr(n) -> n
@@ -379,7 +380,7 @@ fn stack_trace_limit(st: Agent) -> Int {
   let ctor = rt_store.cell_get(st, st.realm.error.constructor)
   case rt_obj.as_sobject(ctor) {
     SObject(props:, ..) ->
-      case dict.get(props, Named("stackTraceLimit")) {
+      case dict.get(props, names.stack_trace_limit) {
         Ok(DataProperty(value: v, ..)) ->
           case classify(v) {
             KNum(JInt(n)) -> int.max(0, n)
@@ -408,7 +409,7 @@ pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
       SObject(kind: ErrorObj(..), ..) as s ->
         SObject(..s, kind: ErrorObj(stack: trace))
       SObject(props:, ..) as s ->
-        SObject(..s, props: dict.insert(props, Named("stack"), stack_prop))
+        SObject(..s, props: dict.insert(props, names.stack, stack_prop))
       other -> other
     }
   })
@@ -433,7 +434,7 @@ fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
   let read = fn(key) {
     case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
       SObject(props:, ..) ->
-        case dict.get(props, Named(key)) {
+        case dict.get(props, named(key)) {
           Ok(DataProperty(value: v, ..)) ->
             case classify(v) {
               KStr(s) -> Some(s)
@@ -525,20 +526,20 @@ fn set_stack_ignoring_prototype(
         "Cannot assign to read only property 'stack' of Error.prototype",
       )
     False -> {
-      let #(own, st) = rt_obj.get_own_property(st, h, StringKey(Named("stack")))
+      let #(own, st) = rt_obj.get_own_property(st, h, StringKey(names.stack))
       let #(ok, st) = case option.is_some(own) {
         True ->
           rt_obj.set_prop(
             st,
             mk_object(h),
-            StringKey(Named("stack")),
+            StringKey(names.stack),
             mk_string(s),
           )
         False ->
           rt_obj.define_own_prop(
             st,
             h,
-            StringKey(Named("stack")),
+            StringKey(names.stack),
             ParsedDesc(
               value: Some(mk_string(s)),
               get: None,
@@ -571,13 +572,12 @@ fn error_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         "Error.prototype.toString called on non-object",
       )
     KHandle(_) -> {
-      let #(name_val, st) = rt_obj.get_prop(st, this, StringKey(Named("name")))
+      let #(name_val, st) = rt_obj.get_prop(st, this, StringKey(names.name))
       let #(name, st) = case classify(name_val) {
         KUndef -> #("Error", st)
         _ -> rt_val.to_string(st, name_val)
       }
-      let #(msg_val, st) =
-        rt_obj.get_prop(st, this, StringKey(Named("message")))
+      let #(msg_val, st) = rt_obj.get_prop(st, this, StringKey(names.message))
       let #(msg, st) = case classify(msg_val) {
         KUndef -> #("", st)
         _ -> rt_val.to_string(st, msg_val)

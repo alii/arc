@@ -1,5 +1,5 @@
 import arc/bytecode/error_kind.{RangeError, TypeError}
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/rt/call.{
   type Completion, type Frame, NormalCompletion, ThrowCompletion, try_call,
 } as rt_call
@@ -411,7 +411,7 @@ pub fn alloc_iter_result(
   let props =
     dict.from_list([
       #(
-        Named("value"),
+        names.value,
         types.DataProperty(
           value: value,
           writable: True,
@@ -421,7 +421,7 @@ pub fn alloc_iter_result(
         ),
       ),
       #(
-        Named("done"),
+        names.done,
         types.DataProperty(
           value: mk_bool(done),
           writable: True,
@@ -526,9 +526,7 @@ fn generator_prototype(
 ) -> Handle {
   case classify(callee) {
     KHandle(fn_h) ->
-      case
-        rt_obj.ordinary_own_property(st, fn_h, StringKey(Named("prototype")))
-      {
+      case rt_obj.ordinary_own_property(st, fn_h, StringKey(names.prototype)) {
         Some(DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(p) -> p
@@ -786,7 +784,7 @@ fn resolve_with_handle(
     SObject(..) | types.SShapedObject(..) -> {
       let #(outcome, st) =
         rt_call.try_run(st, fn(st) {
-          rt_obj.get_prop(st, resolution, StringKey(Named("then")))
+          rt_obj.get_prop(st, resolution, StringKey(names.then))
         })
       case outcome {
         ThrowCompletion(e) -> promise_reject(st, promise_h, e)

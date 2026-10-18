@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
+import arc/bytecode/names
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -23,7 +24,7 @@ pub fn array_join_via_t_call_test() {
       mk_int(2),
       mk_int(3),
     ])
-  let #(join, st) = rt_obj.get_prop(st, arr, StringKey(Named("join")))
+  let #(join, st) = rt_obj.get_prop(st, arr, StringKey(names.join))
   let assert KHandle(_) = classify(join)
   let #(result, _st) = rt_call.try_call(st, join, arr, [])
   let assert NormalCompletion(v) = result
@@ -38,7 +39,7 @@ pub fn array_length_test() {
       mk_int(2),
       mk_int(3),
     ])
-  let #(len, _st) = rt_obj.get_prop(st, arr, StringKey(Named("length")))
+  let #(len, _st) = rt_obj.get_prop(st, arr, StringKey(names.length))
   assert classify(len) == KNum(JInt(3))
 }
 
@@ -46,7 +47,7 @@ pub fn object_set_get_round_trip_test() {
   let st = agent()
   let #(h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let obj = mk_object(h)
-  let key = StringKey(Named("greeting"))
+  let key = StringKey(named("greeting"))
   let #(ok, st) = rt_obj.set_prop(st, obj, key, mk_string("hi"))
   assert ok
   let #(v, _st) = rt_obj.get_prop(st, obj, key)
@@ -59,7 +60,7 @@ pub fn type_error_is_caught_as_throw_completion_test() {
     rt_call.try_run(st, fn(st) { rt_val.throw_type_error(st, "boom") })
   let assert ThrowCompletion(err) = completion
   let assert KHandle(_) = classify(err)
-  let #(msg, _st) = rt_obj.get_prop(st, err, StringKey(Named("message")))
+  let #(msg, _st) = rt_obj.get_prop(st, err, StringKey(names.message))
   assert classify(msg) == KStr("boom")
 }
 
@@ -89,8 +90,8 @@ pub fn shaped_set_transitions_test() {
         offsets: dict.new(),
       ),
     )
-  let x = StringKey(Named("x"))
-  let y = StringKey(Named("y"))
+  let x = StringKey(named("x"))
+  let y = StringKey(named("y"))
   let #(ok, st) = rt_obj.set_prop(st, mk_object(a), x, mk_int(1))
   assert ok
   let #(ok, st) = rt_obj.set_prop(st, mk_object(a), y, mk_int(2))

@@ -1,6 +1,7 @@
 // alloc and install kit for builtin objects
 
-import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/key.{type PropertyKey, named}
+import arc/bytecode/names
 import arc/internal/tree_array
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -84,7 +85,7 @@ pub fn named_props(
   props: List(#(String, Property)),
 ) -> Dict(PropertyKey, Property) {
   use acc, #(k, v) <- list.fold(props, dict.new())
-  dict.insert(acc, Named(k), v)
+  dict.insert(acc, named(k), v)
 }
 
 pub fn alloc_proto(
@@ -105,7 +106,7 @@ pub fn alloc_plain_object(
   let entries =
     list.index_map(props, fn(entry, i) {
       let #(name, value) = entry
-      #(Named(name), types.plain_property(value, seq + i))
+      #(named(name), types.plain_property(value, seq + i))
     })
   plain_object(Ordinary, Some(object_proto), dict.from_list(entries))
 }
@@ -331,7 +332,7 @@ pub fn init_type_on(
       let assert SObject(props: existing, ..) = cell
       let merged = {
         use acc, #(k, v) <- list.fold(all_proto_props, existing)
-        dict.insert(acc, Named(k), v)
+        dict.insert(acc, named(k), v)
       }
       SObject(..cell, props: merged)
     })
@@ -355,7 +356,7 @@ pub fn add_named_property(
 ) -> Agent {
   rt_store.cell_update(st, h, fn(cell) {
     let assert SObject(props:, ..) = cell
-    SObject(..cell, props: dict.insert(props, Named(name), prop))
+    SObject(..cell, props: dict.insert(props, named(name), prop))
   })
 }
 
@@ -408,7 +409,7 @@ pub fn species_intact(st: Agent, pair: BuiltinPair) -> Bool {
     rt_obj.ordinary_own_property(
       st,
       prototype,
-      types.StringKey(Named("constructor")),
+      types.StringKey(names.constructor),
     ),
     rt_obj.ordinary_own_property(
       st,

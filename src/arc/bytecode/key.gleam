@@ -9,11 +9,26 @@ pub const max_array_index = 4_294_967_294
 
 pub const max_array_length = 4_294_967_295
 
+/// `id` is a number worked out from the text, the same for the same text
+/// everywhere. Build these with `named` and `private`, never by hand. Two
+/// texts can share an id, so equal ids alone do not mean equal keys
 pub type PropertyKey {
   Index(n: Int)
-  Named(name: String)
-  Private(text: String)
+  Named(id: Int, name: String)
+  Private(id: Int, text: String)
 }
+
+pub fn named(name: String) -> PropertyKey {
+  Named(hash(name) * 2, name)
+}
+
+// odd, so that a #name and a name never share an id
+pub fn private(text: String) -> PropertyKey {
+  Private(hash(text) * 2 + 1, text)
+}
+
+@external(erlang, "arc_bytecode_key_ffi", "hash")
+fn hash(text: String) -> Int
 
 // §7.1.21 canonical numeric index string plus range check
 pub fn canonical(s: String) -> PropertyKey {
@@ -24,18 +39,18 @@ pub fn canonical(s: String) -> PropertyKey {
         Ok(n) if n >= 0 && n <= max_array_index ->
           case int.to_string(n) == s {
             True -> Index(n)
-            False -> Named(s)
+            False -> named(s)
           }
-        _ -> Named(s)
+        _ -> named(s)
       }
-    _ -> Named(s)
+    _ -> named(s)
   }
 }
 
 pub fn index(n: Int) -> PropertyKey {
   case n >= 0 && n <= max_array_index {
     True -> Index(n)
-    False -> Named(int.to_string(n))
+    False -> named(int.to_string(n))
   }
 }
 
@@ -53,16 +68,16 @@ pub fn array_index_of_float(f: Float) -> Option(Int) {
 pub fn display_text(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
-    Named(name) -> name
-    Private(text) -> private_display_name(text)
+    Named(name:, ..) -> name
+    Private(text:, ..) -> private_display_name(text)
   }
 }
 
 pub fn to_text(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
-    Named(s) -> s
-    Private(text) -> text
+    Named(name:, ..) -> name
+    Private(text:, ..) -> text
   }
 }
 

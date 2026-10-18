@@ -1,6 +1,6 @@
 // §9.2.12 getoption family
 
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, JFloat, JInt, JNan, JNegInf, JPosInf,
@@ -40,7 +40,7 @@ pub fn get_option(
 ) -> #(JsVal, Agent) {
   case opts {
     None -> #(mk_undefined(), st)
-    Some(h) -> rt_obj.get_prop(st, mk_object(h), StringKey(Named(name)))
+    Some(h) -> rt_obj.get_prop(st, mk_object(h), StringKey(named(name)))
   }
 }
 

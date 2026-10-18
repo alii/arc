@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/host_hooks.{type HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins/array as b_array
@@ -792,8 +792,7 @@ fn own_data_prototype(st: Agent, ctor: JsVal) -> #(Option(Handle), Agent) {
   case rt_val.handle_of(ctor) {
     None -> #(None, st)
     Some(h) -> {
-      let #(prop, st) =
-        rt_obj.own_property(st, h, StringKey(Named("prototype")))
+      let #(prop, st) = rt_obj.own_property(st, h, StringKey(names.prototype))
       case prop {
         Some(DataProperty(value:, ..)) -> #(rt_val.handle_of(value), st)
         _ -> #(None, st)

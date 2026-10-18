@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/compiler
 import arc/host_hooks
 import arc/interp/entry
@@ -7174,7 +7174,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   let global_object = mk_object(st.realm.global_object)
   let assert #(True, st) =
-    rt_obj.has_prop(st, global_object, StringKey(Named("greetFromHarness")))
+    rt_obj.has_prop(st, global_object, StringKey(named("greetFromHarness")))
 
   let module_source = "greetFromHarness()"
   let specifier = "<test-module>"

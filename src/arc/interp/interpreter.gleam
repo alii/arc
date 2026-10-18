@@ -1,6 +1,7 @@
 import arc/bytecode/binop
 import arc/bytecode/error_kind.{TypeError}
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key.{Index, named}
+import arc/bytecode/names
 import arc/bytecode/opcode.{
   type Op, ApplyArguments, ArrayFrom, ArrayFromWithHoles, ArrayPush,
   ArrayPushHole, ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await,
@@ -96,9 +97,9 @@ pub type Outcome {
   Suspended(state.SuspendKind, JsVal)
 }
 
-const prototype_key = key.Named("prototype")
+const prototype_key = names.prototype
 
-const return_key = key.Named("return")
+const return_key = names.return
 
 const function_call = FunctionN(FunctionCall)
 
@@ -1302,7 +1303,7 @@ fn loop(
         _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    BinOpLocalField(kind, index, key.Named(_) as k) ->
+    BinOpLocalField(kind, index, key.Named(..) as k) ->
       case stack {
         [left, ..rest] -> {
           let recv = case index < 0 {
@@ -2328,7 +2329,7 @@ fn loop(
         _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetField(key.Named(_) as k) ->
+    GetField(key.Named(..) as k) ->
       case stack {
         [recv, ..rest] -> {
           let v = kernel.get_field(agent, recv, k)
@@ -2375,7 +2376,7 @@ fn loop(
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetFieldKeep(key.Named(_) as k) ->
+    GetFieldKeep(key.Named(..) as k) ->
       case stack {
         [recv, ..rest] -> {
           let v = kernel.get_field(agent, recv, k)
@@ -2399,7 +2400,7 @@ fn loop(
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    PutField(key.Named(_) as k) ->
+    PutField(key.Named(..) as k) ->
       case stack {
         [val, recv, ..rest] -> {
           let store = kernel.put_field(agent.store, recv, k, val, create: True)
@@ -2423,7 +2424,7 @@ fn loop(
         _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    PutFieldPop(key.Named(_) as k) ->
+    PutFieldPop(key.Named(..) as k) ->
       case stack {
         [val, recv, ..rest] -> {
           let store = kernel.put_field(agent.store, recv, k, val, create: True)
@@ -2528,7 +2529,7 @@ fn loop(
       }
     }
 
-    GetLocalField(index, key.Named(_) as k) -> {
+    GetLocalField(index, key.Named(..) as k) -> {
       let recv = case index < 0 {
         True ->
           case index {
@@ -2579,7 +2580,7 @@ fn loop(
       }
     }
 
-    GetLocalFieldKeep(index, key.Named(_) as k) -> {
+    GetLocalFieldKeep(index, key.Named(..) as k) -> {
       let recv = case index < 0 {
         True ->
           case index {
@@ -2776,7 +2777,7 @@ fn loop(
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    DefineField(key.Named(_) as k) ->
+    DefineField(key.Named(..) as k) ->
       case stack {
         [val, obj, ..rest] -> {
           let store = kernel.define_field(agent.store, obj, k, val)
@@ -3356,7 +3357,7 @@ fn loop(
           }
       }
 
-    GetFieldCall1(key.Named(_) as k, arg_idx) ->
+    GetFieldCall1(key.Named(..) as k, arg_idx) ->
       case stack {
         [recv, ..rest] -> {
           let method = kernel.get_field(agent, recv, k)
@@ -3395,7 +3396,7 @@ fn loop(
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetFieldCall(key.Named(_) as k) ->
+    GetFieldCall(key.Named(..) as k) ->
       case stack {
         [recv, ..rest] -> {
           let method = kernel.get_field(agent, recv, k)
@@ -3426,7 +3427,7 @@ fn loop(
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetLocalFieldCall(index, key.Named(_) as k) -> {
+    GetLocalFieldCall(index, key.Named(..) as k) -> {
       let recv = case index < 0 {
         True ->
           case index {
@@ -6613,7 +6614,7 @@ fn global_object_get(
 ) -> Result(#(JsVal, State), StepExit) {
   let agent = state.agent
   let global = agent.realm.global_object
-  let k = StringKey(Named(name))
+  let k = StringKey(named(name))
   case rt_obj.ordinary_own_property(agent, global, k) {
     Some(DataProperty(value:, ..)) -> Ok(#(value, state))
     Some(AccessorProperty(..)) ->
@@ -6640,7 +6641,7 @@ fn global_object_put(
   value: JsVal,
 ) -> Result(State, StepExit) {
   let global = mk_object(state.agent.realm.global_object)
-  let k = StringKey(Named(name))
+  let k = StringKey(named(name))
   case state.func.is_strict {
     True -> {
       use #(has, state) <- result.try(guarded3(
@@ -7065,7 +7066,7 @@ fn class_proto_parent(
             state,
             rt_obj.get_prop,
             parent,
-            StringKey(Named("prototype")),
+            StringKey(names.prototype),
           ))
           case classify(pp) {
             KHandle(p) -> Ok(#(Some(p), state))
@@ -7088,7 +7089,7 @@ fn class_proto_parent(
 }
 
 fn own_prototype_handle(agent: Agent, h: Handle) -> Option(Handle) {
-  case rt_obj.ordinary_own_property(agent, h, StringKey(Named("prototype"))) {
+  case rt_obj.ordinary_own_property(agent, h, StringKey(names.prototype)) {
     Some(DataProperty(value:, ..)) -> handle_of(value)
     _ -> None
   }
@@ -7506,7 +7507,7 @@ fn delegate_target(
         state,
         rt_obj.get_prop,
         record,
-        StringKey(Named("next")),
+        StringKey(names.next),
       ))
       #(types.IteratorRecord(iterator: record, next_method:), state)
     }
@@ -7570,7 +7571,7 @@ fn accessor_as_frame(
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
   case k {
-    key.Named(_) ->
+    key.Named(..) ->
       case kernel.find_accessor(state.agent, receiver, k) {
         kernel.Accessor(get: Some(f), ..) ->
           call_as_frame(state, f, receiver, [], rest, drive, then, otherwise)
@@ -7591,7 +7592,7 @@ fn setter_as_frame(
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
   case k {
-    key.Named(_) ->
+    key.Named(..) ->
       case kernel.find_accessor(state.agent, receiver, k) {
         kernel.Accessor(set: Some(f), ..) -> {
           let finish = fn(_, state: State) {

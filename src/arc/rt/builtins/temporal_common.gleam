@@ -1,5 +1,5 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/internal/int_math.{pow10}
 import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
@@ -591,7 +591,7 @@ fn read_bag_int_field(
   key: String,
   conv: fn(Agent, JsVal) -> #(Int, Agent),
 ) -> #(Option(Int), Agent) {
-  let #(v, st) = rt_obj.get_prop(st, mk_object(bag), StringKey(Named(key)))
+  let #(v, st) = rt_obj.get_prop(st, mk_object(bag), StringKey(named(key)))
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {

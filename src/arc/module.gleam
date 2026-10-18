@@ -1,5 +1,5 @@
 import arc/bytecode/error_kind.{SyntaxError, TypeError}
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{named}
 import arc/compiler.{type ExportSeed}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/entry
@@ -1366,7 +1366,7 @@ fn fill_deferred_namespace(
         rt_obj.define_own_data(
           st,
           handler,
-          StringKey(Named(t.name)),
+          StringKey(named(t.name)),
           mk_object(fn_h),
           writable: True,
           enumerable: True,

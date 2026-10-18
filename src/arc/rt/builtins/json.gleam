@@ -1,4 +1,5 @@
-import arc/bytecode/key.{type PropertyKey, Index, Named, Private}
+import arc/bytecode/key.{type PropertyKey, Index, Named, Private, named}
+import arc/bytecode/names
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -542,7 +543,7 @@ fn json_raw_json(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
           SObject(
             kind: RawJsonObj(raw: json_text),
             proto: None,
-            props: dict.from_list([#(Named("rawJSON"), prop)]),
+            props: dict.from_list([#(names.raw_json, prop)]),
             symbol_props: [],
             elements: types.NoElements,
             extensible: False,
@@ -669,7 +670,7 @@ fn throw_circular(
 fn describe_key(st: Agent, holder: Handle, pk: PropertyKey) -> String {
   case pk, rt_abstract_ops.is_array_handle(st, holder) {
     Index(i), True -> "index " <> int.to_string(i)
-    Named(""), _ -> "<anonymous>"
+    Named(_, ""), _ -> "<anonymous>"
     _, _ -> "property '" <> key.to_text(pk) <> "'"
   }
 }
@@ -697,7 +698,7 @@ fn inherited_data(
 ) -> Option(JsVal) {
   use h <- option.then(from)
   case
-    rt_obj.ordinary_own_property(st, h, StringKey(Named(name))),
+    rt_obj.ordinary_own_property(st, h, StringKey(named(name))),
     rt_obj.as_sobject(rt_store.cell_get(st, h))
   {
     Some(types.DataProperty(value:, ..)), _ -> Some(value)
@@ -734,7 +735,7 @@ fn json_stringify(
   })
   let #(wrapper, st) = alloc_holder(st, val)
   let ctx = StringifyContext(replacer:, gap:, caller: caller_realm)
-  case serialize_property(st, ctx, [], "", Named(""), wrapper) {
+  case serialize_property(st, ctx, [], "", names.empty, wrapper) {
     #(Some(tree), st) ->
       case string_tree.byte_size(tree) > limits.max_string_bytes {
         True -> rt_val.throw_range_error(st, "Invalid string length")
@@ -858,13 +859,13 @@ fn serialize_property(
 ) -> #(Option(StringTree), Agent) {
   // canonical keys, so a named key never spells an index
   let #(val, st) = case pk {
-    Named(_) -> rt_val.get_named(st, mk_object(holder), pk, None)
+    Named(..) -> rt_val.get_named(st, mk_object(holder), pk, None)
     Index(i) -> rt_abstract_ops.get_index(st, mk_object(holder), i)
-    Private(_) -> #(mk_undefined(), st)
+    Private(..) -> #(mk_undefined(), st)
   }
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
-      let #(to_json, st) = rt_val.get_named(st, val, key.Named("toJSON"), None)
+      let #(to_json, st) = rt_val.get_named(st, val, names.to_json, None)
       case rt_val.is_callable(st, to_json) {
         True ->
           call_in_caller_realm(st, ctx.caller, to_json, val, [

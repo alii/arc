@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key.{Index, named}
+import arc/bytecode/names
 import arc/rt/builtins as rt_builtins
 import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
@@ -40,7 +41,7 @@ pub fn iter_rest_and_spread_test() {
   let #(rec, st) = rt_lang.get_iterator(st, arr, rt_lang.Sync)
   let #(_, st) = rt_lang.iter_next(st, rec)
   let #(rest, st) = rt_lang.iter_rest(st, rec)
-  let #(len, st) = rt_obj.get_prop(st, rest, StringKey(Named("length")))
+  let #(len, st) = rt_obj.get_prop(st, rest, StringKey(names.length))
   assert classify(len) == KNum(JInt(2))
   let #(spread, _st) = rt_lang.spread_into_list(st, [mk_string("a")], arr)
   assert list.map(spread, classify)
@@ -51,11 +52,11 @@ pub fn object_rest_excludes_keys_test() {
   let st = agent()
   let #(src_h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let src = types.mk_object(src_h)
-  let #(_, st) = rt_obj.set_prop(st, src, StringKey(Named("a")), mk_string("1"))
-  let #(_, st) = rt_obj.set_prop(st, src, StringKey(Named("b")), mk_string("2"))
-  let #(rest, st) = rt_lang.object_rest(st, src, [StringKey(Named("a"))])
-  let #(a, st) = rt_obj.get_prop(st, rest, StringKey(Named("a")))
-  let #(b, _st) = rt_obj.get_prop(st, rest, StringKey(Named("b")))
+  let #(_, st) = rt_obj.set_prop(st, src, StringKey(named("a")), mk_string("1"))
+  let #(_, st) = rt_obj.set_prop(st, src, StringKey(named("b")), mk_string("2"))
+  let #(rest, st) = rt_lang.object_rest(st, src, [StringKey(named("a"))])
+  let #(a, st) = rt_obj.get_prop(st, rest, StringKey(named("a")))
+  let #(b, _st) = rt_obj.get_prop(st, rest, StringKey(named("b")))
   assert classify(a) == KUndef
   assert classify(b) == KStr("2")
 }
@@ -68,7 +69,7 @@ pub fn template_object_is_cached_per_site_test() {
   let #(t3, st) = rt_lang.get_template_object(st, "m#12", cooked, ["a", "\\u"])
   assert t1 == t2
   assert t1 != t3
-  let #(raw, st) = rt_obj.get_prop(st, t1, StringKey(Named("raw")))
+  let #(raw, st) = rt_obj.get_prop(st, t1, StringKey(names.raw))
   let assert KHandle(_) = classify(raw)
   let #(r1, st) = rt_obj.get_prop(st, raw, StringKey(Index(1)))
   assert classify(r1) == KStr("\\u")

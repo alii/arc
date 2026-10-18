@@ -1,3 +1,4 @@
+import arc/bytecode/key
 import arc/compiler
 import arc/dis
 import gleam/string
@@ -30,8 +31,12 @@ pub fn disassemble_fused_ops_test() {
     )
   assert string.contains(text, "[regs 4]")
   assert string.contains(text, "CmpLocalConstJump(-1, 0, Equality(StrictEq)")
-  assert string.contains(text, "GetLocalField(-1, Named(\"next\"))")
-  assert string.contains(text, "GetLocalField(-1, Named(\"size\"))")
-  assert string.contains(text, "PutFieldPop(Named(\"count\"))")
-  assert string.contains(text, "GetLocalFieldKeep(-1, Named(\"run\"))")
+  assert string.contains(text, "GetLocalField(-1, " <> named("next") <> ")")
+  assert string.contains(text, "GetLocalField(-1, " <> named("size") <> ")")
+  assert string.contains(text, "PutFieldPop(" <> named("count") <> ")")
+  assert string.contains(text, "GetLocalFieldKeep(-1, " <> named("run") <> ")")
+}
+
+fn named(name: String) -> String {
+  string.inspect(key.named(name))
 }

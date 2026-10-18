@@ -1,6 +1,7 @@
 import arc/bytecode/key.{
-  type PropertyKey, Index, Named, max_array_index, max_array_length,
+  type PropertyKey, Index, max_array_index, max_array_length, named,
 }
+import arc/bytecode/names
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common
@@ -152,7 +153,7 @@ pub fn init(
       #(
         dict.insert(
           props,
-          Named(name),
+          named(name),
           types.plain_property(mk_bool(True), seq),
         ),
         st,
@@ -357,7 +358,7 @@ fn length_of_properties(
   h: Handle,
   props: Dict(PropertyKey, Property),
 ) -> #(Int, Agent) {
-  case dict.get(props, Named("length")) {
+  case dict.get(props, names.length) {
     Ok(DataProperty(value: len_val, ..)) -> rt_val.to_length(st, len_val)
     _ -> {
       rt_abstract_ops.length_of_array_like(st, mk_object(h))
@@ -438,7 +439,7 @@ pub fn generic_set_index(st: Agent, h: Handle, idx: Int, val: JsVal) -> Agent {
 }
 
 pub fn generic_set_length(st: Agent, h: Handle, len: Int) -> Agent {
-  generic_set(st, h, Named("length"), mk_int(len))
+  generic_set(st, h, names.length, mk_int(len))
 }
 
 fn generic_delete(st: Agent, h: Handle, pk: PropertyKey) -> Agent {
@@ -578,7 +579,7 @@ pub fn with_plain_elements(
       extensible: True,
       ..,
     ) as cell -> {
-      let length_writable = case dict.get(props, Named("length")) {
+      let length_writable = case dict.get(props, names.length) {
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
@@ -621,7 +622,7 @@ fn push_dense(
       ..,
     ) -> {
       let arg_count = list.length(args)
-      let length_writable = case dict.get(props, Named("length")) {
+      let length_writable = case dict.get(props, names.length) {
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
@@ -1344,7 +1345,7 @@ fn intrinsic_species(st: Agent, cell: Cell) -> Bool {
   case cell {
     SObject(kind: ArrayObj(_), proto: Some(p), props:, ..) ->
       p == array.prototype
-      && !dict.has_key(props, Named("constructor"))
+      && !dict.has_key(props, names.constructor)
       && common.species_intact(st, array)
     _ -> False
   }
@@ -1361,7 +1362,7 @@ fn species_general(
         False -> #(None, st)
         True -> {
           let #(ctor, st) =
-            rt_obj.get_prop(st, original, StringKey(Named("constructor")))
+            rt_obj.get_prop(st, original, StringKey(names.constructor))
           // other realm %Array% gives undefined, species never read
           let ctor = case classify(ctor) {
             KHandle(ctor_h) ->
@@ -2919,7 +2920,7 @@ fn collect_elements_descending(
 
 fn array_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use array, h, st <- require_object(st, this)
-  let #(func, st) = rt_obj.get_prop(st, mk_object(h), StringKey(Named("join")))
+  let #(func, st) = rt_obj.get_prop(st, mk_object(h), StringKey(names.join))
   case rt_val.is_callable(st, func) {
     True -> rt_call.call(st, func, array, [])
     False -> b_object.dispatch(st, ObjectPrototypeToString, array, [])
@@ -2974,7 +2975,7 @@ fn array_to_locale_string_loop(
           )
         _ -> {
           let #(method, st) =
-            rt_obj.get_prop(st, elem, StringKey(Named("toLocaleString")))
+            rt_obj.get_prop(st, elem, StringKey(names.to_locale_string))
           use method <- helpers.require_callable(st, method, fn() {
             not_a_function(st, method)
           })

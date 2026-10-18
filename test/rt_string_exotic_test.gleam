@@ -1,4 +1,5 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key.{Index, named}
+import arc/bytecode/names
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/lang as rt_lang
@@ -146,9 +147,9 @@ pub fn own_property_keys_order_test() {
       StringKey(Index(1)),
       StringKey(Index(2)),
       StringKey(Index(7)),
-      StringKey(Named("length")),
-      StringKey(Named("foo")),
-      StringKey(Named("bar")),
+      StringKey(names.length),
+      StringKey(named("foo")),
+      StringKey(named("bar")),
       SymbolKey(sym),
     ]
   let #(names, st) = rt_obj.for_in_keys(st, s)

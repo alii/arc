@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/names
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -245,7 +245,7 @@ pub fn create_dynamic_function(
         rt_obj.define_own_data(
           st,
           h,
-          StringKey(Named("name")),
+          StringKey(names.name),
           mk_string("anonymous"),
           writable: False,
           enumerable: False,
@@ -290,7 +290,7 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         | SObject(kind: BytecodeFn(..), ..)
         | SObject(kind: NativeFn(..), ..) -> {
           let name = case
-            rt_obj.ordinary_own_property(st, h, StringKey(Named("name")))
+            rt_obj.ordinary_own_property(st, h, StringKey(names.name))
           {
             Some(DataProperty(value: v, ..)) ->
               case classify(v) {

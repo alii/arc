@@ -2,8 +2,9 @@
 
 import arc/bytecode/binop
 import arc/bytecode/key.{
-  type PropertyKey, Index, Named, Private, max_array_index,
+  type PropertyKey, Index, max_array_index, named, private,
 }
+import arc/bytecode/names
 import arc/bytecode/opcode
 import arc/internal/ordered_entries
 import arc/internal/tree_array
@@ -192,7 +193,7 @@ pub fn store_test() {
       shapes: dict.from_list([#(7, desc)]),
       next_shape: 15,
       ics: dict.from_list([
-        #(1, types.IcRead(Named("k"), dict.from_list([#(7, 0)]))),
+        #(1, types.IcRead(named("k"), dict.from_list([#(7, 0)]))),
       ]),
       plain_write_protos: dict.from_list([#(17, Nil)]),
       meta: types.StoreMeta(
@@ -304,7 +305,7 @@ pub fn sobject_test() {
   let props =
     dict.from_list([
       #(
-        Named("x"),
+        named("x"),
         DataProperty(
           value: vx,
           writable: True,
@@ -388,14 +389,34 @@ pub fn sobject_test() {
 }
 
 pub fn keys_and_elements_test() {
-  assert tag_of(Named("x")) == tag("KEY_NAMED")
-  assert dyn(Named("length")) == tag("LENGTH_KEY")
-  assert element_of(2, dyn(Named("x"))) == dyn("x")
+  assert tag_of(named("x")) == tag("KEY_NAMED")
+  assert element_of(3, dyn(named("x"))) == dyn("x")
+  assert element_of(3, dyn(private("#p"))) == dyn("#p")
+  list.each(
+    [
+      #("LENGTH_KEY", "length"),
+      #("NAME_KEY", "name"),
+      #("PROTOTYPE_KEY", "prototype"),
+      #("CALLEE_KEY", "callee"),
+      #("PROTO_KEY", "__proto__"),
+      #("TO_JSON_KEY", "toJSON"),
+      #("DONE_KEY", "done"),
+      #("ITERATOR_KEY", "iterator"),
+      #("NEXT_KEY", "next"),
+      #("KEYS_KEY", "keys"),
+      #("VALUES_KEY", "values"),
+      #("ENTRIES_KEY", "entries"),
+      #("RETURN_KEY", "return"),
+    ],
+    fn(pair) {
+      assert tag(pair.0) == dyn(named(pair.1))
+    },
+  )
   assert tag_of(Index(5)) == tag("KEY_INDEX")
   assert element_of(2, dyn(Index(5))) == dyn(5)
-  assert tag_of(Private("#p")) == tag("KEY_PRIVATE")
-  assert tag_of(StringKey(Named("x"))) == tag("STRINGKEY_TAG")
-  assert element_of(2, dyn(StringKey(Named("x")))) == dyn(Named("x"))
+  assert tag_of(private("#p")) == tag("KEY_PRIVATE")
+  assert tag_of(StringKey(named("x"))) == tag("STRINGKEY_TAG")
+  assert element_of(2, dyn(StringKey(named("x")))) == dyn(named("x"))
   assert tag_of(SymbolKey(types.symbol_iterator)) == tag("SYMBOLKEY_TAG")
   assert dyn(types.symbol_iterator) == tag("SYMBOL_ITERATOR")
   assert dyn(NoElements) == tag("ELEMS_NONE")
@@ -777,14 +798,14 @@ pub fn typed_array_kernels_miss_test() {
   let #(h, st) = rt_call.construct(st, ctor, [n], ctor)
   let ta = types.mk_object(h)
   let #(_, st) =
-    rt_obj.set_prop(st, ta, StringKey(Named("extra")), types.mk_string("x"))
+    rt_obj.set_prop(st, ta, StringKey(named("extra")), types.mk_string("x"))
   assert get_elem(st, ta, 0) == dyn(Miss)
   assert set_elem(st, ta, 0, n) == dyn(Miss)
   assert set_elem(st, ta, 4, n) == dyn(Miss)
   // only a name that could spell a number is the typed array's own business
-  assert set_prop_own_data(st, ta, Named("1.5"), n) == dyn(Miss)
-  assert set_prop_own_data(st, ta, Named("Infinity"), n) == dyn(Miss)
-  assert set_prop_own_data(st, ta, Named("extra"), n) != dyn(Miss)
+  assert set_prop_own_data(st, ta, named("1.5"), n) == dyn(Miss)
+  assert set_prop_own_data(st, ta, names.infinity, n) == dyn(Miss)
+  assert set_prop_own_data(st, ta, named("extra"), n) != dyn(Miss)
 }
 
 pub fn proxy_kernels_miss_test() {
@@ -797,12 +818,12 @@ pub fn proxy_kernels_miss_test() {
   let p = types.mk_object(ph)
   assert get_elem(st, p, 0) == dyn(Miss)
   assert set_elem(st, p, 0, n) == dyn(Miss)
-  assert set_prop_own_data(st, p, Named("length"), n) == dyn(Miss)
+  assert set_prop_own_data(st, p, names.length, n) == dyn(Miss)
   // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
     rt_call.new_closure(st, dummy_code("F"), ctor_flags, "F", 0, None)
-  let #(_, st) = rt_obj.get_prop(st, f, StringKey(Named("prototype")))
+  let #(_, st) = rt_obj.get_prop(st, f, StringKey(names.prototype))
   let #(plain, st) = rt_obj.new_object_literal(st)
   assert instanceof_i32(st, plain, f) == dyn(0)
   assert instanceof_i32(st, p, f) == dyn(Miss)
@@ -818,12 +839,12 @@ pub fn string_object_kernels_miss_test() {
     rt_call.construct(st, string_ctor, [types.mk_string("abc")], string_ctor)
   let s = types.mk_object(sh)
   let #(_, st) =
-    rt_obj.set_prop(st, s, StringKey(Named("extra")), types.mk_string("x"))
+    rt_obj.set_prop(st, s, StringKey(named("extra")), types.mk_string("x"))
   assert get_elem(st, s, 0) == dyn(Miss)
   assert set_elem(st, s, 0, n) == dyn(Miss)
   assert set_elem(st, s, 3, n) == dyn(Miss)
-  assert set_prop_own_data(st, s, Named("length"), n) == dyn(Miss)
-  assert set_prop_own_data(st, s, Named("extra"), n) != dyn(Miss)
+  assert set_prop_own_data(st, s, names.length, n) == dyn(Miss)
+  assert set_prop_own_data(st, s, named("extra"), n) != dyn(Miss)
 }
 
 pub fn bytecode_function_kernels_miss_test() {
@@ -854,7 +875,7 @@ pub fn bytecode_function_kernels_miss_test() {
   let undef = types.mk_undefined()
   assert direct_callee(st, f, undef) == dyn(Miss)
   let #(o, st) = rt_obj.new_object_literal(st)
-  let #(_, st) = rt_obj.set_prop(st, o, StringKey(Named("m")), f)
+  let #(_, st) = rt_obj.set_prop(st, o, StringKey(named("m")), f)
   assert new_direct(st, f, []).0 == dyn(Miss)
   assert instanceof_i32(st, o, f) == dyn(Miss)
 }
@@ -873,7 +894,7 @@ pub fn compiled_function_kernels_hit_test() {
   let #(f, st) = rt_call.new_closure(st, code, flags, "F", 0, None)
   assert direct_callee(st, f, undef) != dyn(Miss)
   assert new_direct(st, f, []).0 == dyn(Miss)
-  let #(proto, st) = rt_obj.get_prop(st, f, StringKey(Named("prototype")))
+  let #(proto, st) = rt_obj.get_prop(st, f, StringKey(names.prototype))
   let #(this, _) = new_direct(st, f, [])
   assert this != dyn(Miss)
   assert this != dyn(proto)
@@ -972,7 +993,7 @@ pub fn iterator_kinds_test() {
 }
 
 pub fn ic_entry_tags_test() {
-  let key = Named("k")
+  let key = named("k")
   assert tag_of(types.IcRead(key, dict.new())) == tag("IC_READ")
   assert tag_of(types.IcCall(key, dict.new(), dict.new())) == tag("IC_CALL")
   let blank = SBox(types.mk_undefined())
