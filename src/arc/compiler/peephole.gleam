@@ -16,7 +16,83 @@ pub fn run(
   code: List(IrOp),
   consts: tuple_array.TupleArray(JsVal),
 ) -> List(IrOp) {
-  peephole(code, consts, [])
+  peephole(drop_dead_tdz_stores(code, consts, []), consts, [])
+}
+
+// a let or const slot need not be marked uninitialised when its first value
+// is stored before anything could read it or jump
+fn drop_dead_tdz_stores(
+  code: List(IrOp),
+  consts: tuple_array.TupleArray(JsVal),
+  acc: List(IrOp),
+) -> List(IrOp) {
+  case code {
+    [] -> list.reverse(acc)
+    [
+      IrFinal(opcode.PushConst(c)) as push,
+      IrFinal(opcode.PutLocal(slot)),
+      ..rest
+    ] ->
+      case
+        tuple_array.get_unchecked(c, consts) == types.mk_tdz()
+        && stored_before_use(rest, slot)
+      {
+        True -> drop_dead_tdz_stores(rest, consts, acc)
+        False ->
+          drop_dead_tdz_stores(rest, consts, [
+            IrFinal(opcode.PutLocal(slot)),
+            push,
+            ..acc
+          ])
+      }
+    [op, ..rest] -> drop_dead_tdz_stores(rest, consts, [op, ..acc])
+  }
+}
+
+// looks only past ops that run straight on and leave the slot alone
+fn stored_before_use(code: List(IrOp), slot: Int) -> Bool {
+  case code {
+    [IrFinal(opcode.PutLocal(i)), ..rest] ->
+      i == slot || stored_before_use(rest, slot)
+    [IrFinal(opcode.GetLocal(i)), ..rest]
+    | [IrFinal(opcode.GetBoxed(i)), ..rest]
+    | [IrFinal(opcode.PutBoxed(i)), ..rest]
+    | [IrFinal(opcode.BoxLocal(i)), ..rest] ->
+      i != slot && stored_before_use(rest, slot)
+    [IrLine(_), ..rest]
+    | [IrBinOp(_), ..rest]
+    | [IrGetField(_), ..rest]
+    | [IrGetFieldKeep(_), ..rest]
+    | [IrPutField(_), ..rest]
+    | [opcode.IrDefineField(_), ..rest]
+    | [IrFinal(opcode.PushConst(_)), ..rest]
+    | [IrFinal(opcode.Pop), ..rest]
+    | [IrFinal(opcode.Dup), ..rest]
+    | [IrFinal(opcode.Swap), ..rest]
+    | [IrFinal(opcode.Rot3), ..rest]
+    | [IrFinal(opcode.UnaryOp(_)), ..rest]
+    | [IrFinal(opcode.TypeOf), ..rest]
+    | [IrFinal(opcode.GetGlobal(_)), ..rest]
+    | [IrFinal(opcode.GetElem), ..rest]
+    | [IrFinal(opcode.GetElemKeep), ..rest]
+    | [IrFinal(opcode.PutElem), ..rest]
+    | [IrFinal(opcode.GetPrivateFieldDyn), ..rest]
+    | [IrFinal(opcode.GetPrivateFieldDynKeep), ..rest]
+    | [IrFinal(opcode.NewObject), ..rest]
+    | [IrFinal(opcode.NewObjectWith(..)), ..rest]
+    | [IrFinal(opcode.NewObjectShaped(..)), ..rest]
+    | [IrFinal(opcode.ArrayFrom(_)), ..rest]
+    | [IrFinal(opcode.ToObject), ..rest]
+    | [IrFinal(opcode.ToStringVal), ..rest]
+    | [IrFinal(opcode.NewRegExp), ..rest]
+    | [IrFinal(opcode.Call(_)), ..rest]
+    | [IrFinal(opcode.CallMethod(_)), ..rest]
+    | [IrFinal(opcode.CallNew(_)), ..rest]
+    | [IrFinal(opcode.MakeClosure(_)), ..rest]
+    | [IrFinal(opcode.MakeLazyClosure(..)), ..rest]
+    | [IrFinal(opcode.Await), ..rest] -> stored_before_use(rest, slot)
+    _ -> False
+  }
 }
 
 fn peephole(
