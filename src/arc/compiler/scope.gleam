@@ -205,6 +205,8 @@ pub type AnalyzeOpts {
     box_try_writes: Bool,
     // slot indices into parent_names, innermost first
     with_stack: List(Int),
+    // blocks that are never live together use the same slots
+    share_sibling_slots: Bool,
   )
 }
 
@@ -222,6 +224,7 @@ pub fn default_analyze_opts() -> AnalyzeOpts {
     module_slot_globals: False,
     box_try_writes: False,
     with_stack: [],
+    share_sibling_slots: True,
   )
 }
 

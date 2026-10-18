@@ -1080,6 +1080,15 @@ fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
       })
     False -> bindings
   }
+  // an earlier block may have used, and initialized, the same slots
+  let e =
+    Emitter(
+      ..e,
+      initialized: set.drop(
+        e.initialized,
+        list.map(bindings, fn(entry) { { entry.1 }.slot }),
+      ),
+    )
   let boxed =
     list.map(bindings, fn(entry) { entry.1 })
     |> list.filter(fn(b) { b.boxed && b.kind != CaptureBinding })

@@ -313,6 +313,7 @@ pub fn compile_source(
         // slot globals measured slower on richards, keep off
         module_slot_globals: False,
         box_try_writes: True,
+        share_sibling_slots: False,
       ),
     )
   compile(body, tree, opts)

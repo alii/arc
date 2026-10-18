@@ -87,6 +87,9 @@ pub fn forget_inside(
       fn_id,
       dict.new(),
       inherited_strict: False,
+      top: 0,
+      // only names come out of this, never slots
+      fixed_slots: EveryFunction,
     )
   let acc = hoist_annexb_block_functions(builder, acc, opts)
   // nothing outside the function is in this tree, so it is the top of it
@@ -211,6 +214,8 @@ pub fn finalize(builder: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       root_scope_id,
       parent_bindings,
       inherited_strict: opts.strict,
+      top: root_local_count,
+      fixed_slots: functions_with_own_eval(builder, opts),
     )
   let acc = hoist_annexb_block_functions(builder, acc, opts)
   let tree =
@@ -237,6 +242,8 @@ fn finalize_scope(
   scope_id: ScopeId,
   seed_bindings: Dict(String, Binding),
   inherited_strict inherited_strict: Bool,
+  top top: Int,
+  fixed_slots fixed_slots: FixedSlots,
 ) -> FinalizeState {
   let raw = scope_builder.scope_at(builder, scope_id)
   let is_strict = raw.is_strict || inherited_strict
@@ -251,6 +258,12 @@ fn finalize_scope(
     Error(Nil), False ->
       panic as "scope_analysis.finalize_scope: function_scope FunctionInfo missing (pre-order invariant violated)"
   }
+  // the first free slot here: past the enclosing scopes' when blocks share,
+  // past every slot the function has handed out when they do not
+  let top = case is_function_kind(raw.kind) || keeps_slots(fixed_slots, fn_id) {
+    True -> info.local_count
+    False -> top
+  }
   let in_decl_order =
     raw.bindings
     |> dict.to_list
@@ -260,11 +273,11 @@ fn finalize_scope(
     |> list.sort(fn(a, b) { int.compare(a.1.decl_order, b.1.decl_order) })
   // seeds win, except names a strict direct eval declares itself
   let strict_eval_root = opts.strict && raw.kind == Script
-  let #(bindings, info) = {
-    use #(bindings, info) as folded, #(name, rb) <- list.fold(in_decl_order, #(
-      seed_bindings,
-      info,
-    ))
+  let #(bindings, info, top) = {
+    use #(bindings, info, top) as folded, #(name, rb) <- list.fold(
+      in_decl_order,
+      #(seed_bindings, info, top),
+    )
     let keep_seeded =
       dict.has_key(bindings, name)
       && !{ strict_eval_root && dict.has_key(seed_bindings, name) }
@@ -277,8 +290,8 @@ fn finalize_scope(
       ParamBinding, True -> LetBinding
       kind, _ -> kind
     }
-    let #(binding, info) = push_named_slot(info, name, kind)
-    #(dict.insert(bindings, name, binding), info)
+    let #(binding, info) = name_slot(info, top, name, kind)
+    #(dict.insert(bindings, name, binding), info, top + 1)
   }
   let scope =
     Scope(
@@ -308,7 +321,40 @@ fn finalize_scope(
     child_id,
     dict.new(),
     inherited_strict: is_strict,
+    top:,
+    fixed_slots:,
   )
+}
+
+type FixedSlots {
+  EveryFunction
+  Functions(Set(ScopeId))
+}
+
+fn keeps_slots(fixed: FixedSlots, fn_id: ScopeId) -> Bool {
+  case fixed {
+    EveryFunction -> True
+    Functions(ids) -> set.contains(ids, fn_id)
+  }
+}
+
+// a direct eval finds its caller's variables by name, one slot to a name
+fn functions_with_own_eval(
+  builder: ScopeBuilder,
+  opts: AnalyzeOpts,
+) -> FixedSlots {
+  case opts.share_sibling_slots, builder.eval_marks {
+    False, _ -> EveryFunction
+    True, 0 -> Functions(set.new())
+    True, _ ->
+      Functions({
+        use ids, _id, raw <- dict.fold(builder.scopes, set.new())
+        case raw.contains_direct_eval {
+          True -> set.insert(ids, raw.function_scope)
+          False -> ids
+        }
+      })
+  }
 }
 
 fn push_named_slot(
@@ -316,14 +362,26 @@ fn push_named_slot(
   name: String,
   kind: BindingKind,
 ) -> #(Binding, FunctionInfo) {
-  let slot = info.local_count
+  name_slot(info, info.local_count, name, kind)
+}
+
+fn name_slot(
+  info: FunctionInfo,
+  slot: Int,
+  name: String,
+  kind: BindingKind,
+) -> #(Binding, FunctionInfo) {
   let slot_by_name = case dict.has_key(info.slot_by_name, name) {
     True -> info.slot_by_name
     False -> dict.insert(info.slot_by_name, name, slot)
   }
   #(
     Binding(slot:, kind:, boxed: False, declared_kind: kind),
-    FunctionInfo(..info, local_count: slot + 1, slot_by_name:),
+    FunctionInfo(
+      ..info,
+      local_count: int.max(info.local_count, slot + 1),
+      slot_by_name:,
+    ),
   )
 }
 
