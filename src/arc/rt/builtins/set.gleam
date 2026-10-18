@@ -158,11 +158,27 @@ fn set_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 
 /// has on a real Set, which cannot throw
 pub fn plain_has(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
-  case classify(this) {
+  case entries_of(st, this) {
+    Some(entries) ->
+      Some(mk_bool(ordered_entries.has(entries, js_to_map_key(key))))
+    None -> None
+  }
+}
+
+/// the size getter on a real Set
+pub fn plain_size(st: Agent, this: JsVal) -> Option(JsVal) {
+  use entries <- option.map(entries_of(st, this))
+  mk_int(ordered_entries.size(entries))
+}
+
+fn entries_of(
+  st: Agent,
+  v: JsVal,
+) -> Option(ordered_entries.OrderedEntries(MapKey, JsVal)) {
+  case classify(v) {
     types.KHandle(h) ->
       case rt_store.cell_get(st, h) {
-        SObject(kind: SetObj(entries:), ..) ->
-          Some(mk_bool(ordered_entries.has(entries, js_to_map_key(key))))
+        SObject(kind: SetObj(entries:), ..) -> Some(entries)
         _ -> None
       }
     _ -> None

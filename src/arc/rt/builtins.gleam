@@ -529,6 +529,8 @@ pub fn plain_answer(
     MapN(types.MapGet), [key] -> b_map.plain_get(st, this, key)
     MapN(types.MapHas), [key] -> b_map.plain_has(st, this, key)
     SetN(types.SetHas), [key] -> b_set.plain_has(st, this, key)
+    MapN(types.MapGetSize), [] -> b_map.plain_size(st, this)
+    SetN(types.SetGetSize), [] -> b_set.plain_size(st, this)
     ArrayN(types.ArrayPrototypeIncludes), [search] ->
       b_array.plain_includes(st, this, search)
     ArrayN(types.ArrayPrototypeIndexOf), [search] ->

@@ -88,6 +88,9 @@ pub fn private_get(store: Store, obj: JsVal, name: JsVal) -> JsVal
 @external(erlang, "arc_interp_prop_ffi", "private_put")
 pub fn private_put(store: Store, obj: JsVal, name: JsVal, v: JsVal) -> Store
 
+@external(erlang, "arc_interp_prop_ffi", "private_define")
+pub fn private_define(store: Store, obj: JsVal, name: JsVal, v: JsVal) -> Store
+
 @external(erlang, "arc_interp_prop_ffi", "has_property")
 pub fn has_property(st: Agent, key: JsVal, obj: JsVal) -> JsVal
 
@@ -113,6 +116,10 @@ pub fn box_get(st: Agent, box: JsVal) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_field")
 pub fn get_field(st: Agent, obj: JsVal, key: PropertyKey) -> JsVal
+
+// what a builtin getter found by a plain chain lookup answers, if it can
+@external(erlang, "arc_interp_prop_ffi", "builtin_getter")
+pub fn builtin_getter(st: Agent, obj: JsVal, key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "own_data")
 pub fn own_data(props: Dict(PropertyKey, Property), key: PropertyKey) -> JsVal

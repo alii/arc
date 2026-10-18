@@ -1,6 +1,7 @@
 %% property kernels for the interpreter; exports may answer miss, never raise
 -module(arc_interp_prop_ffi).
--export([has_property/3, private_get/3, private_put/4]).
+-export([has_property/3, private_get/3, private_put/4, private_define/4,
+         builtin_getter/3]).
 -export([get_field/3, find_accessor/3, own_data/2, get_elem/3, get_elem_keep/3, put_field/5, put_elem/4,
          define_field/4, new_object/5, new_object_shaped/5, new_receiver/2, get_global/3,
          put_global/6]).
@@ -19,6 +20,22 @@ get_field(St, S, K) when ?IS_STR(S) ->
 get_field(St, N, K) when is_number(N) ->
     proto_field(St, ?REALM_NUMBER, K);
 get_field(_, _, _) -> miss.
+
+%% a builtin getter, like a map's size, that can answer with no real call
+builtin_getter(St, Recv, K) ->
+    case find_accessor(St, Recv, K) of
+        {accessor, {?SOME, {?HANDLE_TAG, G}}, _} ->
+            Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+            case arc_rt_arena_ffi:get(G, Cells) of
+                {?SOBJECT_TAG, {?NATIVEFN_TAG, Token, _, _, _}, _, _, _, _, _} ->
+                    case 'arc@rt@builtins':plain_answer(St, Token, Recv, []) of
+                        {?SOME, V} -> V;
+                        ?NONE -> miss
+                    end;
+                _ -> miss
+            end;
+        _ -> miss
+    end.
 
 own_data(Props, K) ->
     case Props of
@@ -92,6 +109,32 @@ private_put(Store, {?HANDLE_TAG, Id}, Name, V) ->
         _ -> miss
     end;
 private_put(_, _, _, _) -> miss.
+
+%% §7.3.28 privatefieldadd to an extensible object that lacks the name
+private_define(Store, {?HANDLE_TAG, Id}, Name, V) when tuple_size(Store) =:= ?STORE_SIZE ->
+    Cells = element(?STORE_CELLS, Store),
+    case private_key(Name) of
+        miss -> miss;
+        K ->
+            Seq = element(?STORE_PROP_SEQ, Store),
+            Prop = {?DATAPROPERTY_TAG, V, true, false, true, Seq},
+            case arc_rt_arena_ffi:get(Id, Cells) of
+                {?SOBJECT_TAG, Kind, Proto, Props, Sym, Elems, true}
+                  when not is_map_key(K, Props) ->
+                    Cell = {?SOBJECT_TAG, Kind, Proto, Props#{K => Prop}, Sym, Elems, true},
+                    setelement(?STORE_PROP_SEQ, set_plain(Store, Id, Cell, Cells, Kind),
+                               Seq + 1);
+                {?SSHAPEDOBJECT_TAG, _, Proto, {}, _} ->
+                    Cell = {?SOBJECT_TAG, ?ORDINARY, Proto, #{K => Prop}, [],
+                            ?ELEMS_NONE, true},
+                    setelement(?STORE_PROP_SEQ,
+                               setelement(?STORE_CELLS, Store,
+                                          arc_rt_arena_ffi:set(Id, Cell, Cells)),
+                               Seq + 1);
+                _ -> miss
+            end
+    end;
+private_define(_, _, _, _) -> miss.
 
 private_key(B) when is_binary(B) -> {?KEY_PRIVATE, B};
 private_key({?STR_TAG, B, _, _}) -> {?KEY_PRIVATE, B};

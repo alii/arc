@@ -44,6 +44,9 @@ pub fn short_answers_agree_with_the_full_call_test() {
       }
       let recv = receivers[r];
       same('isArray:' + r, function () { return Array.isArray(recv); }, function () { return Reflect.apply(Array.isArray, null, [recv]); });
+      if (recv != null) same('size:' + r, function () { return recv.size; }, function () { return Reflect.get(Object(recv), 'size', recv); });
+      if (recv != null) same('size<:' + r, function () { var x = recv; return 1 < x.size; }, function () { return 1 < Reflect.get(Object(recv), 'size', recv); });
+      if (recv != null) same('length<:' + r, function () { var x = recv; return 1 < x.length; }, function () { return 1 < Reflect.get(Object(recv), 'length', recv); });
       if (recv != null) same('length:' + r, function () { return recv.length; }, function () { return Reflect.get(Object(recv), 'length', recv); });
     }
   }

@@ -100,3 +100,21 @@ pub fn two_evaluations_of_a_class_have_different_names_test() {
     )
     == "'1,1,TypeError'"
 }
+
+pub fn a_field_is_defined_once_and_in_order_test() {
+  assert run(prelude <> "
+  var o = {};
+  attempt(() => { new P(o); return P.read(o); });
+  attempt(() => new P(o));
+  attempt(() => P.read(o));
+  class Order { #a = out.push('a'); b = out.push('b'); #c = out.push('c'); static peek(x) { return x.#a + ':' + x.b + ':' + x.#c; } }
+  attempt(() => Order.peek(new Order()));
+  class Uses { #a = 1; #b = this.#a + 1; static peek(x) { return x.#b; } }
+  attempt(() => Uses.peek(new Uses()));
+  class Early { #b = this.#a; #a = 1; }
+  attempt(() => new Early());
+  class Pub { x = 1; #y = 2; z = 3; static peek(o) { return Object.keys(o).join('') + o.#y + JSON.stringify(o); } }
+  attempt(() => Pub.peek(new Pub()));
+  out.join()
+  ") == "'1,TypeError,1,a,b,c,4:5:6,2,TypeError,xz2{\"x\":1,\"z\":3}'"
+}

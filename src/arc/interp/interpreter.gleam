@@ -1234,19 +1234,19 @@ fn loop(
     BinOpLocalField(kind, index, key.Named(_) as k) ->
       case stack {
         [left, ..rest] -> {
-          let right =
-            kernel.get_field(
-              agent,
-              case index < 0 {
-                True ->
-                  case index {
-                    -1 -> r0
-                    _ -> r1
-                  }
-                False -> tuple_array.element(index + 1, locals)
-              },
-              k,
-            )
+          let recv = case index < 0 {
+            True ->
+              case index {
+                -1 -> r0
+                _ -> r1
+              }
+            False -> tuple_array.element(index + 1, locals)
+          }
+          let right = kernel.get_field(agent, recv, k)
+          let right = case kernel.is(right, kernel.Miss) {
+            True -> kernel.builtin_getter(agent, recv, k)
+            False -> right
+          }
           case kernel.is(right, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False -> {
@@ -2002,6 +2002,30 @@ fn loop(
                 [v, recv, ..rest],
                 locals,
                 agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    DefinePrivateField ->
+      case stack {
+        [val, k, recv, ..rest] -> {
+          let store = kernel.private_define(agent.store, recv, k, val)
+          case kernel.is(store, kernel.Miss) {
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                [recv, ..rest],
+                locals,
+                Agent(..agent, store:),
                 code,
                 constants,
                 r0,
