@@ -43,6 +43,12 @@ pub type RawScope {
     non_simple_shim_count: Int,
     // §10.2.11 step 28 var sink body block for non-simple params
     is_var_boundary: Bool,
+    // ref_count when it was opened
+    opened_at_ref: Int,
+    // a switch: a case can be entered past the declarations of earlier ones
+    entered_midway: Bool,
+    // see Scope.declared_before_use
+    declared_before_use: Set(String),
   )
 }
 
@@ -71,6 +77,7 @@ fn new_raw_scope(
   function_scope: ScopeId,
   kind: ScopeKind,
   is_strict is_strict: Bool,
+  opened_at_ref opened_at_ref: Int,
 ) -> RawScope {
   RawScope(
     id:,
@@ -86,6 +93,9 @@ fn new_raw_scope(
     hoisted_vars: set.new(),
     non_simple_shim_count: 0,
     is_var_boundary: False,
+    opened_at_ref:,
+    entered_midway: False,
+    declared_before_use: set.new(),
   )
 }
 
@@ -139,6 +149,7 @@ pub fn init(root_kind: ScopeKind, source: BitArray) -> ScopeBuilder {
       root_scope_id,
       root_kind,
       root_kind == Module,
+      opened_at_ref: 0,
     )
   ScopeBuilder(
     scopes: dict.from_list([#(root_scope_id, root)]),
@@ -202,7 +213,14 @@ pub fn push(sb: ScopeBuilder, kind: ScopeKind) -> #(ScopeBuilder, ScopeId) {
     Script | Function | Block | Catch | With(_) -> parent.is_strict
   }
   let node =
-    new_raw_scope(id, Some(sb.current), function_scope, kind, is_strict)
+    new_raw_scope(
+      id,
+      Some(sb.current),
+      function_scope,
+      kind,
+      is_strict,
+      opened_at_ref: sb.ref_count,
+    )
   let functions = case is_fn {
     False -> sb.functions
     True -> dict.insert(sb.functions, id, blank_raw_fn_info)
@@ -697,6 +715,40 @@ pub fn set_fn_waits(sb: ScopeBuilder, fn_id: ScopeId) -> ScopeBuilder {
 }
 
 // a use strict directive covers the scope it opens and everything inside
+pub fn mark_entered_midway(sb: ScopeBuilder) -> ScopeBuilder {
+  update_current(sb, fn(s) { RawScope(..s, entered_midway: True) })
+}
+
+// how far back declaration_done looks before it gives up
+const furthest_look_back = 128
+
+/// A let or const statement of the current scope has just been parsed to its
+/// end. Notes which of its names nothing in the scope has mentioned yet, its
+/// own initializers included.
+pub fn declaration_done(sb: ScopeBuilder, names: List(String)) -> ScopeBuilder {
+  let scope = scope_at(sb, sb.current)
+  let since_opened = sb.ref_count - scope.opened_at_ref
+  use <- bool.guard(
+    scope.entered_midway || since_opened > furthest_look_back,
+    sb,
+  )
+  let recent = list.take(sb.raw_refs, since_opened)
+  let unmentioned = {
+    use name <- list.filter(names)
+    !list.any(recent, fn(ref) { ref.name == name })
+  }
+  use <- bool.guard(unmentioned == [], sb)
+  use s <- update_current(sb)
+  RawScope(
+    ..s,
+    declared_before_use: list.fold(
+      unmentioned,
+      s.declared_before_use,
+      set.insert,
+    ),
+  )
+}
+
 pub fn mark_strict(sb: ScopeBuilder) -> ScopeBuilder {
   update_current(sb, fn(s) { RawScope(..s, is_strict: True) })
 }
@@ -894,7 +946,14 @@ pub fn forget_inside(
     |> dict.insert(
       fn_id,
       RawScope(
-        ..new_raw_scope(fn_id, own.parent, fn_id, own.kind, is_strict:),
+        ..new_raw_scope(
+          fn_id,
+          own.parent,
+          fn_id,
+          own.kind,
+          is_strict:,
+          opened_at_ref: own.opened_at_ref,
+        ),
         source_tag: own.source_tag,
       ),
     )

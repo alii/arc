@@ -76,6 +76,9 @@ pub type Scope {
     is_strict: Bool,
     // §10.2.11 step 28 body block of a non-simple-params function
     is_var_boundary: Bool,
+    // lets and consts that no code can reach before their declaration has
+    // run, unless a closure made earlier does
+    declared_before_use: Set(String),
   )
 }
 

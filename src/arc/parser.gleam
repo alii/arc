@@ -1084,8 +1084,28 @@ fn parse_variable_declaration_decl(
   use #(p3, declarations) <- result.try(
     parse_variable_declarator_list(p2, kind, []),
   )
+  let p3 = declaration_done(p3, kind, declarations)
   use p4 <- result.try(eat_semicolon(exit_declaration_context(p3, p)))
   Ok(#(p4, ast.DeclareVariable(kind:, declarations:)))
+}
+
+// everything that runs before these names have their values has been parsed
+fn declaration_done(
+  p: Parser,
+  kind: ast.VariableKind,
+  declarations: List(ast.VariableDeclarator),
+) -> Parser {
+  case kind {
+    ast.Let | ast.Const ->
+      Parser(
+        ..p,
+        scopes: scope_builder.declaration_done(
+          p.scopes,
+          list.flat_map(declarations, fn(d) { ast.pattern_bound_names(d.id) }),
+        ),
+      )
+    ast.Var | ast.Using | ast.AwaitUsing -> p
+  }
 }
 
 // consumes var, let or const and enters its declaration context
@@ -2018,6 +2038,7 @@ fn finish_for_classic_decl(
     parse_remaining_declarators(p, kind, [])
   })
   let decl = ast.ForInitDeclaration(kind:, declarations: [first, ..rest])
+  let p2 = declaration_done(p2, kind, [first, ..rest])
   use p3 <- result.try(expect(p2, Semicolon))
   parse_for_classic_rest(exit_declaration_context(p3, outer), Some(decl))
 }
@@ -2154,6 +2175,11 @@ fn parse_for_in_of_rest(
     True -> parse_assignment_expression(p2)
     False -> parse_expression(p2)
   })
+  let p3 = case left {
+    ast.ForInitDeclaration(kind:, declarations:) ->
+      declaration_done(p3, kind, declarations)
+    _ -> p3
+  }
   use p4 <- result.try(expect(p3, RightParen))
   // the right side is emitted before the left side binds
   let p4 = later_scopes_first(p4, before: head, mid: p)
@@ -2434,6 +2460,7 @@ fn parse_switch_statement(
   use p6 <- result.try(expect(p5, LeftBrace))
   // one block scope around all cases; may shadow params
   let #(scopes, switch_id) = scope_builder.push(p6.scopes, scope.Block)
+  let scopes = scope_builder.mark_entered_midway(scopes)
   let p_inner =
     Parser(
       ..p6,

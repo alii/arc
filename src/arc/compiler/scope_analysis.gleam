@@ -304,6 +304,7 @@ fn finalize_scope(
       annexb_blocked: set.new(),
       is_strict:,
       is_var_boundary: raw.is_var_boundary,
+      declared_before_use: raw.declared_before_use,
     )
   let acc =
     FinalizeState(

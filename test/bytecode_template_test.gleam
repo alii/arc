@@ -62,7 +62,8 @@ pub fn nested_function_template_constants_classify_test() {
 }
 
 pub fn binding_seeds_classify_as_undefined_and_tdz_test() {
-  let kinds = all_constant_kinds(compile("function f() { var v; let l = 1; }"))
+  let kinds =
+    all_constant_kinds(compile("function f() { var v; l; let l = 1; }"))
   assert list.contains(kinds, KUndef)
   assert list.contains(kinds, KTdz)
   assert list.contains(kinds, KNum(JInt(1)))

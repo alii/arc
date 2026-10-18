@@ -1068,7 +1068,13 @@ const batch_boxing_min = 64
 
 // var -> undef, let/const -> uninit, param/catch -> box only, capture -> nothing
 fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
-  let bindings = bindings_in_slot_order(scope.get(e.scope_tree, scope_id))
+  let entered = scope.get(e.scope_tree, scope_id)
+  // nothing can look at these before they are given a value. A boxed one may
+  // be looked at by a closure made earlier
+  let bindings = {
+    use #(name, b) <- list.filter(bindings_in_slot_order(entered))
+    b.boxed || !set.contains(entered.declared_before_use, name)
+  }
   let at_module_root = scope_id == root_scope_id && e.fn_scope == root_scope_id
   // the frame already pads root-scope vars with undefined
   let is_function_root = scope_id == e.fn_scope
