@@ -863,9 +863,38 @@ plain_copy_data_props(St, {?HANDLE_TAG, TId}, {?HANDLE_TAG, SId})
                                 arc_rt_arena_ffi:set(TId, NewCell, Cells), Seq))}
                     end
             end;
+        {?SSHAPEDOBJECT_TAG, TSid, TProto, TSlots, TOffs} ->
+            case source_pairs(arc_rt_arena_ffi:get(SId, Cells)) of
+                miss -> copy_miss;
+                Pairs ->
+                    case shaped_merge(Pairs, element(?STORE_SHAPES, Store), TSid,
+                                      TOffs, TSlots) of
+                        miss -> copy_miss;
+                        {Sid, Offs, Slots} ->
+                            NewCell = {?SSHAPEDOBJECT_TAG, Sid, TProto, Slots, Offs},
+                            {copied, with_store(St, with_cells(Store,
+                                arc_rt_arena_ffi:set(TId, NewCell, Cells)))}
+                    end
+            end;
         _ -> copy_miss
     end;
 plain_copy_data_props(_, _, _) -> copy_miss.
+
+%% follows shape transitions that exist already; the long way makes new ones
+shaped_merge([], _, Sid, Offs, Slots) -> {Sid, Offs, Slots};
+shaped_merge([{{?KEY_NAMED, <<"__proto__">>}, _} | _], _, _, _, _) -> miss;
+shaped_merge([{{?KEY_NAMED, KB}, V} | Rest], Shapes, Sid, Offs, Slots) ->
+    case Offs of
+        #{KB := Off} ->
+            shaped_merge(Rest, Shapes, Sid, Offs, ?SLOT_SET(Slots, Off, V));
+        _ ->
+            case ?SHAPED_NEXT(Shapes, Sid, KB) of
+                miss -> miss;
+                {To, ToOffs} ->
+                    shaped_merge(Rest, Shapes, To, ToOffs,
+                                 erlang:append_element(Slots, V))
+            end
+    end.
 
 source_pairs({?SOBJECT_TAG, ?ORDINARY, _, Props, [], ?ELEMS_NONE, _}) ->
     L = maps:to_list(Props),
