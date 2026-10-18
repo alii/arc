@@ -3251,7 +3251,7 @@ fn emit_with(
 
 // one short-circuit exit per stack shape: [base] or [f, receiver]
 type ChainExits {
-  ChainExits(nullish_with_base: LabelId, nullish_callee_pair: LabelId)
+  ChainExits(end: LabelId, nullish_callee_pair: LabelId)
 }
 
 // §13.3.9.1 the whole chain yields undefined at the first nullish link
@@ -3259,16 +3259,10 @@ fn emit_chain_root(
   e: Emitter,
   expr: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  let #(nullish_with_base, e) = fresh_label(e)
   let #(nullish_callee_pair, e) = fresh_label(e)
   let #(end_label, e) = fresh_label(e)
-  let exits = ChainExits(nullish_with_base:, nullish_callee_pair:)
+  let exits = ChainExits(end: end_label, nullish_callee_pair:)
   use e <- result.map(emit_chain(e, expr, exits))
-  let e = emit_ir(e, IrJump(end_label))
-  // [nullish] -> [undefined]
-  let e = emit_ir(e, IrLabel(nullish_with_base))
-  let e = emit_op(e, opcode.Pop)
-  let e = push_const(e, mk_undefined())
   let e = emit_ir(e, IrJump(end_label))
   // [f, receiver] -> [undefined]
   let e = emit_ir(e, IrLabel(nullish_callee_pair))
@@ -3306,12 +3300,14 @@ fn emit_chain(
     // f?.(x): also check the function value
     ast.OptionalCallExpression(_, callee, args) -> {
       use #(form, e) <- result.try(emit_chain_callee(e, callee, exits))
-      let e = emit_op(e, opcode.Dup)
-      let exit = case form {
-        MethodCall -> exits.nullish_callee_pair
-        PlainCall | Construct | NewCall -> exits.nullish_with_base
+      let e = case form {
+        MethodCall ->
+          e
+          |> emit_op(opcode.Dup)
+          |> emit_ir(IrJumpIfNullish(exits.nullish_callee_pair))
+        PlainCall | Construct | NewCall ->
+          emit_ir(e, opcode.IrJumpUndefinedIfNullish(exits.end))
       }
-      let e = emit_ir(e, IrJumpIfNullish(exit))
       emit_call_args(e, args, form)
     }
     // unreachable: ?. followed by a template is an early error
@@ -3328,9 +3324,7 @@ fn emit_chain_object(
   use e <- result.map(emit_chain(e, obj, exits))
   case link {
     ast.OptionalMemberExpression(..) ->
-      e
-      |> emit_op(opcode.Dup)
-      |> emit_ir(IrJumpIfNullish(exits.nullish_with_base))
+      emit_ir(e, opcode.IrJumpUndefinedIfNullish(exits.end))
     _ -> e
   }
 }
@@ -3410,7 +3404,6 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       let #(end_label, e) = fresh_label(e)
       use e <- result.try(emit_expr(e, left))
       let e = emit_short_circuit_test(e, op, end_label)
-      let e = emit_op(e, opcode.Pop)
       use e <- result.map(emit_expr(e, right))
       emit_ir(e, IrLabel(end_label))
     }
@@ -5523,7 +5516,6 @@ fn emit_logical_assign(
       let #(end_label, e) = fresh_label(e)
       with_identifier_read_write(e, name, fn(e) {
         let e = emit_short_circuit_test(e, op, end_label)
-        let e = emit_op(e, opcode.Pop)
         emit_named_expr(e, right, name)
       })
       |> result.map(emit_ir(_, IrLabel(end_label)))
@@ -5543,7 +5535,6 @@ fn emit_logical_assign_member(
   let #(short_label, e) = fresh_label(e)
   let #(end_label, e) = fresh_label(e)
   let e = emit_short_circuit_test(e, op, short_label)
-  let e = emit_op(e, opcode.Pop)
   use e <- result.map(emit_expr(e, right))
   e
   |> put
@@ -5634,25 +5625,18 @@ fn emit_nullish_test(
   }
 }
 
-// dup-jumps to short_label when the op short-circuits, value kept either way
+// jumps to short_label with the value kept when the op short-circuits, else
+// drops the value
 fn emit_short_circuit_test(
   e: Emitter,
   op: ast.LogicalOp,
   short_label: LabelId,
 ) -> Emitter {
-  let e = emit_op(e, opcode.Dup)
-  case op {
-    ast.LogicalAnd -> emit_ir(e, IrJumpIfFalse(short_label))
-    ast.LogicalOr -> emit_ir(e, IrJumpIfTrue(short_label))
-    // no jump-if-not-nullish op, so hop over a short jump
-    ast.NullishCoalescing -> {
-      let #(go_label, e) = fresh_label(e)
-      e
-      |> emit_ir(IrJumpIfNullish(go_label))
-      |> emit_ir(IrJump(short_label))
-      |> emit_ir(IrLabel(go_label))
-    }
-  }
+  emit_ir(e, case op {
+    ast.LogicalAnd -> opcode.IrJumpIfFalseOrPop(short_label)
+    ast.LogicalOr -> opcode.IrJumpIfTrueOrPop(short_label)
+    ast.NullishCoalescing -> opcode.IrJumpIfNotNullishOrPop(short_label)
+  })
 }
 
 fn compile_class(

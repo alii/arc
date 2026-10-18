@@ -152,6 +152,12 @@ pub type Op {
   JumpIfTrue(target: Pc)
   JumpIfNullish(target: Pc)
   JumpIfNotNullish(target: Pc)
+  // && || ??: [v] -> [v] and jump when v settles it, else [v] -> []
+  JumpIfFalseOrPop(target: Pc)
+  JumpIfTrueOrPop(target: Pc)
+  JumpIfNotNullishOrPop(target: Pc)
+  // ?.: [nullish] -> [undefined] and jump, else nothing
+  JumpUndefinedIfNullish(target: Pc)
   // [receiver] -> [record] and jump, when iterating receiver.view() observes nothing
   IterateView(view: IterView, hit: Pc)
   // [array] -> [el0, .., el(count-1)] when iterating it observes nothing, else jump
@@ -363,6 +369,10 @@ pub type IrOp {
   IrJumpIfTrue(label: LabelId)
   IrJumpIfNullish(label: LabelId)
   IrJumpIfNotNullish(label: LabelId)
+  IrJumpIfFalseOrPop(label: LabelId)
+  IrJumpIfTrueOrPop(label: LabelId)
+  IrJumpIfNotNullishOrPop(label: LabelId)
+  IrJumpUndefinedIfNullish(label: LabelId)
   IrIterateView(view: IterView, hit: LabelId)
   IrUnpackArray(count: Int, miss: LabelId)
   IrPushTry(catch_label: LabelId, kind: TryKind(LabelId))
@@ -549,6 +559,10 @@ pub fn jump_target(op: Op) -> Option(Int) {
     | JumpIfTrue(Pc(t))
     | JumpIfNullish(Pc(t))
     | JumpIfNotNullish(Pc(t))
+    | JumpIfFalseOrPop(Pc(t))
+    | JumpIfTrueOrPop(Pc(t))
+    | JumpIfNotNullishOrPop(Pc(t))
+    | JumpUndefinedIfNullish(Pc(t))
     | JumpIfLocal(_, Pc(t), _)
     | IncLocalJump(_, Pc(t))
     | IncLocalCmpConstJump(_, _, _, _, Pc(t), _)

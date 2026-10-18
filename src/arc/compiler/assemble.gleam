@@ -5,8 +5,9 @@ import arc/bytecode/opcode.{
   IrDefineAccessor, IrDefineField, IrDefineMethod, IrDeleteField, IrFinal,
   IrGetField, IrGetFieldKeep, IrGosub, IrIncLocalCmpConstJump,
   IrIncLocalCmpLocalJump, IrIncLocalJump, IrIterateView, IrJump, IrJumpIfFalse,
-  IrJumpIfLocal, IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrLine, IrPushTry, IrPutField, IrUnpackArray, IrWithDeleteVar,
+  IrJumpIfFalseOrPop, IrJumpIfLocal, IrJumpIfNotNullish, IrJumpIfNotNullishOrPop,
+  IrJumpIfNullish, IrJumpIfTrue, IrJumpIfTrueOrPop, IrJumpUndefinedIfNullish,
+  IrLabel, IrLine, IrPushTry, IrPutField, IrUnpackArray, IrWithDeleteVar,
   IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis, IrWithMakeRef,
   IrWithPutRefValue, IrWithPutVar, Pc,
 }
@@ -143,6 +144,10 @@ fn loop_refs(op: IrOp) -> List(LabelId) {
     | IrJumpIfTrue(l)
     | IrJumpIfNullish(l)
     | IrJumpIfNotNullish(l)
+    | IrJumpIfFalseOrPop(l)
+    | IrJumpIfTrueOrPop(l)
+    | IrJumpIfNotNullishOrPop(l)
+    | IrJumpUndefinedIfNullish(l)
     | IrCmpLocalLocalJump(label: l, ..)
     | IrCmpLocalConstJump(label: l, ..)
     | IrCmpJump(label: l, ..)
@@ -297,6 +302,10 @@ fn may_allocate(op: IrOp) -> Bool {
     | IrJumpIfTrue(_)
     | IrJumpIfNullish(_)
     | IrJumpIfNotNullish(_)
+    | IrJumpIfFalseOrPop(_)
+    | IrJumpIfTrueOrPop(_)
+    | IrJumpIfNotNullishOrPop(_)
+    | IrJumpUndefinedIfNullish(_)
     | IrUnpackArray(..)
     | IrIterateView(..)
     | IrPushTry(..)
@@ -343,6 +352,10 @@ fn label_refs(op: IrOp) -> List(LabelId) {
     | IrJumpIfTrue(l)
     | IrJumpIfNullish(l)
     | IrJumpIfNotNullish(l)
+    | IrJumpIfFalseOrPop(l)
+    | IrJumpIfTrueOrPop(l)
+    | IrJumpIfNotNullishOrPop(l)
+    | IrJumpUndefinedIfNullish(l)
     | IrUnpackArray(_, l)
     | IrIterateView(_, l)
     | IrGosub(l)
@@ -454,6 +467,12 @@ fn assemble_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
     IrJumpIfTrue(l) -> opcode.JumpIfTrue(label_pc(labels, l))
     IrJumpIfNullish(l) -> opcode.JumpIfNullish(label_pc(labels, l))
     IrJumpIfNotNullish(l) -> opcode.JumpIfNotNullish(label_pc(labels, l))
+    IrJumpIfFalseOrPop(l) -> opcode.JumpIfFalseOrPop(label_pc(labels, l))
+    IrJumpIfTrueOrPop(l) -> opcode.JumpIfTrueOrPop(label_pc(labels, l))
+    IrJumpIfNotNullishOrPop(l) ->
+      opcode.JumpIfNotNullishOrPop(label_pc(labels, l))
+    IrJumpUndefinedIfNullish(l) ->
+      opcode.JumpUndefinedIfNullish(label_pc(labels, l))
     IrIterateView(view, l) -> opcode.IterateView(view, label_pc(labels, l))
     IrUnpackArray(count, l) -> opcode.UnpackArray(count, label_pc(labels, l))
     IrPushTry(l, kind) ->

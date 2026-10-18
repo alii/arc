@@ -23,12 +23,13 @@ import arc/bytecode/opcode.{
   GetTemplateObject, Gosub, IncLocal, IncLocalCmpConstJump, IncLocalCmpLocalJump,
   IncLocalJump, InitGlobalLex, InitialYield, IterateView, IteratorCheckObject,
   IteratorClose, IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest,
-  Jump, JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
-  KeepUnitText, MakeClosure, MakeLazyClosure, MakeMethod, MakeSuppressed,
-  NewObject, NewObjectShaped, NewObjectWith, NewPrivateName, NewRegExp,
-  ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry, PostDecLocal, PostIncLocal,
-  PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem,
-  PutElemPop, PutEnvBoxed, PutEnvBoxedCheckInit, PutEvalVar, PutField,
+  Jump, JumpIfFalse, JumpIfFalseOrPop, JumpIfLocal, JumpIfNotNullish,
+  JumpIfNotNullishOrPop, JumpIfNullish, JumpIfTrue, JumpIfTrueOrPop,
+  JumpUndefinedIfNullish, KeepUnitText, MakeClosure, MakeLazyClosure, MakeMethod,
+  MakeSuppressed, NewObject, NewObjectShaped, NewObjectWith, NewPrivateName,
+  NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry, PostDecLocal,
+  PostIncLocal, PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit,
+  PutElem, PutElemPop, PutEnvBoxed, PutEnvBoxedCheckInit, PutEvalVar, PutField,
   PutFieldPop, PutGlobal, PutLocal, PutLocalCheckInit, PutLocalConstField,
   PutLocalLocalField, PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3,
   Safepoint, SetProto, SetupDerivedClass, Swap, Throw, ThrowConstAssign,
@@ -984,6 +985,142 @@ fn loop(
                 drive,
                 pc + 1,
                 rest,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    JumpIfFalseOrPop(Pc(target)) ->
+      case stack {
+        [top, ..rest] ->
+          case rt_val.to_boolean(top) {
+            False ->
+              loop(
+                state,
+                drive,
+                target,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            True ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                rest,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    JumpIfTrueOrPop(Pc(target)) ->
+      case stack {
+        [top, ..rest] ->
+          case rt_val.to_boolean(top) {
+            True ->
+              loop(
+                state,
+                drive,
+                target,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                rest,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    JumpIfNotNullishOrPop(Pc(target)) ->
+      case stack {
+        [top, ..rest] ->
+          case kernel.is(top, kernel.Undefined) || kernel.is(top, kernel.Null) {
+            False ->
+              loop(
+                state,
+                drive,
+                target,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            True ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                rest,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    JumpUndefinedIfNullish(Pc(target)) ->
+      case stack {
+        [top, ..rest] ->
+          case kernel.is(top, kernel.Undefined) || kernel.is(top, kernel.Null) {
+            True ->
+              loop(
+                state,
+                drive,
+                target,
+                [kernel.literal([kernel.Undefined]), ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                stack,
                 locals,
                 agent,
                 code,
@@ -4260,6 +4397,21 @@ fn conditional_jump(
   }
 }
 
+fn jump_or_pop(
+  state: State,
+  target: Int,
+  condition: fn(JsVal) -> Bool,
+) -> Result(State, StepExit) {
+  case state.stack {
+    [top, ..rest] ->
+      case condition(top) {
+        True -> Ok(State(..state, pc: target))
+        False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+      }
+    [] -> underflow(state, "JumpOrPop")
+  }
+}
+
 fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   case op {
     CompileSelf -> lazy.first_call(state)
@@ -5166,6 +5318,26 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       use v <- conditional_jump(state, target)
       !rt_val.is_nullish(v)
     }
+
+    JumpIfFalseOrPop(Pc(target)) -> {
+      use v <- jump_or_pop(state, target)
+      !rt_val.to_boolean(v)
+    }
+    JumpIfTrueOrPop(Pc(target)) -> jump_or_pop(state, target, rt_val.to_boolean)
+    JumpIfNotNullishOrPop(Pc(target)) -> {
+      use v <- jump_or_pop(state, target)
+      !rt_val.is_nullish(v)
+    }
+    JumpUndefinedIfNullish(Pc(target)) ->
+      case state.stack {
+        [top, ..rest] ->
+          case rt_val.is_nullish(top) {
+            True ->
+              Ok(State(..state, stack: [mk_undefined(), ..rest], pc: target))
+            False -> Ok(State(..state, pc: state.pc + 1))
+          }
+        [] -> underflow(state, "JumpUndefinedIfNullish")
+      }
 
     // quickjs op_gosub
     Gosub(Pc(target)) ->
