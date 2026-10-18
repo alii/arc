@@ -370,7 +370,6 @@ fn merge_private_accessor(
 // §7.3.30 privateget, getter may re-enter js
 pub fn private_get(st: Agent, obj: JsVal, priv_key: JsVal) -> #(JsVal, Agent) {
   let text = priv_key_text(priv_key)
-  let name = private_display_name(text)
   case classify(obj) {
     KHandle(h) ->
       case rt_obj.ordinary_own_property(st, h, StringKey(Private(text))) {
@@ -380,20 +379,24 @@ pub fn private_get(st: Agent, obj: JsVal, priv_key: JsVal) -> #(JsVal, Agent) {
         Some(AccessorProperty(get: None, ..)) ->
           rt_val.throw_type_error(
             st,
-            "'" <> name <> "' was defined without a getter",
+            "'"
+              <> private_display_name(text)
+              <> "' was defined without a getter",
           )
         None ->
           rt_val.throw_type_error(
             st,
             "Cannot read private member "
-              <> name
+              <> private_display_name(text)
               <> " from an object whose class did not declare it",
           )
       }
     _ ->
       rt_val.throw_type_error(
         st,
-        "Cannot read private member " <> name <> " on non-object",
+        "Cannot read private member "
+          <> private_display_name(text)
+          <> " on non-object",
       )
   }
 }
@@ -406,7 +409,6 @@ pub fn private_set(
   v: JsVal,
 ) -> #(JsVal, Agent) {
   let text = priv_key_text(priv_key)
-  let name = private_display_name(text)
   let key = Private(text)
   case classify(obj) {
     KHandle(h) ->
@@ -445,21 +447,23 @@ pub fn private_set(
           rt_val.throw_type_error(
             st,
             "Cannot write private member "
-              <> name
+              <> private_display_name(text)
               <> ": it is a method or has no setter",
           )
         None ->
           rt_val.throw_type_error(
             st,
             "Cannot write private member "
-              <> name
+              <> private_display_name(text)
               <> " to an object whose class did not declare it",
           )
       }
     _ ->
       rt_val.throw_type_error(
         st,
-        "Cannot write private member " <> name <> " on non-object",
+        "Cannot write private member "
+          <> private_display_name(text)
+          <> " on non-object",
       )
   }
 }

@@ -1842,6 +1842,78 @@ fn loop(
         _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
+    GetPrivateFieldDyn ->
+      case stack {
+        [k, recv, ..rest] -> {
+          let v = kernel.private_get(agent.store, recv, k)
+          case kernel.is(v, kernel.Miss) {
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                [v, ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    GetPrivateFieldDynKeep ->
+      case stack {
+        [k, recv, ..rest] -> {
+          let v = kernel.private_get(agent.store, recv, k)
+          case kernel.is(v, kernel.Miss) {
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                [v, recv, ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    PutPrivateFieldDyn ->
+      case stack {
+        [k, val, recv, ..rest] -> {
+          let store = kernel.private_put(agent.store, recv, k, val)
+          case kernel.is(store, kernel.Miss) {
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                [val, ..rest],
+                locals,
+                Agent(..agent, store:),
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
     GetElem ->
       case stack {
         [k, recv, ..rest] -> {

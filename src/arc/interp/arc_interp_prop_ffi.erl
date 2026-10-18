@@ -1,6 +1,6 @@
 %% property kernels for the interpreter; exports may answer miss, never raise
 -module(arc_interp_prop_ffi).
--export([has_property/3]).
+-export([has_property/3, private_get/3, private_put/4]).
 -export([get_field/3, find_accessor/3, own_data/2, get_elem/3, get_elem_keep/3, put_field/5, put_elem/4,
          define_field/4, new_object/5, new_object_shaped/5, new_receiver/2, get_global/3,
          put_global/6]).
@@ -67,6 +67,35 @@ has_walk(_, _, _, _) -> miss.
 has_next(_, ?NONE, _, _) -> false;
 has_next(Cells, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
     has_walk(Cells, arc_rt_arena_ffi:get(P, Cells), K, Fuel - 1).
+
+%% §7.3.30 privateget of a field or method; accessors and absence miss
+private_get(Store, {?HANDLE_TAG, Id}, Name) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case private_key(Name) of
+                miss -> miss;
+                K -> own_data(element(?SOBJECT_PROPS, Cell), K)
+            end;
+        _ -> miss
+    end;
+private_get(_, _, _) -> miss.
+
+%% §7.3.31 privateset of a field; methods, accessors and absence miss
+private_put(Store, {?HANDLE_TAG, Id}, Name, V) ->
+    Cells = element(?STORE_CELLS, Store),
+    case arc_rt_arena_ffi:get(Id, Cells) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case private_key(Name) of
+                miss -> miss;
+                K -> put_prop(Store, Cells, Id, Cell, K, V, false)
+            end;
+        _ -> miss
+    end;
+private_put(_, _, _, _) -> miss.
+
+private_key(B) when is_binary(B) -> {?KEY_PRIVATE, B};
+private_key({?STR_TAG, B, _, _}) -> {?KEY_PRIVATE, B};
+private_key(_) -> miss.
 
 %% accessor a plain chain lookup of K finds, else no_accessor
 find_accessor(St, {?HANDLE_TAG, Id}, K) ->

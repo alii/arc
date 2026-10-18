@@ -82,6 +82,12 @@ pub fn eq(a: JsVal, b: JsVal) -> JsVal
 @external(erlang, "arc_rt_ops_ffi", "neq")
 pub fn neq(a: JsVal, b: JsVal) -> JsVal
 
+@external(erlang, "arc_interp_prop_ffi", "private_get")
+pub fn private_get(store: Store, obj: JsVal, name: JsVal) -> JsVal
+
+@external(erlang, "arc_interp_prop_ffi", "private_put")
+pub fn private_put(store: Store, obj: JsVal, name: JsVal, v: JsVal) -> Store
+
 @external(erlang, "arc_interp_prop_ffi", "has_property")
 pub fn has_property(st: Agent, key: JsVal, obj: JsVal) -> JsVal
 
