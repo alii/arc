@@ -1932,13 +1932,21 @@ fn emit_switch(
 ) -> EmitResult {
   use d, e <- expr_(e, disc)
   let all_stmts = ast_util.switch_case_stmts(cases)
-  let carried =
+  let assigned =
     assigned_unboxed_slots_all(e, list.map(all_stmts, fn(s) { s.statement }))
   let #(break_lbl, e) = state.fresh_label(e)
-  let e = state.push_switch(e, break_lbl, carried)
   let #(save, e) = state.enter_scope(e, in_block: True)
   use e <- func.binding_prologue(e, e.cur_scope)
   use e <- func.hoist_fn_decls(e, all_stmts)
+  // what one case declares reaches the next
+  let declared =
+    ast_util.lexically_declared_names(all_stmts)
+    |> list.map(fn(entry) { entry.0 })
+  let carried =
+    list.append(assigned, unboxed_slots_named(e, declared))
+    |> list.unique
+    |> list.sort(int.compare)
+  let e = state.push_switch(e, break_lbl, carried)
   let #(labelled_rev, e) =
     list.fold(cases, #([], e), fn(acc, c) {
       let #(out, e) = acc
@@ -1974,14 +1982,15 @@ fn emit_switch(
   use #(nested, e) <- result.try(switch_nest_bodies(
     e,
     branch_slots,
+    e.initialized_slots,
     labelled,
     dispatch,
     break_lbl,
     carried,
   ))
   let outer = ir.Block(break_lbl, carried_types(carried), nested)
-  let e = state.leave_scope(e, save)
   let e = state.pop_frame(e)
+  let e = state.leave_scope(e, save)
   rebind_after_block(e, carried, outer, next)
 }
 
@@ -2012,18 +2021,21 @@ fn switch_test_chain(
   }
 }
 
+// a case can be entered past the declarations of the ones before it, so each
+// starts from what was initialized before the switch
 fn switch_nest_bodies(
   e: Emitter,
   branch_slots: dict.Dict(Int, String),
+  initialized_slots: set.Set(Int),
   labelled: List(CaseEntry),
   inner: ir.Expr,
   break_lbl: String,
   carried: List(Int),
 ) -> EmitResult {
   case labelled {
-    [] -> Ok(#(inner, e))
+    [] -> Ok(#(inner, state.Emitter(..e, initialized_slots:)))
     [CaseEntry(lbl:, body:, ..), ..rest] -> {
-      let e = state.Emitter(..e, slot_vars: branch_slots)
+      let e = state.Emitter(..e, slot_vars: branch_slots, initialized_slots:)
       use #(wrapped, e) <- result.try(
         rebind_after_block(
           e,
@@ -2040,7 +2052,15 @@ fn switch_nest_bodies(
           },
         ),
       )
-      switch_nest_bodies(e, branch_slots, rest, wrapped, break_lbl, carried)
+      switch_nest_bodies(
+        e,
+        branch_slots,
+        initialized_slots,
+        rest,
+        wrapped,
+        break_lbl,
+        carried,
+      )
     }
   }
 }

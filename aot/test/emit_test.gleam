@@ -597,6 +597,19 @@ pub fn lexical_tdz_reads_diff_test() {
   )
 }
 
+pub fn switch_case_entered_past_a_let_diff_test() {
+  diff(
+    "function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+console.log(t(() => { switch (1) { case 0: let s = 1; break; case 1: s = 2; return s; } }));
+console.log(t(() => { switch (1) { case 0: let s = 1; case 1: return s; } }));
+console.log(t(() => { switch (0) { case 0: let s = 1; case 1: return s; } }));
+console.log(t(() => { switch (0) { case 0: let s = 1; s++; case 1: s += 2; default: return s; } }));
+console.log(t(() => { switch (1) { case 0: let s = 1; break; default: return typeof s; } }));
+console.log(t(() => { let o = 1; switch (1) { case 0: const c = 5; o = c; break; case 1: o = 2; } return o; }));",
+    "ReferenceError\nReferenceError\n1\n4\nReferenceError\n2\n",
+  )
+}
+
 pub fn class_basics_diff_test() {
   diff(
     "class A { constructor(x){ this.x = x } get(){ return this.x } static s(){ return 's' } get g(){ return this.x*2 } set g(v){ this.x = v } }\nvar a = new A(3);\nconsole.log(a.get(), A.s(), a.g, typeof A, A.name, A.length, a instanceof A, Object.getPrototypeOf(a) === A.prototype);\na.g = 10; console.log(a.x, a.get());\nconsole.log(Object.keys(A.prototype).length, Object.getOwnPropertyNames(A.prototype).join(), JSON.stringify(Object.getOwnPropertyDescriptor(A,'prototype')));\nconsole.log(A.prototype.get.name, A.s.name, Object.getOwnPropertyDescriptor(A.prototype,'g').get.name, A.prototype.get.length);\ntry { A() } catch (e) { console.log(e.constructor.name) }\ntry { new a.get() } catch (e) { console.log(e.constructor.name) }\nclass B {}\nconsole.log(new B() instanceof B, B.name, B.length, typeof B.prototype.constructor, B.prototype.constructor === B);",
