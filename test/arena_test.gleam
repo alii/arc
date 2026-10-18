@@ -84,3 +84,35 @@ pub fn ascending_fold_order_test() {
   assert seen == [900, 300, 16, 1, 0]
   assert int.sum(seen) == 1217
 }
+
+// five and six levels deep, where whole branches are still missing
+pub fn sparse_deep_arena_test() {
+  let ids = [
+    0, 17, 4096, 65_535, 65_536, 65_553, 70_000, 1_000_000, 1_048_575, 1_048_576,
+    1_048_593, 1_114_112, 3_000_000, 16_777_215, 5, 65_537, 1_048_577,
+  ]
+  let near = fn(id) {
+    [
+      id - 4096,
+      id - 256,
+      id - 16,
+      id - 1,
+      id,
+      id + 1,
+      id + 16,
+      id + 256,
+      id + 4096,
+    ]
+  }
+  list.fold(ids, #(arena.new(), dict.new()), fn(acc, id) {
+    let #(a, m) = acc
+    let a = arena.set(id, id * 3, a)
+    let m = dict.insert(m, id, id * 3)
+    list.each(list.flat_map(ids, near), fn(probe) {
+      assert arena.get_option(probe, a)
+        == option.from_result(dict.get(m, probe))
+    })
+    #(a, m)
+  })
+  Nil
+}

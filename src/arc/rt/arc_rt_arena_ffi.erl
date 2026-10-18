@@ -52,9 +52,32 @@ walk(I, Shift, Node) ->
 
 probe(I, {arena, _, _, HotIx, Hot}) when I bsr ?LEVEL_BITS =:= HotIx ->
     element((I band ?MASK) + 1, Hot);
+probe(I, {arena, 16, Root, _, _}) when I >= 0, I bsr 16 < ?FANOUT ->
+    probe12(I, element((I bsr 16) + 1, Root));
+probe(I, {arena, 20, Root, _, _}) when I >= 0, I bsr 20 < ?FANOUT ->
+    case element((I bsr 20) + 1, Root) of
+        ?FREE -> ?FREE;
+        Node -> probe12(I, element(((I bsr 16) band ?MASK) + 1, Node))
+    end;
 probe(I, {arena, Shift, Root, _, _}) when I >= 0, I bsr Shift < ?FANOUT ->
     probe_walk(I, Shift, Root);
 probe(_, _) -> ?FREE.
+
+%% from the node whose children are picked by bits 12 to 15
+probe12(_, ?FREE) -> ?FREE;
+probe12(I, Node3) ->
+    case element(((I bsr 12) band ?MASK) + 1, Node3) of
+        ?FREE -> ?FREE;
+        Node2 ->
+            case element(((I bsr 8) band ?MASK) + 1, Node2) of
+                ?FREE -> ?FREE;
+                Node1 ->
+                    case element(((I bsr 4) band ?MASK) + 1, Node1) of
+                        ?FREE -> ?FREE;
+                        Leaf -> element((I band ?MASK) + 1, Leaf)
+                    end
+            end
+    end.
 
 probe_walk(_, _, ?FREE) -> ?FREE;
 probe_walk(I, 0, Node) -> element((I band ?MASK) + 1, Node);
@@ -131,8 +154,28 @@ leaf(I, 12, Root) when I bsr 12 < ?FANOUT ->
             end;
         _ -> ?EMPTY
     end;
+leaf(I, 16, Root) when I bsr 16 < ?FANOUT ->
+    leaf12(I, element((I bsr 16) + 1, Root));
+leaf(I, 20, Root) when I bsr 20 < ?FANOUT ->
+    case element((I bsr 20) + 1, Root) of
+        Node4 when is_tuple(Node4) ->
+            leaf12(I, element(((I bsr 16) band ?MASK) + 1, Node4));
+        _ -> ?EMPTY
+    end;
 leaf(I, Shift, Root) when I bsr Shift < ?FANOUT -> leaf_walk(I, Shift, Root);
 leaf(_, _, _) -> ?EMPTY.
+
+leaf12(I, Node3) when is_tuple(Node3) ->
+    case element(((I bsr 12) band ?MASK) + 1, Node3) of
+        Node2 when is_tuple(Node2) ->
+            case element(((I bsr 8) band ?MASK) + 1, Node2) of
+                Node1 when is_tuple(Node1) ->
+                    or_empty(element(((I bsr 4) band ?MASK) + 1, Node1));
+                _ -> ?EMPTY
+            end;
+        _ -> ?EMPTY
+    end;
+leaf12(_, _) -> ?EMPTY.
 
 -compile({inline, [or_empty/1]}).
 or_empty(?FREE) -> ?EMPTY;
