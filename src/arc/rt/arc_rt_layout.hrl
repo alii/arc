@@ -179,6 +179,7 @@
 -define(STRINGOBJ_TAG, string_obj).
 -define(STRINGOBJ_VALUE, 2).
 -define(TYPEDARRAYOBJ_TAG, typed_array_obj).
+-define(ARRAYBUFFEROBJ_TAG, array_buffer_obj).
 -define(MODULENS_TAG, module_namespace).
 
 -define(FNFLAGS_TAG, fn_flags).

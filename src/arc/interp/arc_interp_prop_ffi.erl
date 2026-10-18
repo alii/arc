@@ -233,6 +233,18 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
                 true -> miss;
                 false -> elem_read(Elems, Idx)
             end;
+        %% §10.4.5.4 an index out of the view reads undefined, no proto walk
+        {?SOBJECT_TAG, {?TYPEDARRAYOBJ_TAG, {?HANDLE_TAG, Buf}, ElemKind, Offset, Len},
+         _, _, _, _, _} when Idx =< ?MAX_ARRAY_INDEX ->
+            case arc_rt_arena_ffi:get(Buf, Cells) of
+                {?SOBJECT_TAG, {?ARRAYBUFFEROBJ_TAG, Storage}, _, _, _, _, _} ->
+                    case 'arc@rt@buffer':element_of_storage(Storage, ElemKind, Offset,
+                                                            Len, Idx) of
+                        {?SOME, V} -> V;
+                        ?NONE -> undefined
+                    end;
+                _ -> miss
+            end;
         {?SOBJECT_TAG, Kind, Proto, Props, _, _, _} when Idx =< ?MAX_ARRAY_INDEX ->
             case index_kind_is_plain(Kind) of
                 false -> miss;
@@ -265,7 +277,28 @@ get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when ?IS_STR(Key) ->
         {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
         _ -> miss
     end;
+get_elem(Store, {?HANDLE_TAG, Id}, {js_sym, Sym}) ->
+    Cells = element(?STORE_CELLS, Store),
+    symbol_get(Cells, arc_rt_arena_ffi:get(Id, Cells), Sym, ?MAX_PROTO_HOPS);
 get_elem(_, _, _) -> miss.
+
+%% only a proxy treats a symbol key specially; accessors miss
+symbol_get(_, _, _, 0) -> miss;
+symbol_get(Cells, {?SSHAPEDOBJECT_TAG, _, Proto, _, _}, Sym, Fuel) ->
+    symbol_next(Cells, Proto, Sym, Fuel);
+symbol_get(_, {?SOBJECT_TAG, {?PROXYOBJ_TAG, _, _, _}, _, _, _, _, _}, _, _) -> miss;
+symbol_get(Cells, {?SOBJECT_TAG, _, Proto, _, SymProps, _, _}, Sym, Fuel) ->
+    case lists:keyfind(Sym, 1, SymProps) of
+        false -> symbol_next(Cells, Proto, Sym, Fuel);
+        {_, Prop} when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+            element(?DATAPROPERTY_VALUE, Prop);
+        _ -> miss
+    end;
+symbol_get(_, _, _, _) -> miss.
+
+symbol_next(_, ?NONE, _, _) -> undefined;
+symbol_next(Cells, {?SOME, {?HANDLE_TAG, P}}, Sym, Fuel) ->
+    symbol_get(Cells, arc_rt_arena_ffi:get(P, Cells), Sym, Fuel - 1).
 
 %% only an integer key is its own canonical key
 get_elem_keep(Store, Obj, Idx) when is_integer(Idx) -> get_elem(Store, Obj, Idx);

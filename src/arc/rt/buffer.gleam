@@ -447,6 +447,17 @@ pub fn typed_array_element_live(
 ) -> Option(JsVal) {
   use <- bool.guard(idx < 0, None)
   use storage <- option.then(storage(st, buffer))
+  element_of_storage(storage, elem_kind, byte_offset, length, idx)
+}
+
+// idx is not negative; called by name from arc_interp_prop_ffi
+pub fn element_of_storage(
+  storage: BufferStorage,
+  elem_kind: TypedArrayKind,
+  byte_offset: Int,
+  length: Option(Int),
+  idx: Int,
+) -> Option(JsVal) {
   element_of_view(
     storage,
     view_bounds(storage_byte_size(storage), elem_kind, byte_offset, length),
