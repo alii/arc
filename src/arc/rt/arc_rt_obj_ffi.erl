@@ -59,7 +59,7 @@ get_named_site(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
                 _ -> read_named(St, Store, Cells, Recv, Cell, K, Site)
             end;
         {?SOBJECT_TAG, ?ORDINARY, _, #{?KEY_ID(K) := {T, Prop}}, _, _, _}
-          when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+          when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
             {element(?DATAPROPERTY_VALUE, Prop), St};
         _ -> read_named(St, Store, Cells, Recv, Cell, K, Site)
     end;
@@ -81,7 +81,7 @@ read_named(St, Store, Cells, Recv, Cell, K, _)
         true ->
             case element(?SOBJECT_PROPS, Cell) of
                 #{?KEY_ID(K) := {T, Prop}}
-                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                  when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     {element(?DATAPROPERTY_VALUE, Prop), St};
                 #{?KEY_ID(K) := _} -> general_get(St, Recv, K);
                 _ ->
@@ -100,7 +100,7 @@ read_proto(St, Cells, Shapes, Proto, Recv, K) ->
         V -> {V, St}
     end.
 
-read_prim(St, S, ?LENGTH_KEY) when ?IS_STR(S) ->
+read_prim(St, S, ?LENGTH_KEY_BY_ID) when ?IS_STR(S) ->
     {arc_rt_js_string_ffi:length(S), St};
 read_prim(St, S, K) when ?IS_STR(S) ->
     read_wrapper(St, ?REALM_STRING, S, K);
@@ -133,7 +133,7 @@ proto_read(Cells, Shapes, {?SOME, {?HANDLE_TAG, Id}}, K, Fuel) ->
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
                         #{?KEY_ID(K) := {T, Prop}}
-                          when T =:= ?KEY_TEXT(K),
+                          when ?IS_TEXT_OF(T, K),
                                element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                             element(?DATAPROPERTY_VALUE, Prop);
                         #{?KEY_ID(K) := _} -> miss;
@@ -147,10 +147,10 @@ proto_read(Cells, Shapes, {?SOME, {?HANDLE_TAG, Id}}, K, Fuel) ->
     end;
 proto_read(_, _, _, _, _) -> miss.
 
-named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K, ?LENGTH_KEY).
+named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K).
 
 birth_plain(Birth, K) ->
-    ?LAZY_KEY_IS_PLAIN(Birth, K, ?LENGTH_KEY, ?NAME_KEY, ?PROTOTYPE_KEY).
+    ?LAZY_KEY_IS_PLAIN(Birth, K).
 
 ic_fill(St, _, none, _, _, _) -> St;
 ic_fill(St, Store, Site, Sid, Off, K) ->
@@ -191,7 +191,7 @@ peek_named(_, Cell, K) when element(1, Cell) =:= ?SOBJECT_TAG ->
         true ->
             case element(?SOBJECT_PROPS, Cell) of
                 #{?KEY_ID(K) := {T, Prop}}
-                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                  when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     element(?DATAPROPERTY_VALUE, Prop);
                 _ -> miss
             end;
@@ -220,7 +220,7 @@ set_prop_own_data(St, {?HANDLE_TAG, Id}, K, V) ->
                     Props = element(?SOBJECT_PROPS, Cell),
                     case Props of
                         #{?KEY_ID(K) := {T, Prop}}
-                          when T =:= ?KEY_TEXT(K),
+                          when ?IS_TEXT_OF(T, K),
                                element(1, Prop) =:= ?DATAPROPERTY_TAG,
                                element(?DATAPROPERTY_WRITABLE, Prop) =:= true ->
                             NewProp = with_value(Prop, V),
@@ -556,7 +556,7 @@ named_read(Cells, Shapes, Cell, K) when element(1, Cell) =:= ?SOBJECT_TAG ->
         true ->
             case element(?SOBJECT_PROPS, Cell) of
                 #{?KEY_ID(K) := {T, Prop}}
-                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                  when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     element(?DATAPROPERTY_VALUE, Prop);
                 #{?KEY_ID(K) := _} -> miss;
                 _ ->
@@ -824,7 +824,7 @@ named_write_walk(Cells, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
             case named_plain(element(?SOBJECT_KIND, Cell), K) of
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
-                        #{?KEY_ID(K) := {T, Prop}} when T =:= ?KEY_TEXT(K) ->
+                        #{?KEY_ID(K) := {T, Prop}} when ?IS_TEXT_OF(T, K) ->
                             element(1, Prop) =:= ?DATAPROPERTY_TAG andalso
                                 element(?DATAPROPERTY_WRITABLE, Prop) =:= true;
                         #{?KEY_ID(K) := _} -> false;
@@ -923,7 +923,7 @@ merge_pairs([], Props, Seq) -> {Props, Seq};
 merge_pairs([{K, V} | Rest], Props, Seq) ->
     case Props of
         #{?KEY_ID(K) := {T, Old}}
-          when T =:= ?KEY_TEXT(K), element(1, Old) =:= ?DATAPROPERTY_TAG ->
+          when ?IS_TEXT_OF(T, K), element(1, Old) =:= ?DATAPROPERTY_TAG ->
             merge_pairs(Rest,
                         Props#{?KEY_ID(K) :=
                                    {T, ?PLAIN_PROPERTY(V, element(?DATAPROPERTY_SEQ, Old))}},

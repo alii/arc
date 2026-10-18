@@ -106,10 +106,10 @@ fn elem_write_grow(els: types.JsElements, idx: Int, v: JsVal) -> Dynamic
 fn native_token(cell: types.Cell) -> Dynamic
 
 @external(erlang, "arc_rt_layout_root_ffi", "named_plain")
-fn named_plain(kind: types.ObjKind, key: BitArray) -> Bool
+fn named_plain(kind: types.ObjKind, key: PropertyKey) -> Bool
 
 @external(erlang, "arc_rt_layout_root_ffi", "birth_plain")
-fn birth_plain(birth: types.FnBirth, key: BitArray) -> Bool
+fn birth_plain(birth: types.FnBirth, key: PropertyKey) -> Bool
 
 @external(erlang, "arc_rt_layout_root_ffi", "shaped_next")
 fn shaped_next(
@@ -465,15 +465,15 @@ pub fn kernel_macros_test() {
     )
   assert native_token(native) == dyn(ReturnThis)
   assert native_token(SObject(..native, kind: Ordinary)) == tag("NONE")
-  assert named_plain(Ordinary, <<"length">>)
-  assert !named_plain(ArrayObj(0), <<"length">>)
-  assert named_plain(ArrayObj(0), <<"x">>)
-  assert birth_plain(BirthSettled, <<"name">>)
-  assert !birth_plain(BirthPending(None), <<"name">>)
-  assert !birth_plain(BirthPending(None), <<"length">>)
-  assert birth_plain(BirthPending(None), <<"prototype">>)
-  assert !birth_plain(BirthPending(Some(Handle(1))), <<"prototype">>)
-  assert birth_plain(BirthPending(Some(Handle(1))), <<"x">>)
+  assert named_plain(Ordinary, named("length"))
+  assert !named_plain(ArrayObj(0), named("length"))
+  assert named_plain(ArrayObj(0), named("x"))
+  assert birth_plain(BirthSettled, named("name"))
+  assert !birth_plain(BirthPending(None), named("name"))
+  assert !birth_plain(BirthPending(None), named("length"))
+  assert birth_plain(BirthPending(None), named("prototype"))
+  assert !birth_plain(BirthPending(Some(Handle(1))), named("prototype"))
+  assert birth_plain(BirthPending(Some(Handle(1))), named("x"))
   let k = <<"k">>
   let to =
     ShapeDesc(

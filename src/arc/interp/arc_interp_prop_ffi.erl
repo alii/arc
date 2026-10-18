@@ -11,9 +11,9 @@
 %% §10.1.8.1 ordinary get, miss when anything observable
 get_field(St, {?HANDLE_TAG, Id}, K) ->
     object_get(element(?AGENT_STORE, St), Id, K, undefined);
-get_field(_, Bin, ?LENGTH_KEY) when is_binary(Bin) ->
+get_field(_, Bin, ?LENGTH_KEY_BY_ID) when is_binary(Bin) ->
     byte_size(Bin);
-get_field(_, {?STR_TAG, _, Len, _}, ?LENGTH_KEY) ->
+get_field(_, {?STR_TAG, _, Len, _}, ?LENGTH_KEY_BY_ID) ->
     Len;
 get_field(St, S, K) when ?IS_STR(S) ->
     proto_field(St, ?REALM_STRING, K);
@@ -40,7 +40,7 @@ builtin_getter(St, Recv, K) ->
 own_data(Props, K) ->
     case Props of
         #{?KEY_ID(K) := {T, Prop}}
-          when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+          when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
             element(?DATAPROPERTY_VALUE, Prop);
         _ -> miss
     end.
@@ -76,7 +76,7 @@ has_walk(Cells, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
         false -> miss;
         true ->
             case element(?SOBJECT_PROPS, Cell) of
-                #{?KEY_ID(K) := {T, _}} when T =:= ?KEY_TEXT(K) -> true;
+                #{?KEY_ID(K) := {T, _}} when ?IS_TEXT_OF(T, K) -> true;
                 #{?KEY_ID(K) := _} -> miss;
                 _ -> has_next(Cells, element(?SOBJECT_PROTO, Cell), K, Fuel)
             end
@@ -161,7 +161,7 @@ accessor_walk(Cells, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
         true ->
             case element(?SOBJECT_PROPS, Cell) of
                 #{?KEY_ID(K) := {T, Prop}}
-                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?ACCESSORPROPERTY_TAG ->
+                  when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?ACCESSORPROPERTY_TAG ->
                     {accessor, element(?ACCESSORPROPERTY_GET, Prop),
                      element(?ACCESSORPROPERTY_SET, Prop)};
                 #{?KEY_ID(K) := _} -> no_accessor;
@@ -177,7 +177,7 @@ accessor_next(_, _, _, _) -> no_accessor.
 %% §9.1.1.4.6 global getbindingvalue, plain case
 get_global(St, Lex, K) ->
     case Lex of
-        #{?KEY_ID(K) := {T, Binding}} when T =:= ?KEY_TEXT(K) ->
+        #{?KEY_ID(K) := {T, Binding}} when ?IS_TEXT_OF(T, K) ->
             case element(?LEXICAL_GLOBAL_VALUE, Binding) of
                 js_tdz -> miss;
                 V -> V
@@ -212,7 +212,7 @@ object_get(Store, Id, K, Absent) ->
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _} ->
             case Props of
                 #{?KEY_ID(K) := {T, Prop}}
-                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                  when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     element(?DATAPROPERTY_VALUE, Prop);
                 #{?KEY_ID(K) := _} -> miss;
                 _ -> proto_get(Cells, Proto, K, ?MAX_PROTO_HOPS, Absent)
@@ -234,7 +234,7 @@ chain_get(Cells, Cell, K, Fuel, Absent) ->
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
                         #{?KEY_ID(K) := {T, Prop}}
-                          when T =:= ?KEY_TEXT(K),
+                          when ?IS_TEXT_OF(T, K),
                                element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                             element(?DATAPROPERTY_VALUE, Prop);
                         #{?KEY_ID(K) := _} -> miss;
@@ -251,17 +251,17 @@ proto_get(Cells, {?SOME, {?HANDLE_TAG, P}}, K, Fuel, Absent) when Fuel > 1 ->
     chain_get(Cells, arc_rt_arena_ffi:get(P, Cells), K, Fuel - 1, Absent);
 proto_get(_, _, _, _, _) -> miss.
 
-named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY) -> Length;
+named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY_BY_ID) -> Length;
 named_virtual(_, _) -> miss.
 
 -compile({inline, [named_plain/2, named_virtual/2, birth_plain/2, object_get/4,
                    chain_get/5, proto_field/3, put_prop/9, put_new/7, set_plain/5,
                    shaped_grow/7, shaped_next/3, chain_takes_write/4,
                    literal_props/3]}).
-named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K, ?LENGTH_KEY).
+named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K).
 
 birth_plain(Birth, K) ->
-    ?LAZY_KEY_IS_PLAIN(Birth, K, ?LENGTH_KEY, ?NAME_KEY, ?PROTOTYPE_KEY).
+    ?LAZY_KEY_IS_PLAIN(Birth, K).
 
 %% holes miss so the full path walks the proto chain
 get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
@@ -408,7 +408,8 @@ put_field(_, _, _, _, _) -> miss.
 put_prop(Store, Cells, Id, Cell, K, Slot, Text, V, Create) ->
     {_, Kind, Proto, Props, Sym, Elems, Ext} = Cell,
     case Props of
-        #{Slot := {Text, {?DATAPROPERTY_TAG, _, true, E, C, Sq}}} ->
+        #{Slot := {T, {?DATAPROPERTY_TAG, _, true, E, C, Sq}}}
+          when ?ID_IS_EXACT(Slot) orelse T =:= Text ->
             NewCell = {?SOBJECT_TAG, Kind, Proto,
                        Props#{Slot := {Text, {?DATAPROPERTY_TAG, V, true, E, C, Sq}}},
                        Sym, Elems, Ext},
@@ -470,7 +471,7 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V)
           when element(1, K) =:= ?KEY_NAMED ->
             case Props of
                 #{?KEY_ID(K) := {T, {?DATAPROPERTY_TAG, _, _, _, true, Sq}}}
-                  when T =:= ?KEY_TEXT(K) ->
+                  when ?IS_TEXT_OF(T, K) ->
                     NewCell = {?SOBJECT_TAG, ?ORDINARY, Proto,
                                Props#{?KEY_ID(K) :=
                                           {T, {?DATAPROPERTY_TAG, V, true, true, true, Sq}}},

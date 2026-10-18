@@ -11,7 +11,8 @@ pub const max_array_length = 4_294_967_295
 
 /// `id` is a number worked out from the text, the same for the same text
 /// everywhere. Build these with `named` and `private`, never by hand. Two
-/// texts can share an id, so equal ids alone do not mean equal keys
+/// texts of eight bytes or more can share an id, so equal ids alone do not
+/// mean equal keys
 pub type PropertyKey {
   Index(n: Int)
   Named(id: Int, name: String)

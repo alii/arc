@@ -257,9 +257,8 @@ elem_write_grow(Els, Idx, V) -> ?ELEM_WRITE_GROW(Els, Idx, V).
 
 native_token(Cell) -> ?NATIVE_TOKEN(Cell).
 
-named_plain(Kind, KeyBin) -> ?NAMED_KEY_IS_PLAIN(Kind, KeyBin, <<"length">>).
+named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K).
 
 shaped_next(Shapes, Sid, KeyBin) -> ?SHAPED_NEXT(Shapes, Sid, KeyBin).
 
-birth_plain(Birth, KeyBin) ->
-    ?LAZY_KEY_IS_PLAIN(Birth, KeyBin, <<"length">>, <<"name">>, <<"prototype">>).
+birth_plain(Birth, K) -> ?LAZY_KEY_IS_PLAIN(Birth, K).

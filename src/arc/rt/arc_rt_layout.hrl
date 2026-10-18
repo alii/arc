@@ -240,29 +240,34 @@
 -define(KEY_ID(K), element(2, K)).
 -define(KEY_TEXT(K), element(3, K)).
 %% an object's props are #{Slot => {Text, Property}}. A name's slot is its id,
-%% or, when another name had that first, the next free one two further on (see
+%% or, when another name had that first, the next free one four further on (see
 %% rt/prop_map). Kernels only look in the first place: if some other text is
 %% there they answer miss, and if nothing is there the name is absent.
 %% An index has a slot no id can be, and no text
 -define(INDEX_SLOT(Idx), (-1 - (Idx))).
 -define(NAMED_ENTRY(K, Prop), {?KEY_TEXT(K), Prop}).
 -define(INDEX_ENTRY(Prop), {<<>>, Prop}).
-%% two keys with one id are the same key only if this holds too
--define(SAME_TEXT(A, B), (element(3, A) =:= element(3, B))).
+%% an id with this bit holds its whole text, so equal ids are equal keys
+-define(ID_IS_EXACT(Id), ((Id) band 2 =:= 2)).
+%% T was found under K's id: is it K's text?
+-define(IS_TEXT_OF(T, K), (?ID_IS_EXACT(?KEY_ID(K)) orelse T =:= ?KEY_TEXT(K))).
+-define(SAME_TEXT(A, B), ?IS_TEXT_OF(element(3, A), B)).
 %% ids as arc_bytecode_key_ffi:named/1 gives them, checked by arc_rt_layout_test
--define(LENGTH_KEY, {?KEY_NAMED, 450907079707063178, <<"length">>}).
--define(NAME_KEY, {?KEY_NAMED, 174053263642217938, <<"name">>}).
--define(PROTOTYPE_KEY, {?KEY_NAMED, 351306839192840530, <<"prototype">>}).
--define(CALLEE_KEY, {?KEY_NAMED, 258180192190089946, <<"callee">>}).
+-define(LENGTH_KEY, {?KEY_NAMED, 1602631505924514, <<"length">>}).
+% as a pattern: its id says it all
+-define(LENGTH_KEY_BY_ID, {_, 1602631505924514, _}).
+-define(NAME_KEY, {?KEY_NAMED, 24587384214, <<"name">>}).
+-define(PROTOTYPE_KEY, {?KEY_NAMED, 351306839192840528, <<"prototype">>}).
+-define(CALLEE_KEY, {?KEY_NAMED, 1562980234925462, <<"callee">>}).
 -define(PROTO_KEY, {?KEY_NAMED, 285587656632664716, <<"__proto__">>}).
--define(TO_JSON_KEY, {?KEY_NAMED, 559356507754130940, <<"toJSON">>}).
--define(DONE_KEY, {?KEY_NAMED, 101593477352523290, <<"done">>}).
--define(ITERATOR_KEY, {?KEY_NAMED, 425897015423828150, <<"iterator">>}).
--define(NEXT_KEY, {?KEY_NAMED, 112767222323064210, <<"next">>}).
--define(KEYS_KEY, {?KEY_NAMED, 292975467517734398, <<"keys">>}).
--define(VALUES_KEY, {?KEY_NAMED, 198364448712980398, <<"values">>}).
--define(ENTRIES_KEY, {?KEY_NAMED, 565934447722088750, <<"entries">>}).
--define(RETURN_KEY, {?KEY_NAMED, 464278738730347786, <<"return">>}).
+-define(TO_JSON_KEY, {?KEY_NAMED, 1637985255505210, <<"toJSON">>}).
+-define(DONE_KEY, {?KEY_NAMED, 23919966614, <<"done">>}).
+-define(ITERATOR_KEY, {?KEY_NAMED, 425897015423828148, <<"iterator">>}).
+-define(NEXT_KEY, {?KEY_NAMED, 24588444114, <<"next">>}).
+-define(KEYS_KEY, {?KEY_NAMED, 24387118542, <<"keys">>}).
+-define(VALUES_KEY, {?KEY_NAMED, 1646543120995790, <<"values">>}).
+-define(ENTRIES_KEY, {?KEY_NAMED, 402432052401903054, <<"entries">>}).
+-define(RETURN_KEY, {?KEY_NAMED, 1629020191312314, <<"return">>}).
 %% SymbolId for Symbol.iterator
 -define(SYMBOL_ITERATOR, {well_known_symbol, sym_iterator}).
 
@@ -366,7 +371,8 @@
          end)).
 
 %% false for exotic or virtual named keys; needs a local birth_plain/2
--define(NAMED_KEY_IS_PLAIN(Kind, K, LengthK),
+%% length and name are short, so their ids alone tell them apart
+-define(NAMED_KEY_IS_PLAIN(Kind, K),
         (case Kind of
              ?ORDINARY -> true;
              _ when is_atom(Kind) -> true;
@@ -382,8 +388,8 @@
                                when KeyC >= $a, KeyC =< $z -> true;
                              _ -> false
                          end;
-                     ?ARRAYOBJ_TAG -> K =/= LengthK;
-                     ?STRINGOBJ_TAG -> K =/= LengthK;
+                     ?ARRAYOBJ_TAG -> ?KEY_ID(K) =/= ?KEY_ID(?LENGTH_KEY);
+                     ?STRINGOBJ_TAG -> ?KEY_ID(K) =/= ?KEY_ID(?LENGTH_KEY);
                      ?BYTECODEFN_TAG ->
                          birth_plain(element(?BYTECODEFN_BIRTH, Kind), K);
                      ?COMPILEDFN_TAG ->
@@ -395,12 +401,13 @@
          end)).
 
 %% length, name, prototype are not in props until birth settles
--define(LAZY_KEY_IS_PLAIN(Birth, K, LengthK, NameK, PrototypeK),
+-define(LAZY_KEY_IS_PLAIN(Birth, K),
         (case Birth of
              ?BIRTH_SETTLED -> true;
-             _ when K =:= LengthK -> false;
-             _ when K =:= NameK -> false;
-             _ when K =:= PrototypeK ->
+             _ when ?KEY_ID(K) =:= ?KEY_ID(?LENGTH_KEY) -> false;
+             _ when ?KEY_ID(K) =:= ?KEY_ID(?NAME_KEY) -> false;
+             _ when ?KEY_ID(K) =:= ?KEY_ID(?PROTOTYPE_KEY),
+                    ?KEY_TEXT(K) =:= ?KEY_TEXT(?PROTOTYPE_KEY) ->
                  element(?BIRTHPENDING_PROTOTYPE_PARENT, Birth) =:= ?NONE;
              _ -> true
          end)).

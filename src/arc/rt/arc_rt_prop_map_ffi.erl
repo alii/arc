@@ -2,12 +2,12 @@
 %%
 %% #{Slot => {Text, Value}}. A name's slot is its key's id, a small integer,
 %% which the vm finds in a map far faster than it finds a text. Two names can
-%% share an id. The second to arrive goes to the next free slot two further on
-%% (ids of names are even, of #names odd), as {Text, Value, Id}, three parts so
-%% that nobody takes the slot for its id. So:
+%% share an id. The second to arrive goes to the next free slot four further on
+%% (the two low bits of an id say what kind it is), as {Text, Value, Id}, three
+%% parts so that nobody takes the slot for its id. So:
 %%   nothing at a name's id    -> the object does not have it
 %%   its own text there        -> found
-%%   anything else there       -> keep looking two further on
+%%   anything else there       -> keep looking four further on
 %% The kernels elsewhere only handle the first two and answer miss on the third.
 %% An index n has slot -1 - n, which no id is, and an empty text.
 -module(arc_rt_prop_map_ffi).
@@ -25,7 +25,7 @@ get(Props, {_, Id, Text}) ->
     case Props of
         #{Id := {Text, V}} -> {ok, V};
         #{Id := _} ->
-            case moved(Props, Id + 2, Id, Text) of
+            case moved(Props, Id + 4, Id, Text) of
                 {at, _, V} -> {ok, V};
                 {free, _} -> {error, nil}
             end;
@@ -38,7 +38,7 @@ has_key(Props, K) -> get(Props, K) =/= {error, nil}.
 moved(Props, Slot, Id, Text) ->
     case Props of
         #{Slot := {Text, V, Id}} -> {at, Slot, V};
-        #{Slot := _} -> moved(Props, Slot + 2, Id, Text);
+        #{Slot := _} -> moved(Props, Slot + 4, Id, Text);
         _ -> {free, Slot}
     end.
 
@@ -47,7 +47,7 @@ insert(Props, {_, Id, Text}, V) ->
     case Props of
         #{Id := {Text, _}} -> Props#{Id := {Text, V}};
         #{Id := _} ->
-            {_, Slot, _} = case moved(Props, Id + 2, Id, Text) of
+            {_, Slot, _} = case moved(Props, Id + 4, Id, Text) of
                 {free, Free} -> {free, Free, V};
                 At -> At
             end,
@@ -58,10 +58,10 @@ insert(Props, {_, Id, Text}, V) ->
 delete(Props, {?KEY_INDEX, N}) -> maps:remove(?INDEX_SLOT(N), Props);
 delete(Props, {_, Id, Text}) ->
     case Props of
-        #{Id := {Text, _}} -> close_up(maps:remove(Id, Props), Id + 2);
+        #{Id := {Text, _}} -> close_up(maps:remove(Id, Props), Id + 4);
         #{Id := _} ->
-            case moved(Props, Id + 2, Id, Text) of
-                {at, Slot, _} -> close_up(maps:remove(Slot, Props), Slot + 2);
+            case moved(Props, Id + 4, Id, Text) of
+                {at, Slot, _} -> close_up(maps:remove(Slot, Props), Slot + 4);
                 {free, _} -> Props
             end;
         _ -> Props
@@ -73,7 +73,7 @@ close_up(Props, Slot) ->
         #{Slot := Entry} ->
             close_up(insert(maps:remove(Slot, Props), key_at(Slot, Entry),
                             element(2, Entry)),
-                     Slot + 2);
+                     Slot + 4);
         _ -> Props
     end.
 

@@ -48,7 +48,7 @@ global_get_ic_fill(St, K, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
 global_plain(Cell, K, V)
   when tuple_size(Cell) =:= ?SOBJECT_SIZE, element(1, Cell) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_PROPS, Cell) of
-        #{?KEY_ID(K) := {T, Prop}} when T =:= ?KEY_TEXT(K) ->
+        #{?KEY_ID(K) := {T, Prop}} when ?IS_TEXT_OF(T, K) ->
             element(1, Prop) =:= ?DATAPROPERTY_TAG
                 andalso element(?DATAPROPERTY_VALUE, Prop) =:= V;
         _ -> false
@@ -90,7 +90,7 @@ get_named_ic(St, {?HANDLE_TAG, Id}, K, Site) ->
         ?SOBJECT_TAG ->
             case element(?SOBJECT_PROPS, Cell) of
                 #{?KEY_ID(K) := {T, Prop}}
-                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                  when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     Kind = element(?SOBJECT_KIND, Cell),
                     case is_atom(Kind)
                          orelse arc_rt_obj_ffi:named_plain(Kind, K) of
@@ -99,13 +99,13 @@ get_named_ic(St, {?HANDLE_TAG, Id}, K, Site) ->
                     end;
                 _ ->
                     case element(?SOBJECT_KIND, Cell) of
-                        {?ARRAYOBJ_TAG, Len} when K =:= ?LENGTH_KEY -> Len;
+                        {?ARRAYOBJ_TAG, Len} when ?KEY_ID(K) =:= ?KEY_ID(?LENGTH_KEY) -> Len;
                         _ -> miss
                     end
             end;
         _ -> miss
     end;
-get_named_ic(_, S, ?LENGTH_KEY, _) when ?IS_STR(S) ->
+get_named_ic(_, S, ?LENGTH_KEY_BY_ID, _) when ?IS_STR(S) ->
     arc_rt_js_string_ffi:length(S);
 get_named_ic(_, _, _, _) -> miss.
 
@@ -135,7 +135,7 @@ set_named(St, Obj = {?HANDLE_TAG, Id}, K, V, Strict)
                     Props = element(?SOBJECT_PROPS, Cell),
                     case Props of
                         #{?KEY_ID(K) := {T, Prop}}
-                          when T =:= ?KEY_TEXT(K),
+                          when ?IS_TEXT_OF(T, K),
                                element(1, Prop) =:= ?DATAPROPERTY_TAG,
                                tuple_size(Prop) =:= ?DATAPROPERTY_SIZE,
                                element(?DATAPROPERTY_WRITABLE, Prop) =:= true ->

@@ -1,5 +1,7 @@
 import arc/bytecode/key.{Named}
 import arc/engine.{Returned}
+import gleam/int
+import gleam/list
 
 fn run(source: String) -> String {
   let eng = engine.new()
@@ -64,4 +66,21 @@ pub fn both_names_live_side_by_side_test() {
   attempt(() => { function f() {} f.miefzxAba = 1; f.dlffym3X_ = 2; var a = []; a.miefzxAba = 3; a.dlffym3X_ = 4; return [f.miefzxAba, f.dlffym3X_, a.miefzxAba, a.dlffym3X_]; });
   out.join(' ')
   ") == "'{\"miefzxAba\":1,\"dlffym3X_\":2} {\"dlffym3X_\":2,\"miefzxAba\":1,\"z\":3} [{\"miefzxAba\":10,\"dlffym3X_\":2},10,2] [[\"a\",\"miefzxAba\",\"b\",\"dlffym3X_\"],[0,1,5,2]] [{\"dlffym3X_\":2},null,2,true] [{\"miefzxAba\":1},1,null] {\"dlffym3X_\":2,\"miefzxAba\":3} {\"miefzxAba\":1,\"dlffym3X_\":2,\"obfleoaaB\":3,\"scdedfTU8\":4} [{\"miefzxAba\":1,\"dlffym3X_\":2},{\"dlffym3X_\":2,\"miefzxAba\":1}] {\"miefzxAba\":3,\"dlffym3X_\":2} [\"miefzxAba\",\"dlffym3X_\"] [1,2,{\"q\":3}] {\"dlffym3X_\":2} [{\"miefzxAba\":1,\"dlffym3X_\":2},3,4] \"ab\" [\"ga\",\"vb\"] [{\"dlffym3X_\":2},1,[\"miefzxAba\",\"dlffym3X_\"]] [true,2] [\"g1\",\"g2\",\"undefined\"] [1,2,3,4]'"
+}
+
+// up to seven bytes the id is the text itself, so these must all differ
+pub fn short_names_never_share_a_number_test() {
+  let texts = [
+    "", "\u{0}", "\u{0}\u{0}", "a", "\u{0}a", "a\u{0}", "aa", "b", "abcdefg",
+    "\u{0}bcdefg", "abcdef\u{0}", "abcdef", "\u{1}", "\u{1}\u{0}",
+  ]
+  let ids = list.map(texts, fn(text) { key.id(key.named(text)) })
+  assert list.length(list.unique(ids)) == list.length(texts)
+  let private_ids = list.map(texts, fn(text) { key.id(key.private(text)) })
+  assert list.length(list.unique(list.append(ids, private_ids)))
+    == 2 * list.length(texts)
+  // the second bit tells the two kinds of id apart
+  assert list.all(ids, fn(id) { int.bitwise_and(id, 2) == 2 })
+  assert int.bitwise_and(key.id(key.named("abcdefgh")), 2) == 0
+  assert int.bitwise_and(key.id(key.private("abcdefgh")), 2) == 0
 }

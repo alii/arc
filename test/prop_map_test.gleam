@@ -6,22 +6,22 @@ import gleam/list
 import gleam/string
 
 // keys made by hand, so that many of them want the same few slots: five names
-// on id 10, names whose own ids are the very slots those spill into, #names
+// on id 8, names whose own ids are the very slots those spill into, #names
 // next door on the odd numbers, and some indices
 fn crowded() -> List(PropertyKey) {
   [
-    Named(10, "a"),
-    Named(10, "b"),
-    Named(10, "c"),
+    Named(8, "a"),
+    Named(8, "b"),
+    Named(8, "c"),
     Named(12, "d"),
-    Named(10, "e"),
-    Named(14, "f"),
-    Named(14, "g"),
-    Named(16, "h"),
-    Named(10, "i"),
-    Named(30, "far"),
-    Private(11, "#a"),
-    Private(11, "#b"),
+    Named(8, "e"),
+    Named(16, "f"),
+    Named(16, "g"),
+    Named(20, "h"),
+    Named(8, "i"),
+    Named(40, "far"),
+    Private(9, "#a"),
+    Private(9, "#b"),
     Private(13, "#c"),
     Index(0),
     Index(7),
@@ -80,9 +80,9 @@ fn scrambled(seed: Int, count: Int) -> List(Step) {
 
 pub fn names_that_want_one_slot_all_keep_their_own_values_test() {
   let #(props, _) = play(list.index_map(crowded(), Put))
-  assert prop_map.get(props, Named(10, "zz")) == Error(Nil)
-  assert prop_map.get(props, Named(18, "zz")) == Error(Nil)
-  assert prop_map.get(props, Named(99, "a")) == Error(Nil)
+  assert prop_map.get(props, Named(8, "zz")) == Error(Nil)
+  assert prop_map.get(props, Named(24, "zz")) == Error(Nil)
+  assert prop_map.get(props, Named(100, "a")) == Error(Nil)
 }
 
 pub fn removing_one_leaves_the_rest_findable_test() {

@@ -162,7 +162,7 @@ call_via_ic(St, Recv, K, Site, RSite, N, A, B, C) ->
         W -> call_on_primitive(St, Recv, W, K, Site, RSite, N, A, B, C)
     end.
 
-prim_wrapper(Recv, K) when ?IS_STR(Recv), K =/= ?LENGTH_KEY ->
+prim_wrapper(Recv, K) when ?IS_STR(Recv), ?KEY_ID(K) =/= ?KEY_ID(?LENGTH_KEY) ->
     ?REALM_STRING;
 prim_wrapper(Recv, _) when is_number(Recv) -> ?REALM_NUMBER;
 prim_wrapper(_, _) -> none.
@@ -431,7 +431,7 @@ ways_put(K, Ways, Shaped, Match, Way) ->
 own_named(Cell, K) ->
     case element(?SOBJECT_PROPS, Cell) of
         #{?KEY_ID(K) := {T, Prop}}
-          when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+          when ?IS_TEXT_OF(T, K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
             element(?DATAPROPERTY_VALUE, Prop);
         #{?KEY_ID(K) := _} -> miss;
         _ -> absent
