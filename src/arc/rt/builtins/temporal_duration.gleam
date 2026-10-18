@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
+import arc/bytecode/key
 import arc/internal/int_math.{floor_div, pow10, trunc_div}
 import arc/rt/builtins/helpers
 import arc/rt/builtins/options.{get_option, get_options_object}
@@ -378,7 +379,7 @@ fn duration_round(
       let #(largest, st) =
         read_unit_option(st, opts, "largestUnit", allow_auto: True)
       let #(relative_to_value, st) =
-        rt_val.get_named(st, types.mk_object(oh), "relativeTo", None)
+        rt_val.get_named(st, types.mk_object(oh), key.Named("relativeTo"), None)
       let #(relative_to, st) = convert_relative_to(st, relative_to_value)
       let #(inc, st) = get_rounding_increment_option(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, HalfExpand)
@@ -581,7 +582,7 @@ fn duration_total(
       }
     KHandle(oh) -> {
       let #(relative_to_value, st) =
-        rt_val.get_named(st, types.mk_object(oh), "relativeTo", None)
+        rt_val.get_named(st, types.mk_object(oh), key.Named("relativeTo"), None)
       let #(relative_to, st) = convert_relative_to(st, relative_to_value)
       let #(unit, st) = get_unit_option(st, Some(oh), "unit", allow_auto: False)
       case unit {

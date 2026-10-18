@@ -1093,8 +1093,9 @@ fn set_own_shaped(
 // also called by name from arc_rt_obj_ic_ffi
 pub fn literal_shape(
   st: Agent,
-  keys: List(BitArray),
+  keys: List(PropertyKey),
 ) -> #(Int, Dict(BitArray, Int), Agent) {
+  let keys = list.map(keys, fn(k) { bit_array.from_string(key.to_text(k)) })
   let store = st.store
   let assert Ok(ShapeDesc(transitions:, ..) as empty) =
     dict.get(store.shapes, 0)
@@ -2170,7 +2171,7 @@ pub fn plain_copy_data_props(
 pub fn set_named(
   st: Agent,
   obj: JsVal,
-  key: String,
+  key: PropertyKey,
   v: JsVal,
   strict strict: Bool,
 ) -> Agent

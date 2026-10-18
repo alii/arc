@@ -24,7 +24,6 @@ import arc/rt/types.{
   mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
@@ -3488,8 +3487,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           let count = list.length(keys)
           case rest, count <= limits.max_shape_slots {
             [], True -> {
-              let names =
-                list.map(members, fn(m) { bit_array.from_string(m.name) })
+              let names = list.map(members, fn(m) { key.Named(m.name) })
               Ok(emit_op(e, opcode.NewObjectShaped(names, count, span.start)))
             }
             // what follows would only take the shape apart again

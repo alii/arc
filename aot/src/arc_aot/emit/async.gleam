@@ -2632,11 +2632,8 @@ fn get_named(obj: ir.Value, name: String) -> anf.Build(ir.Value) {
   use site <- anf.then(fn(e: Emitter, k) {
     k(e.next_ic_site, state.Emitter(..e, next_ic_site: e.next_ic_site + 1))
   })
-  anf.host("get_named_site", [
-    obj,
-    ir.ConstBinary(bit_array.from_string(name)),
-    ir.ConstI32(site),
-  ])
+  use key <- anf.then(anf.named_key(bit_array.from_string(name)))
+  anf.host("get_named_site", [obj, key, ir.ConstI32(site)])
 }
 
 fn key_named_dyn(bin: ir.Value) -> anf.Build(ir.Value) {

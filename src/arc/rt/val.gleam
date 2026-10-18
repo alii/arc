@@ -4,7 +4,7 @@ import arc/bytecode/error_kind.{
   type ErrorKind, type JsError, JsError, RangeError, ReferenceError, SyntaxError,
   TypeError,
 }
-import arc/bytecode/key.{Index, Named, array_index_of_float}
+import arc/bytecode/key.{type PropertyKey, Index, Named, array_index_of_float}
 import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -243,7 +243,7 @@ fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
 pub fn get_named(
   st: Agent,
   recv: JsVal,
-  key: String,
+  key: PropertyKey,
   site: Option(Int),
 ) -> #(JsVal, Agent)
 
@@ -278,7 +278,7 @@ fn call_primitive_methods(
     [] -> throw_type_error(st, "Cannot convert object to primitive value")
     [name, ..rest] -> {
       let ops = st.store.ops
-      let #(method, st) = get_named(st, receiver, name, None)
+      let #(method, st) = get_named(st, receiver, Named(name), None)
       case is_callable(st, method) {
         True -> {
           let #(result, st) = ops.call(st, method, receiver, [])

@@ -1,3 +1,4 @@
+import arc/bytecode/key
 import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
@@ -410,14 +411,24 @@ pub fn method(
         }
         KHandle(oh) -> {
           let #(tz_val, st) =
-            rt_val.get_named(st, types.mk_object(oh), "timeZone", option.None)
+            rt_val.get_named(
+              st,
+              types.mk_object(oh),
+              key.Named("timeZone"),
+              option.None,
+            )
           let #(tz, st) = case classify(tz_val) {
             KUndef -> rt_val.throw_type_error(st, "time zone is required")
             KStr(tz_text) -> time_zone_from_string(st, tz_text)
             _ -> rt_val.throw_type_error(st, "time zone must be a string")
           }
           let #(plain_time, st) =
-            rt_val.get_named(st, types.mk_object(oh), "plainTime", option.None)
+            rt_val.get_named(
+              st,
+              types.mk_object(oh),
+              key.Named("plainTime"),
+              option.None,
+            )
           #(tz, plain_time, st)
         }
         _ -> rt_val.throw_type_error(st, "time zone must be a string")

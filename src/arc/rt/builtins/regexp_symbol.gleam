@@ -151,7 +151,8 @@ fn advance_if_empty(
 ) -> Agent {
   case match_text {
     "" -> {
-      let #(li_v, st) = rt_val.get_named(st, mk_object(h), "lastIndex", None)
+      let #(li_v, st) =
+        rt_val.get_named(st, mk_object(h), key.Named("lastIndex"), None)
       let #(this_index, st) = rt_val.to_length(st, li_v)
       set_last_index(st, h, mk_int(bytes.next_char_boundary(s, this_index)))
     }
@@ -166,7 +167,7 @@ pub fn symbol_search(
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.search]")
   let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
-  let #(previous, st) = rt_val.get_named(st, this, "lastIndex", None)
+  let #(previous, st) = rt_val.get_named(st, this, key.Named("lastIndex"), None)
   let st = set_unless_same_value(st, h, previous, mk_int(0))
   let #(pristine, st) = pristine_exec(st, h)
   case pristine {
@@ -183,14 +184,15 @@ pub fn symbol_search(
       let st = restore_last_index(st, h, previous)
       case classify(result) {
         KNull -> #(mk_int(-1), st)
-        _ -> rt_val.get_named(st, result, "index", None)
+        _ -> rt_val.get_named(st, result, key.Named("index"), None)
       }
     }
   }
 }
 
 fn restore_last_index(st: Agent, h: Handle, previous: JsVal) -> Agent {
-  let #(current, st) = rt_val.get_named(st, mk_object(h), "lastIndex", None)
+  let #(current, st) =
+    rt_val.get_named(st, mk_object(h), key.Named("lastIndex"), None)
   set_unless_same_value(st, h, current, previous)
 }
 
@@ -377,17 +379,18 @@ fn process_replace_results(
   case results {
     [] -> #(mk_string(acc <> bytes.drop_start(s, next_pos)), st)
     [result, ..rest] -> {
-      let #(len_v, st) = rt_val.get_named(st, result, "length", None)
+      let #(len_v, st) = rt_val.get_named(st, result, key.Named("length"), None)
       let #(result_length, st) = rt_val.to_length(st, len_v)
       let n_captures = int.max(result_length - 1, 0)
       let #(m_v, st) = rt_obj.get_prop(st, result, StringKey(Index(0)))
       let #(matched, st) = rt_val.to_string(st, m_v)
-      let #(pos_v, st) = rt_val.get_named(st, result, "index", None)
+      let #(pos_v, st) = rt_val.get_named(st, result, key.Named("index"), None)
       let #(pos_raw, st) = rt_val.to_integer_or_infinity(st, pos_v)
       let position = int.clamp(pos_raw, 0, length_s)
       let #(captures, st) =
         collect_coerced_captures(st, result, 1, n_captures, [])
-      let #(named_captures, st) = rt_val.get_named(st, result, "groups", None)
+      let #(named_captures, st) =
+        rt_val.get_named(st, result, key.Named("groups"), None)
       let #(replacement, st) =
         compute_replacement(
           st,
@@ -499,7 +502,7 @@ fn expand_segments(
         substitution.Text(text) ->
           expand_segments(st, rest, ctx, nc, [text, ..acc])
         substitution.NamedGroup(name) -> {
-          let #(cap, st) = rt_val.get_named(st, nc, name, None)
+          let #(cap, st) = rt_val.get_named(st, nc, key.Named(name), None)
           case classify(cap) {
             KUndef -> expand_segments(st, rest, ctx, nc, ["", ..acc])
             _ -> {
@@ -701,7 +704,8 @@ fn symbol_split_loop(
             count,
           )
         _ -> {
-          let #(li_v, st) = rt_val.get_named(st, splitter, "lastIndex", None)
+          let #(li_v, st) =
+            rt_val.get_named(st, splitter, key.Named("lastIndex"), None)
           let #(e0, st) = rt_val.to_length(st, li_v)
           let e = int.min(e0, size)
           case e == p {
@@ -724,7 +728,8 @@ fn symbol_split_loop(
               case count == lim {
                 True -> realm_ops.new_array(st, list.reverse(acc))
                 False -> {
-                  let #(len_v, st) = rt_val.get_named(st, z, "length", None)
+                  let #(len_v, st) =
+                    rt_val.get_named(st, z, key.Named("length"), None)
                   let #(z_len, st) = rt_val.to_length(st, len_v)
                   let n_caps = int.max(z_len - 1, 0)
                   let #(acc, count, hit, st) =
@@ -789,7 +794,7 @@ pub fn symbol_match_all(
   let #(c, st) = species_constructor(st, mk_object(h), realm.regexp.constructor)
   let #(flags, st) = read_flags(st, this)
   let #(m_h, st) = rt_call.construct(st, c, [this, mk_string(flags)], c)
-  let #(li_v, st) = rt_val.get_named(st, this, "lastIndex", None)
+  let #(li_v, st) = rt_val.get_named(st, this, key.Named("lastIndex"), None)
   let #(last_index, st) = rt_val.to_length(st, li_v)
   let st = set_last_index(st, m_h, mk_int(last_index))
   let global = has_flag(flags, "g")

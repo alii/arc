@@ -1264,7 +1264,7 @@ fn emit_target_get(d: scope.BindingTarget, name: String) -> Build(ir.Value) {
 }
 
 fn global_read(e: Emitter, g: String) -> Build(ir.Value) {
-  let key = ir.ConstBinary(bit_array.from_string(g))
+  use key <- anf.then(anf.named_key(bit_array.from_string(g)))
   case e.fn_scope == scope.root_scope_id {
     True -> anf.host("global_get", [key])
     False -> {
@@ -1446,7 +1446,7 @@ fn get_named(
   key_bytes: BitArray,
 ) -> Build(ir.Value) {
   use site <- anf.then(next_ic_site())
-  let key = ir.ConstBinary(key_bytes)
+  use key <- anf.then(anf.named_key(key_bytes))
   let site = ir.ConstI32(site)
   use v <- anf.then(anf.host(probe, [obj, key, site]))
   use ic_miss <- anf.then(anf.let_(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
@@ -1464,10 +1464,11 @@ fn set_named_ic(
     False -> ir.ConstAtom("false")
   }
   use site <- anf.then(next_ic_site())
+  use key <- anf.then(anf.named_key(key_bytes))
   use _ <- anf.then(
     anf.host("set_named_ic", [
       obj,
-      ir.ConstBinary(key_bytes),
+      key,
       v,
       strict,
       ir.ConstI32(site),
@@ -1613,11 +1614,12 @@ pub fn emit_prop_write_run(run: PropWriteRun) -> Build(ir.Value) {
   use v0 <- anf.then(expr(v0))
   use vs <- anf.then(anf.seq(list.map(rest, fn(p) { expr(p.value) })))
   use keys <- anf.then(
-    anf.cons_list([
-      ir.ConstBinary(k0),
-      ..list.map(rest, fn(p) { ir.ConstBinary(p.key) })
+    anf.seq([
+      anf.named_key(k0),
+      ..list.map(rest, fn(p) { anf.named_key(p.key) })
     ]),
   )
+  use keys <- anf.then(anf.cons_list(keys))
   use vals <- anf.then(anf.cons_list([v0, ..vs]))
   use e <- anf.then(ask)
   let strict = case e.strict {
@@ -1859,9 +1861,10 @@ fn call_method_ic_pos(
   case pos {
     [] | [_] | [_, _] | [_, _, _] -> {
       use MethodSites(site, rsite) <- anf.then(method_sites())
+      use key <- anf.then(anf.named_key(key_bytes))
       anf.host("call_method_ic" <> int.to_string(list.length(pos)), [
         recv,
-        ir.ConstBinary(key_bytes),
+        key,
         site,
         rsite,
         ..pos
@@ -1880,9 +1883,10 @@ fn call_method_ic(
   args_l: ir.Value,
 ) -> Build(ir.Value) {
   use MethodSites(site, rsite) <- anf.then(method_sites())
+  use key <- anf.then(anf.named_key(key_bytes))
   anf.host("call_method_ic", [
     recv,
-    ir.ConstBinary(key_bytes),
+    key,
     args_l,
     site,
     rsite,
@@ -2729,10 +2733,11 @@ fn emit_object(properties: List(ast.Property)) -> Build(ir.Value) {
         anf.seq(list.map(lead, fn(m) { emit(m.value, ast.static_name(m.key)) })),
       )
       use keys <- anf.then(
-        anf.cons_list(
-          list.map(lead, fn(m) { ir.ConstBinary(bit_array.from_string(m.name)) }),
+        anf.seq(
+          list.map(lead, fn(m) { anf.named_key(bit_array.from_string(m.name)) }),
         ),
       )
+      use keys <- anf.then(anf.cons_list(keys))
       use vals <- anf.then(anf.cons_list(vs))
       case rest, list.length(lead) <= limits.max_shape_slots {
         [], True -> {

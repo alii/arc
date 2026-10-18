@@ -236,7 +236,10 @@
 -define(KEY_PRIVATE, private).
 -define(STRINGKEY_TAG, string_key).
 -define(SYMBOLKEY_TAG, symbol_key).
+-define(KEY_TEXT(K), element(2, K)).
 -define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
+-define(NAME_KEY, {?KEY_NAMED, <<"name">>}).
+-define(PROTOTYPE_KEY, {?KEY_NAMED, <<"prototype">>}).
 %% SymbolId for Symbol.iterator
 -define(SYMBOL_ITERATOR, {well_known_symbol, sym_iterator}).
 

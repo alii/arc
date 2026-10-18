@@ -1841,16 +1841,16 @@ pub type ShapeDesc {
 
 // droppable cache, not a gc root; see arc_rt_call_ic_ffi
 pub type IcEntry {
-  IcRead(key: BitArray, offsets: Dict(Int, Int))
+  IcRead(key: PropertyKey, offsets: Dict(Int, Int))
   IcCall(
-    key: BitArray,
+    key: PropertyKey,
     ways: Dict(IcCallMatch, IcCallWay),
     shaped: Dict(Int, IcShapedWays),
   )
   IcInit(from: Int, to: Int, blank: Cell, chain: List(#(Int, Cell)))
   // the shaped cell an object literal fills its slots into
   IcLiteral(blank: Cell)
-  IcGlobal(key: BitArray, epoch: Int, value: JsVal, refills: Int)
+  IcGlobal(key: PropertyKey, epoch: Int, value: JsVal, refills: Int)
   IcOff
 }
 

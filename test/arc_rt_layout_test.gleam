@@ -1,7 +1,9 @@
 // arc_rt_layout.hrl indices must match the gleam records
 
 import arc/bytecode/binop
-import arc/bytecode/key.{Index, Named, Private, max_array_index}
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, Private, max_array_index,
+}
 import arc/bytecode/opcode
 import arc/internal/ordered_entries
 import arc/internal/tree_array
@@ -190,7 +192,7 @@ pub fn store_test() {
       shapes: dict.from_list([#(7, desc)]),
       next_shape: 15,
       ics: dict.from_list([
-        #(1, types.IcRead(<<"k":utf8>>, dict.from_list([#(7, 0)]))),
+        #(1, types.IcRead(Named("k"), dict.from_list([#(7, 0)]))),
       ]),
       plain_write_protos: dict.from_list([#(17, Nil)]),
       meta: types.StoreMeta(
@@ -748,7 +750,12 @@ fn get_elem(st: Agent, recv: JsVal, idx: Int) -> Dynamic
 fn set_elem(st: Agent, recv: JsVal, idx: Int, v: JsVal) -> Dynamic
 
 @external(erlang, "arc_rt_obj_ffi", "set_prop_own_data")
-fn set_prop_own_data(st: Agent, recv: JsVal, key: BitArray, v: JsVal) -> Dynamic
+fn set_prop_own_data(
+  st: Agent,
+  recv: JsVal,
+  key: PropertyKey,
+  v: JsVal,
+) -> Dynamic
 
 @external(erlang, "arc_rt_obj_ffi", "instanceof_i32")
 fn instanceof_i32(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
@@ -774,7 +781,10 @@ pub fn typed_array_kernels_miss_test() {
   assert get_elem(st, ta, 0) == dyn(Miss)
   assert set_elem(st, ta, 0, n) == dyn(Miss)
   assert set_elem(st, ta, 4, n) == dyn(Miss)
-  assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
+  // only a name that could spell a number is the typed array's own business
+  assert set_prop_own_data(st, ta, Named("1.5"), n) == dyn(Miss)
+  assert set_prop_own_data(st, ta, Named("Infinity"), n) == dyn(Miss)
+  assert set_prop_own_data(st, ta, Named("extra"), n) != dyn(Miss)
 }
 
 pub fn proxy_kernels_miss_test() {
@@ -787,7 +797,7 @@ pub fn proxy_kernels_miss_test() {
   let p = types.mk_object(ph)
   assert get_elem(st, p, 0) == dyn(Miss)
   assert set_elem(st, p, 0, n) == dyn(Miss)
-  assert set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
+  assert set_prop_own_data(st, p, Named("length"), n) == dyn(Miss)
   // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
@@ -812,8 +822,8 @@ pub fn string_object_kernels_miss_test() {
   assert get_elem(st, s, 0) == dyn(Miss)
   assert set_elem(st, s, 0, n) == dyn(Miss)
   assert set_elem(st, s, 3, n) == dyn(Miss)
-  assert set_prop_own_data(st, s, <<"length">>, n) == dyn(Miss)
-  assert set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
+  assert set_prop_own_data(st, s, Named("length"), n) == dyn(Miss)
+  assert set_prop_own_data(st, s, Named("extra"), n) != dyn(Miss)
 }
 
 pub fn bytecode_function_kernels_miss_test() {
@@ -962,7 +972,7 @@ pub fn iterator_kinds_test() {
 }
 
 pub fn ic_entry_tags_test() {
-  let key = <<"k":utf8>>
+  let key = Named("k")
   assert tag_of(types.IcRead(key, dict.new())) == tag("IC_READ")
   assert tag_of(types.IcCall(key, dict.new(), dict.new())) == tag("IC_CALL")
   let blank = SBox(types.mk_undefined())

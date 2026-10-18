@@ -858,13 +858,13 @@ fn serialize_property(
 ) -> #(Option(StringTree), Agent) {
   // canonical keys, so a named key never spells an index
   let #(val, st) = case pk {
-    Named(name) -> rt_val.get_named(st, mk_object(holder), name, None)
+    Named(_) -> rt_val.get_named(st, mk_object(holder), pk, None)
     Index(i) -> rt_abstract_ops.get_index(st, mk_object(holder), i)
     Private(_) -> #(mk_undefined(), st)
   }
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
-      let #(to_json, st) = rt_val.get_named(st, val, "toJSON", None)
+      let #(to_json, st) = rt_val.get_named(st, val, key.Named("toJSON"), None)
       case rt_val.is_callable(st, to_json) {
         True ->
           call_in_caller_realm(st, ctx.caller, to_json, val, [

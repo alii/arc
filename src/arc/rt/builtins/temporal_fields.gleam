@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError, TypeError}
+import arc/bytecode/key
 import arc/internal/digits
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{floor_div, floor_mod, trunc_div}
@@ -175,7 +176,8 @@ pub fn read_month_code(
   st: Agent,
   h: Handle,
 ) -> #(Option(temporal_calendar.MonthCode), Agent) {
-  let #(v, st) = rt_val.get_named(st, mk_object(h), "monthCode", None)
+  let #(v, st) =
+    rt_val.get_named(st, mk_object(h), key.Named("monthCode"), None)
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
@@ -232,7 +234,7 @@ fn is_ascii_digit(g: String) -> Bool {
 }
 
 fn read_bag_era(st: Agent, h: Handle) -> #(Option(String), Agent) {
-  let #(v, st) = rt_val.get_named(st, mk_object(h), "era", None)
+  let #(v, st) = rt_val.get_named(st, mk_object(h), key.Named("era"), None)
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
@@ -264,7 +266,7 @@ pub fn read_bag_calendar(
   st: Agent,
   h: Handle,
 ) -> #(temporal_calendar.Calendar, Agent) {
-  let #(v, st) = rt_val.get_named(st, mk_object(h), "calendar", None)
+  let #(v, st) = rt_val.get_named(st, mk_object(h), key.Named("calendar"), None)
   case classify(v) {
     KUndef -> #(temporal_calendar.Iso8601, st)
     KStr(s) -> #(rt_val.or_throw(st, calendar_from_string(s)), st)
@@ -340,11 +342,12 @@ pub fn require_partial_bag(st: Agent, v: JsVal) -> #(Handle, Agent) {
             "with() argument must be a plain object, not a Temporal instance",
           )
         None -> {
-          let #(cal, st) = rt_val.get_named(st, mk_object(h), "calendar", None)
+          let #(cal, st) =
+            rt_val.get_named(st, mk_object(h), key.Named("calendar"), None)
           case classify(cal) {
             KUndef -> {
               let #(tz, st) =
-                rt_val.get_named(st, mk_object(h), "timeZone", None)
+                rt_val.get_named(st, mk_object(h), key.Named("timeZone"), None)
               case classify(tz) {
                 KUndef -> #(h, st)
                 _ ->

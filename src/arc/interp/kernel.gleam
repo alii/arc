@@ -180,7 +180,7 @@ pub fn new_object(
 @external(erlang, "arc_interp_prop_ffi", "new_object_shaped")
 pub fn new_object_shaped(
   agent: Agent,
-  keys: List(BitArray),
+  keys: List(PropertyKey),
   count: Int,
   stack: List(JsVal),
   site: #(Int, Int),

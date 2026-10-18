@@ -42,104 +42,104 @@ array_lit_elems([], St, Acc) -> {lists:reverse(Acc), St}.
 array_lit_packed(St, Bin) -> array_lit(St, binary_to_term(Bin)).
 
 
-get_named(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
+get_named(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),
-    read_named(St, Store, Cells, Recv, arc_rt_arena_ffi:get(Id, Cells), KeyBin, Site);
-get_named(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
+    read_named(St, Store, Cells, Recv, arc_rt_arena_ffi:get(Id, Cells), K, Site);
+get_named(St, Recv, K, _) -> read_prim(St, Recv, K).
 
-get_named_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
+get_named_site(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),
     Cell = arc_rt_arena_ffi:get(Id, Cells),
     case Cell of
         {?SSHAPEDOBJECT_TAG, Sid, _, Slots, _} ->
             case element(?STORE_ICS, Store) of
-                #{Site := {?IC_READ, KeyBin, #{Sid := Off}}} ->
+                #{Site := {?IC_READ, K, #{Sid := Off}}} ->
                     {?SLOT_AT(Slots, Off), St};
-                _ -> read_named(St, Store, Cells, Recv, Cell, KeyBin, Site)
+                _ -> read_named(St, Store, Cells, Recv, Cell, K, Site)
             end;
-        {?SOBJECT_TAG, ?ORDINARY, _, #{{?KEY_NAMED, KeyBin} := Prop}, _, _, _}
+        {?SOBJECT_TAG, ?ORDINARY, _, #{K := Prop}, _, _, _}
           when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
             {element(?DATAPROPERTY_VALUE, Prop), St};
-        _ -> read_named(St, Store, Cells, Recv, Cell, KeyBin, Site)
+        _ -> read_named(St, Store, Cells, Recv, Cell, K, Site)
     end;
-get_named_site(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
+get_named_site(St, Recv, K, _) -> read_prim(St, Recv, K).
 
 read_named(St, Store, Cells, Recv, {?SSHAPEDOBJECT_TAG, Sid, Proto, Slots, Offs},
-           KeyBin, Site) ->
+           K, Site) ->
     case Offs of
-        #{KeyBin := Off} ->
-            {?SLOT_AT(Slots, Off), ic_fill(St, Store, Site, Sid, Off, KeyBin)};
+        #{?KEY_TEXT(K) := Off} ->
+            {?SLOT_AT(Slots, Off), ic_fill(St, Store, Site, Sid, Off, K)};
         _ ->
             read_proto(St, Cells, element(?STORE_SHAPES, Store), Proto, Recv,
-                       KeyBin)
+                       K)
     end;
-read_named(St, Store, Cells, Recv, Cell, KeyBin, _)
+read_named(St, Store, Cells, Recv, Cell, K, _)
   when element(1, Cell) =:= ?SOBJECT_TAG ->
     Kind = element(?SOBJECT_KIND, Cell),
-    case named_plain(Kind, KeyBin) of
+    case named_plain(Kind, K) of
         true ->
             case element(?SOBJECT_PROPS, Cell) of
-                #{{?KEY_NAMED, KeyBin} := Prop}
+                #{K := Prop}
                   when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     {element(?DATAPROPERTY_VALUE, Prop), St};
-                #{{?KEY_NAMED, KeyBin} := _} -> general_get(St, Recv, KeyBin);
+                #{K := _} -> general_get(St, Recv, K);
                 _ ->
                     read_proto(St, Cells, element(?STORE_SHAPES, Store),
-                               element(?SOBJECT_PROTO, Cell), Recv, KeyBin)
+                               element(?SOBJECT_PROTO, Cell), Recv, K)
             end;
         false when element(1, Kind) =:= ?ARRAYOBJ_TAG ->
             {element(?ARRAYOBJ_LENGTH, Kind), St};
-        false -> general_get(St, Recv, KeyBin)
+        false -> general_get(St, Recv, K)
     end;
-read_named(St, _, _, Recv, _, KeyBin, _) -> general_get(St, Recv, KeyBin).
+read_named(St, _, _, Recv, _, K, _) -> general_get(St, Recv, K).
 
-read_proto(St, Cells, Shapes, Proto, Recv, KeyBin) ->
-    case proto_read(Cells, Shapes, Proto, KeyBin, ?MAX_PROTO_HOPS) of
-        miss -> general_get(St, Recv, KeyBin);
+read_proto(St, Cells, Shapes, Proto, Recv, K) ->
+    case proto_read(Cells, Shapes, Proto, K, ?MAX_PROTO_HOPS) of
+        miss -> general_get(St, Recv, K);
         V -> {V, St}
     end.
 
-read_prim(St, S, <<"length">>) when ?IS_STR(S) ->
+read_prim(St, S, ?LENGTH_KEY) when ?IS_STR(S) ->
     {arc_rt_js_string_ffi:length(S), St};
-read_prim(St, S, KeyBin) when ?IS_STR(S) ->
-    read_wrapper(St, ?REALM_STRING, S, KeyBin);
-read_prim(St, N, KeyBin) when is_number(N) ->
-    read_wrapper(St, ?REALM_NUMBER, N, KeyBin);
-read_prim(St, Recv, KeyBin) -> general_get(St, Recv, KeyBin).
+read_prim(St, S, K) when ?IS_STR(S) ->
+    read_wrapper(St, ?REALM_STRING, S, K);
+read_prim(St, N, K) when is_number(N) ->
+    read_wrapper(St, ?REALM_NUMBER, N, K);
+read_prim(St, Recv, K) -> general_get(St, Recv, K).
 
-read_wrapper(St, Which, Recv, KeyBin) ->
+read_wrapper(St, Which, Recv, K) ->
     Pair = element(Which, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
     read_proto(St, element(?STORE_CELLS, Store), element(?STORE_SHAPES, Store),
-               {?SOME, element(?BUILTINPAIR_PROTOTYPE, Pair)}, Recv, KeyBin).
+               {?SOME, element(?BUILTINPAIR_PROTOTYPE, Pair)}, Recv, K).
 
-general_get(St, Recv, KeyBin) ->
-    'arc@rt@obj':get_prop_untyped_key(St, Recv, {?STRINGKEY_TAG, {?KEY_NAMED, KeyBin}}).
+general_get(St, Recv, K) ->
+    'arc@rt@obj':get_prop_untyped_key(St, Recv, {?STRINGKEY_TAG, K}).
 
 %% §10.1.8.1 ordinary get while every hop is plain data
 proto_read(_, _, ?NONE, _, _) -> undefined;
 proto_read(_, _, _, _, 0) -> miss;
-proto_read(Cells, Shapes, {?SOME, {?HANDLE_TAG, Id}}, KeyBin, Fuel) ->
+proto_read(Cells, Shapes, {?SOME, {?HANDLE_TAG, Id}}, K, Fuel) ->
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs} ->
             case Offs of
-                #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
-                _ -> proto_read(Cells, Shapes, Proto, KeyBin, Fuel - 1)
+                #{?KEY_TEXT(K) := Off} -> ?SLOT_AT(Slots, Off);
+                _ -> proto_read(Cells, Shapes, Proto, K, Fuel - 1)
             end;
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Cell), KeyBin) of
+            case named_plain(element(?SOBJECT_KIND, Cell), K) of
                 false -> miss;
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
-                        #{{?KEY_NAMED, KeyBin} := Prop}
+                        #{K := Prop}
                           when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                             element(?DATAPROPERTY_VALUE, Prop);
-                        #{{?KEY_NAMED, KeyBin} := _} -> miss;
+                        #{K := _} -> miss;
                         _ ->
                             proto_read(Cells, Shapes,
-                                       element(?SOBJECT_PROTO, Cell), KeyBin,
+                                       element(?SOBJECT_PROTO, Cell), K,
                                        Fuel - 1)
                     end
             end;
@@ -147,50 +147,50 @@ proto_read(Cells, Shapes, {?SOME, {?HANDLE_TAG, Id}}, KeyBin, Fuel) ->
     end;
 proto_read(_, _, _, _, _) -> miss.
 
-named_plain(Kind, KeyBin) -> ?NAMED_KEY_IS_PLAIN(Kind, KeyBin, <<"length">>).
+named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K, ?LENGTH_KEY).
 
-birth_plain(Birth, KeyBin) ->
-    ?LAZY_KEY_IS_PLAIN(Birth, KeyBin, <<"length">>, <<"name">>, <<"prototype">>).
+birth_plain(Birth, K) ->
+    ?LAZY_KEY_IS_PLAIN(Birth, K, ?LENGTH_KEY, ?NAME_KEY, ?PROTOTYPE_KEY).
 
 ic_fill(St, _, none, _, _, _) -> St;
-ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
+ic_fill(St, Store, Site, Sid, Off, K) ->
     Ics = element(?STORE_ICS, Store),
     case Ics of
-        #{Site := {?IC_READ, KeyBin, Offs}}
+        #{Site := {?IC_READ, K, Offs}}
           when map_size(Offs) < ?IC_READ_WAYS ->
             with_store(St,
                        setelement(?STORE_ICS, Store,
-                                  Ics#{Site := {?IC_READ, KeyBin,
+                                  Ics#{Site := {?IC_READ, K,
                                                 Offs#{Sid => Off}}}));
         #{Site := _} -> St;
         _ ->
             with_store(St,
                        setelement(?STORE_ICS, Store,
-                                  Ics#{Site => {?IC_READ, KeyBin,
+                                  Ics#{Site => {?IC_READ, K,
                                                 #{Sid => Off}}}))
     end.
 
-global_peek(St, KeyBin) ->
+global_peek(St, K) ->
     {?HANDLE_TAG, GId} = element(?REALM_GLOBAL_OBJECT, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
-    peek_named(St, arc_rt_arena_ffi:get(GId, element(?STORE_CELLS, Store)), KeyBin).
+    peek_named(St, arc_rt_arena_ffi:get(GId, element(?STORE_CELLS, Store)), K).
 
-global_get(St, KeyBin) ->
-    case global_peek(St, KeyBin) of
-        miss -> 'arc@rt@lang':global_get(St, KeyBin);
+global_get(St, K) ->
+    case global_peek(St, K) of
+        miss -> 'arc@rt@lang':global_get(St, ?KEY_TEXT(K));
         V -> {V, St}
     end.
 
-peek_named(_, {?SSHAPEDOBJECT_TAG, _, _, Slots, Offs}, KeyBin) ->
+peek_named(_, {?SSHAPEDOBJECT_TAG, _, _, Slots, Offs}, K) ->
     case Offs of
-        #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
+        #{?KEY_TEXT(K) := Off} -> ?SLOT_AT(Slots, Off);
         _ -> miss
     end;
-peek_named(_, Cell, KeyBin) when element(1, Cell) =:= ?SOBJECT_TAG ->
-    case named_plain(element(?SOBJECT_KIND, Cell), KeyBin) of
+peek_named(_, Cell, K) when element(1, Cell) =:= ?SOBJECT_TAG ->
+    case named_plain(element(?SOBJECT_KIND, Cell), K) of
         true ->
             case element(?SOBJECT_PROPS, Cell) of
-                #{{?KEY_NAMED, KeyBin} := Prop}
+                #{K := Prop}
                   when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     element(?DATAPROPERTY_VALUE, Prop);
                 _ -> miss
@@ -200,13 +200,13 @@ peek_named(_, Cell, KeyBin) when element(1, Cell) =:= ?SOBJECT_TAG ->
 peek_named(_, _, _) -> miss.
 
 %% §10.1.9.1 ordinary set when it lands as plain data
-set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
+set_prop_own_data(St, {?HANDLE_TAG, Id}, K, V) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, _, _, _, _} = Shaped ->
             Shapes = element(?STORE_SHAPES, Store),
-            case shaped_write(Cells, Shapes, Shaped, KeyBin, V) of
+            case shaped_write(Cells, Shapes, Shaped, K, V) of
                 miss -> miss;
                 NewCell ->
                     with_store(St,
@@ -214,11 +214,10 @@ set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
                                   arc_rt_arena_ffi:set(Id, NewCell, Cells)))
             end;
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Cell), KeyBin) of
+            case named_plain(element(?SOBJECT_KIND, Cell), K) of
                 false -> miss;
                 true ->
                     Props = element(?SOBJECT_PROPS, Cell),
-                    K = {?KEY_NAMED, KeyBin},
                     case Props of
                         #{K := Prop}
                           when element(1, Prop) =:= ?DATAPROPERTY_TAG,
@@ -336,13 +335,12 @@ with_props(Cell, Props) when tuple_size(Cell) =:= ?SOBJECT_SIZE ->
 with_value(Prop, V) when tuple_size(Prop) =:= ?DATAPROPERTY_SIZE ->
     setelement(?DATAPROPERTY_VALUE, Prop, V).
 
-set_named(St, Obj, KeyBin, V, Strict) ->
-    case set_prop_own_data(St, Obj, KeyBin, V) of
+set_named(St, Obj, K, V, Strict) ->
+    case set_prop_own_data(St, Obj, K, V) of
         miss ->
-            Key = {?KEY_NAMED, KeyBin},
             {_, St1} = case Strict of
-                true -> 'arc@rt@obj':set_prop_strict_untyped_key(St, Obj, Key, V);
-                false -> 'arc@rt@obj':set_prop_untyped_key(St, Obj, Key, V)
+                true -> 'arc@rt@obj':set_prop_strict_untyped_key(St, Obj, K, V);
+                false -> 'arc@rt@obj':set_prop_untyped_key(St, Obj, K, V)
             end,
             St1;
         St1 -> St1
@@ -358,10 +356,10 @@ create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
     Cells = element(?STORE_CELLS, Store),
     Cell = arc_rt_arena_ffi:get(Id, Cells),
     R = case PK of
-        {?KEY_NAMED, KeyBin} when element(1, Cell) =:= ?SSHAPEDOBJECT_TAG ->
-            shaped_define(element(?STORE_SHAPES, Store), Cell, KeyBin, V);
-        {?KEY_NAMED, KeyBin} when element(1, Cell) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Cell), KeyBin) of
+        {?KEY_NAMED, _} when element(1, Cell) =:= ?SSHAPEDOBJECT_TAG ->
+            shaped_define(element(?STORE_SHAPES, Store), Cell, PK, V);
+        {?KEY_NAMED, _} when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case named_plain(element(?SOBJECT_KIND, Cell), PK) of
                 true -> plain_define(Cell, PK, V, Store);
                 false -> miss
             end;
@@ -396,19 +394,19 @@ plain_define(Cell, PK, V, Store) ->
              Seq + 1}
     end.
 
-shaped_define(Shapes, {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin, V) ->
+shaped_define(Shapes, {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Shaped, K, V) ->
     case Offs of
-        #{KeyBin := Off} ->
+        #{?KEY_TEXT(K) := Off} ->
             setelement(?SSHAPEDOBJECT_SLOTS, Shaped, ?SLOT_SET(Slots, Off, V));
         _ ->
-            case shaped_next(Shapes, Sid, KeyBin) of
+            case shaped_next(Shapes, Sid, K) of
                 miss -> miss;
                 {To, ToOffs} ->
                     {?SSHAPEDOBJECT_TAG, To, P, erlang:append_element(Slots, V), ToOffs}
             end
     end.
 
-shaped_next(Shapes, Sid, KeyBin) -> ?SHAPED_NEXT(Shapes, Sid, KeyBin).
+shaped_next(Shapes, Sid, K) -> ?SHAPED_NEXT(Shapes, Sid, ?KEY_TEXT(K)).
 
 %% §7.3.22 ordinary has instance
 instanceof_i32(St, V, {?HANDLE_TAG, CId}) ->
@@ -418,7 +416,7 @@ instanceof_i32(St, V, {?HANDLE_TAG, CId}) ->
             case element(?SOBJECT_KIND, Cell) of
                 Kind when element(1, Kind) =:= ?COMPILEDFN_TAG ->
                     case element(?SOBJECT_PROPS, Cell) of
-                        #{{?KEY_NAMED, <<"prototype">>} := Prop}
+                        #{?PROTOTYPE_KEY := Prop}
                           when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                             case element(?DATAPROPERTY_VALUE, Prop) of
                                 {?HANDLE_TAG, PId} -> proto_has(St, V, PId, ?MAX_PROTO_HOPS);
@@ -467,11 +465,11 @@ get_elem(St, Recv, Idx)
     get_elem(St, Recv, trunc(Idx));
 get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?STRINGKEY_TAG, {?KEY_NAMED, KeyBin}} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
             Store = element(?AGENT_STORE, St),
             Cells = element(?STORE_CELLS, Store),
             case named_read(Cells, element(?STORE_SHAPES, Store),
-                            arc_rt_arena_ffi:get(Id, Cells), KeyBin) of
+                            arc_rt_arena_ffi:get(Id, Cells), K) of
                 undefined -> miss;
                 V -> V
             end;
@@ -545,23 +543,23 @@ index_read(Cell, Idx) when element(1, Cell) =:= ?SOBJECT_TAG ->
     end;
 index_read(_, _) -> miss.
 
-named_read(Cells, Shapes, {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs}, KeyBin) ->
+named_read(Cells, Shapes, {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs}, K) ->
     case Offs of
-        #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
-        _ -> proto_read(Cells, Shapes, Proto, KeyBin, ?MAX_PROTO_HOPS)
+        #{?KEY_TEXT(K) := Off} -> ?SLOT_AT(Slots, Off);
+        _ -> proto_read(Cells, Shapes, Proto, K, ?MAX_PROTO_HOPS)
     end;
-named_read(Cells, Shapes, Cell, KeyBin) when element(1, Cell) =:= ?SOBJECT_TAG ->
+named_read(Cells, Shapes, Cell, K) when element(1, Cell) =:= ?SOBJECT_TAG ->
     Kind = element(?SOBJECT_KIND, Cell),
-    case named_plain(Kind, KeyBin) of
+    case named_plain(Kind, K) of
         true ->
             case element(?SOBJECT_PROPS, Cell) of
-                #{{?KEY_NAMED, KeyBin} := Prop}
+                #{K := Prop}
                   when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     element(?DATAPROPERTY_VALUE, Prop);
-                #{{?KEY_NAMED, KeyBin} := _} -> miss;
+                #{K := _} -> miss;
                 _ ->
                     proto_read(Cells, Shapes, element(?SOBJECT_PROTO, Cell),
-                               KeyBin, ?MAX_PROTO_HOPS)
+                               K, ?MAX_PROTO_HOPS)
             end;
         false when element(1, Kind) =:= ?ARRAYOBJ_TAG ->
             element(?ARRAYOBJ_LENGTH, Kind);
@@ -589,8 +587,8 @@ set_elem(St, Recv, Idx, V)
     set_elem(St, Recv, trunc(Idx), V);
 set_elem(St, Recv = {?HANDLE_TAG, Id}, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?STRINGKEY_TAG, {?KEY_NAMED, KeyBin}} ->
-            set_prop_own_data(St, Recv, KeyBin, V);
+        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
+            set_prop_own_data(St, Recv, K, V);
         {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} -> index_write(St, Id, Idx, V);
         _ -> miss
     end;
@@ -755,16 +753,16 @@ shape_slots_set(Slots, Off, V) -> ?SLOT_SET(Slots, Off, V).
 
 shape_slots_append(Slots, V) -> erlang:append_element(Slots, V).
 
-shaped_write(Cells, Shapes, {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin,
+shaped_write(Cells, Shapes, {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Shaped, K,
              V) ->
     case Offs of
-        #{KeyBin := Off} ->
+        #{?KEY_TEXT(K) := Off} ->
             setelement(?SSHAPEDOBJECT_SLOTS, Shaped, ?SLOT_SET(Slots, Off, V));
         _ ->
-            case shaped_next(Shapes, Sid, KeyBin) of
+            case shaped_next(Shapes, Sid, K) of
                 miss -> miss;
                 {To, ToOffs} ->
-                    case named_write_walk(Cells, Shapes, P, {?KEY_NAMED, KeyBin},
+                    case named_write_walk(Cells, Shapes, P, K,
                                           ?MAX_PROTO_HOPS) of
                         true ->
                             {?SSHAPEDOBJECT_TAG, To, P, erlang:append_element(Slots, V),
@@ -814,11 +812,11 @@ named_write_walk(Cells, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
     case arc_rt_arena_ffi:get(PId, Cells) of
         {?SSHAPEDOBJECT_TAG, _, P2, _, Offs} ->
             case Offs of
-                #{element(2, K) := _} -> true;
+                #{?KEY_TEXT(K) := _} -> true;
                 _ -> named_write_walk_next(Cells, Shapes, P2, K, Fuel)
             end;
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Cell), element(2, K)) of
+            case named_plain(element(?SOBJECT_KIND, Cell), K) of
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
                         #{K := Prop} ->

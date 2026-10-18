@@ -214,7 +214,8 @@ fn regexp_call(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case pattern_is_regexp, classify(flags) {
     True, KUndef -> {
-      let #(ctor, st) = rt_val.get_named(st, pattern, "constructor", None)
+      let #(ctor, st) =
+        rt_val.get_named(st, pattern, key.Named("constructor"), None)
       case rt_val.same_value(ctor, new_target) {
         True -> #(pattern, st)
         False -> construct(st)
@@ -240,10 +241,12 @@ fn construct_regexp(
     None ->
       case pattern_is_regexp {
         True -> {
-          let #(p, st) = rt_val.get_named(st, pattern, "source", None)
+          let #(p, st) =
+            rt_val.get_named(st, pattern, key.Named("source"), None)
           case classify(flags) {
             KUndef -> {
-              let #(f, st) = rt_val.get_named(st, pattern, "flags", None)
+              let #(f, st) =
+                rt_val.get_named(st, pattern, key.Named("flags"), None)
               #(p, f, st)
             }
             _ -> #(p, flags, st)
@@ -646,7 +649,8 @@ fn build_flags(
   case remaining {
     [] -> #(mk_string(acc), st)
     [flag, ..rest] -> {
-      let #(v, st) = rt_val.get_named(st, this, flag_property(flag), None)
+      let #(v, st) =
+        rt_val.get_named(st, this, Named(flag_property(flag)), None)
       let acc = case rt_val.to_boolean(v) {
         True -> acc <> flag_char(flag)
         False -> acc
@@ -672,7 +676,7 @@ fn to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         "RegExp.prototype.toString called on non-object",
       )
   }
-  let #(src_v, st) = rt_val.get_named(st, this, "source", None)
+  let #(src_v, st) = rt_val.get_named(st, this, key.Named("source"), None)
   let #(src, st) = rt_val.to_string(st, src_v)
   let #(flags, st) = read_flags(st, this)
   #(mk_string("/" <> src <> "/" <> flags), st)
@@ -819,7 +823,7 @@ pub fn regexp_exec_compiled(
 )
 
 pub fn set_last_index(st: Agent, h: Handle, v: JsVal) -> Agent {
-  rt_obj.set_named(st, mk_object(h), "lastIndex", v, strict: True)
+  rt_obj.set_named(st, mk_object(h), key.Named("lastIndex"), v, strict: True)
 }
 
 pub fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
@@ -844,7 +848,7 @@ fn regexp_exec_mode(
   mode: ExecMode,
 ) -> #(JsVal, Agent) {
   let h = require_object(st, rx, ".exec")
-  let #(exec_fn, st) = rt_val.get_named(st, rx, "exec", None)
+  let #(exec_fn, st) = rt_val.get_named(st, rx, key.Named("exec"), None)
   let receiver = rt_store.cell_get(st, h)
   case receiver, is_intrinsic_exec(st, exec_fn) {
     SObject(kind: RegExpObj(..), ..), True -> builtin_exec_mode(st, h, s, mode)
@@ -909,7 +913,8 @@ pub fn builtin_exec_ranges(
   h: Handle,
   s: String,
 ) -> #(MatchRanges, String, Agent) {
-  let #(li_v, st) = rt_val.get_named(st, mk_object(h), "lastIndex", None)
+  let #(li_v, st) =
+    rt_val.get_named(st, mk_object(h), key.Named("lastIndex"), None)
   let #(last_index, st) = rt_val.to_length(st, li_v)
   // re-read after the get, a getter may have recompiled
   let #(flags, compiled, st) = matcher(st, h)
@@ -1317,7 +1322,7 @@ pub fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
   case pristine {
     Some(flags) -> #(flags, st)
     None -> {
-      let #(flags_v, st) = rt_val.get_named(st, rx, "flags", None)
+      let #(flags_v, st) = rt_val.get_named(st, rx, key.Named("flags"), None)
       rt_val.to_string(st, flags_v)
     }
   }
@@ -1342,7 +1347,7 @@ pub fn species_constructor(
   o: JsVal,
   default_ctor: Handle,
 ) -> #(JsVal, Agent) {
-  let #(c, st) = rt_val.get_named(st, o, "constructor", None)
+  let #(c, st) = rt_val.get_named(st, o, key.Named("constructor"), None)
   case classify(c) {
     KUndef -> #(mk_object(default_ctor), st)
     KHandle(_) -> {

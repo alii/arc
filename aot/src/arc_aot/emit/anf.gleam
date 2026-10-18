@@ -125,6 +125,11 @@ pub fn make_tuple(vs: List(ir.Value)) -> Build(ir.Value) {
   let_(ir.TermOp(ir.MakeTuple, vs))
 }
 
+/// the key of a property whose name is known now, as the object kernels take it
+pub fn named_key(name: BitArray) -> Build(ir.Value) {
+  make_tuple([ir.ConstAtom("named"), ir.ConstBinary(name)])
+}
+
 pub fn tuple_get(v: ir.Value, i: Int) -> ir.Expr {
   ir.TermOp(ir.TupleGet(i), [v])
 }
