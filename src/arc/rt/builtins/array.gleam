@@ -1601,6 +1601,7 @@ fn array_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
+  use <- whole_array_search(st, this, args, Strict, mk_int)
   forward_search_driver(st, this, args, Strict, SkipHoles, mk_int)
 }
 
@@ -1609,9 +1610,32 @@ fn array_includes(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
+  use <- whole_array_search(st, this, args, SameValueZero, fn(found) {
+    mk_bool(found >= 0)
+  })
   forward_search_driver(st, this, args, SameValueZero, VisitHoles, fn(found) {
     mk_bool(found >= 0)
   })
+}
+
+// one argument and a plain array without holes: nothing can run user code
+fn whole_array_search(
+  st: Agent,
+  this: JsVal,
+  args: List(JsVal),
+  eq: EqMode,
+  wrap: fn(Int) -> JsVal,
+  otherwise: fn() -> #(JsVal, Agent),
+) -> #(JsVal, Agent) {
+  case args {
+    [search] ->
+      case scan_whole_array(st, this, search, eq) {
+        Match(i) -> #(wrap(i), st)
+        Absent -> #(wrap(-1), st)
+        HoleAt(_) -> otherwise()
+      }
+    _ -> otherwise()
+  }
 }
 
 fn forward_search_driver(
@@ -1692,6 +1716,9 @@ fn scan_forward(
   end: Int,
   eq: EqMode,
 ) -> Scan
+
+@external(erlang, "arc_rt_array_ffi", "scan_whole_array")
+fn scan_whole_array(st: Agent, this: JsVal, search: JsVal, eq: EqMode) -> Scan
 
 @external(erlang, "arc_rt_array_ffi", "scan_backward")
 fn scan_backward(els: JsElements, search: JsVal, idx: Int, eq: EqMode) -> Scan

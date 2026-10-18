@@ -1,6 +1,7 @@
 %% array kernels; exports may answer miss
 -module(arc_rt_array_ffi).
--export([index_range_plain/5, scan_forward/5, scan_backward/4, push/3, pop/2]).
+-export([index_range_plain/5, scan_forward/5, scan_backward/4, push/3, pop/2,
+         scan_whole_array/4]).
 
 -include("../arc_rt_layout.hrl").
 -compile({inline, [elem_at/2]}).
@@ -63,15 +64,46 @@ probe_sparse(_, Idx, End) when Idx >= End -> false;
 probe_sparse(M, Idx, End) ->
     is_map_key(Idx, M) orelse probe_sparse(M, Idx + 1, End).
 
-scan_forward(_, _, Idx, End, _) when Idx >= End -> absent;
-scan_forward(Els, Search, Idx, End, Eq) ->
+%% a whole array with no properties of its own; a hole means take the long way
+scan_whole_array(St, {?HANDLE_TAG, Id}, Search, Eq) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length}, _, Props, _, Els, _}
+          when map_size(Props) =:= 0 ->
+            scan_forward(Els, Search, 0, Length, Eq);
+        _ -> {hole_at, 0}
+    end;
+scan_whole_array(_, _, _, _) -> {hole_at, 0}.
+
+%% how Search compares is settled once: a number by ==, nan by the mode,
+%% anything else by =:=
+scan_forward(Els, Search, Idx, End, _) when is_number(Search) ->
+    forward_number(Els, Search, Idx, End);
+scan_forward(Els, js_nan, Idx, End, strict) ->
+    forward_hole(Els, Idx, End);
+scan_forward(Els, Search, Idx, End, _) ->
+    forward_exact(Els, Search, Idx, End).
+
+forward_exact(_, _, Idx, End) when Idx >= End -> absent;
+forward_exact(Els, Search, Idx, End) ->
     case elem_at(Els, Idx) of
         ?ELEMS_HOLE -> {hole_at, Idx};
-        V ->
-            case eq(Eq, V, Search) of
-                true -> {match, Idx};
-                false -> scan_forward(Els, Search, Idx + 1, End, Eq)
-            end
+        V when V =:= Search -> {match, Idx};
+        _ -> forward_exact(Els, Search, Idx + 1, End)
+    end.
+
+forward_number(_, _, Idx, End) when Idx >= End -> absent;
+forward_number(Els, Search, Idx, End) ->
+    case elem_at(Els, Idx) of
+        ?ELEMS_HOLE -> {hole_at, Idx};
+        V when is_number(V), V == Search -> {match, Idx};
+        _ -> forward_number(Els, Search, Idx + 1, End)
+    end.
+
+forward_hole(_, Idx, End) when Idx >= End -> absent;
+forward_hole(Els, Idx, End) ->
+    case elem_at(Els, Idx) of
+        ?ELEMS_HOLE -> {hole_at, Idx};
+        _ -> forward_hole(Els, Idx + 1, End)
     end.
 
 scan_backward(_, _, Idx, _) when Idx < 0 -> absent;
