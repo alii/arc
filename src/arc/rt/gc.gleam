@@ -180,6 +180,7 @@ fn push_template_refs(template: FuncTemplate, acc: List(Int)) -> List(Int) {
     lexical: _,
     code_kind: _,
     regs: _,
+    nested_captures: _,
   ) = template
   push_refs(constants, acc)
 }

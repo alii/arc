@@ -66,6 +66,7 @@ fn stored_before_use(code: List(IrOp), slot: Int) -> Bool {
     | [IrPutField(_), ..rest]
     | [opcode.IrDefineField(_), ..rest]
     | [IrFinal(opcode.PushConst(_)), ..rest]
+    | [IrFinal(opcode.GetEnv(_)), ..rest]
     | [IrFinal(opcode.Pop), ..rest]
     | [IrFinal(opcode.Dup), ..rest]
     | [IrFinal(opcode.Swap), ..rest]

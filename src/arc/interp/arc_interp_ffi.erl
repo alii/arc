@@ -3,7 +3,7 @@
 -export([for_in_list/1, for_in_next/1,
          type_of/2,
          box_get/2, cell_of/2, list_from_array_like/2, instance_of/4,
-         capture_env/2, is_object/1, is_string/1]).
+         is_object/1, is_string/1]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -98,12 +98,6 @@ box_get(St, {?HANDLE_TAG, Id}) ->
         _ -> miss
     end;
 box_get(_, _) -> miss.
-
-capture_env([], _) -> {};
-capture_env([I], Locals) -> {element(I + 1, Locals)};
-capture_env([I, J], Locals) -> {element(I + 1, Locals), element(J + 1, Locals)};
-capture_env(Descriptors, Locals) ->
-    list_to_tuple([element(I + 1, Locals) || I <- Descriptors]).
 
 %% §13.10.2 + §7.3.22 when @@hasInstance is provably the intrinsic; proxies miss
 instance_of(_, js_tdz, _, _) -> miss;

@@ -264,6 +264,9 @@ pub type FuncTemplate {
     lexical: LexicalSlots,
     code_kind: CodeKind,
     regs: Regs,
+    // how many of the first captures sit together in a tuple of their own,
+    // which is then the first thing captured; 0 when none do
+    nested_captures: Int,
   )
 }
 
@@ -272,6 +275,14 @@ pub type EnvTuple
 
 @external(erlang, "erlang", "list_to_tuple")
 pub fn env_from_list(values: List(JsVal)) -> EnvTuple
+
+/// what a closure of `template` holds, given every value it captures in order
+pub fn env_for(template: FuncTemplate, values: List(JsVal)) -> EnvTuple {
+  nest_env(values, template.nested_captures)
+}
+
+@external(erlang, "arc_rt_env_ffi", "nest")
+fn nest_env(values: List(JsVal), nested: Int) -> EnvTuple
 
 pub type TryFrame {
   TryFrame(catch_target: Int, stack_depth: Int, kind: TryKind(Pc))

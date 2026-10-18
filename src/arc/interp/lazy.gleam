@@ -20,13 +20,17 @@ import gleam/string
 @external(erlang, "arc_interp_locals_ffi", "captured")
 fn captured(locals: TupleArray(JsVal), count: Int) -> EnvTuple
 
-// the locals at `slots`, then the record
-@external(erlang, "arc_interp_locals_ffi", "captured_with")
+// the parent's values at `slots`, then the record
+@external(erlang, "arc_rt_env_ffi", "capture_with")
 fn captured_with(
-  locals: TupleArray(JsVal),
   slots: List(Int),
+  locals: TupleArray(JsVal),
+  from: Int,
   record: BitArray,
 ) -> EnvTuple
+
+@external(erlang, "arc_rt_env_ffi", "renest")
+fn renest(env: EnvTuple, nested: Int) -> EnvTuple
 
 // a stub's frame has its function's record where its last capture goes
 @external(erlang, "erlang", "element")
@@ -50,14 +54,19 @@ pub fn make_closure(
       rt_closure.new_bytecode_function(
         agent,
         template,
-        kernel.capture_env(slots, locals),
+        kernel.capture_env(
+          slots,
+          template.nested_captures,
+          locals,
+          parent.nested_captures,
+        ),
         unit_id,
       )
     Error(Nil) ->
       rt_closure.new_bytecode_function(
         agent,
         tuple_array.element(stub_index + 1, parent.functions),
-        captured_with(locals, slots, record),
+        captured_with(slots, locals, parent.nested_captures, record),
         unit_id,
       )
   }
@@ -112,7 +121,8 @@ pub fn first_call(state: State) -> Result(State, StepExit) {
     _, _ -> template
   }
   let callee = tuple_array.get_unchecked(env_size + 1, state.locals)
-  let env = captured(state.locals, env_size - 1)
+  let env =
+    renest(captured(state.locals, env_size - 1), template.nested_captures)
   let locals =
     kernel.frame_locals(
       env,

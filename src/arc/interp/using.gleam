@@ -100,5 +100,6 @@ fn sync_fallback_template() -> FuncTemplate {
     lexical: lexical.NoLexicalSlots,
     code_kind: lexical.FunctionCode,
     regs: bytecode.NoRegs,
+    nested_captures: 0,
   )
 }

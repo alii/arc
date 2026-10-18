@@ -400,13 +400,27 @@ fn build_template(
   code_kind code_kind: CodeKind,
   use_registers use_registers: Bool,
 ) -> FuncTemplate {
-  let assemble.Assembled(bytecode:, constants:, lines:) =
-    assemble.assemble(code, constants)
+  let #(assemble.Assembled(bytecode:, constants:, lines:), nested_captures) = case
+    local_names
+  {
+    // a direct eval finds its caller's variables by slot
+    Some(_) -> #(assemble.assemble(code, constants), 0)
+    None -> assemble_nesting(code, constants, list.length(info.captures))
+  }
+  // where a slot of the flat layout went, if it is still a slot
+  let moved = fn(slot) {
+    case nested_captures {
+      0 -> slot
+      nested -> slot - nested + 1
+    }
+  }
   let #(bytecode, regs) = case use_registers {
     True ->
       registers.assign_regs(
         bytecode,
-        set.union(captured_slots(functions), lazily_captured_slots(bytecode)),
+        set.union(captured_slots(functions), lazily_captured_slots(bytecode))
+          |> set.filter(fn(slot) { slot >= nested_captures })
+          |> set.map(moved),
       )
     False -> #(bytecode, bytecode.NoRegs)
   }
@@ -414,7 +428,7 @@ fn build_template(
     name: None,
     arity: 0,
     length: 0,
-    local_count: info.local_count,
+    local_count: moved(info.local_count),
     bytecode:,
     constants:,
     lines:,
@@ -428,10 +442,46 @@ fn build_template(
     is_constructor: False,
     is_class_constructor: False,
     local_names:,
-    lexical: info.lexical,
+    lexical: lexical.map_slots(info.lexical, moved),
     code_kind:,
     regs:,
+    nested_captures:,
   )
+}
+
+// fewer captures than this stay spread over the frame's first slots
+const fewest_nested_captures = 2
+
+// a frame is copied whole by every write to a local, and filled in by every
+// call, so captures, which never change, are kept out of it as one tuple
+fn assemble_nesting(
+  code: List(opcode.IrOp),
+  constants: List(JsVal),
+  captures: Int,
+) -> #(assemble.Assembled, Int) {
+  let flat = fn() { #(assemble.assemble(code, constants), 0) }
+  use <- bool.lazy_guard(captures < fewest_nested_captures, flat)
+  // reads of captures change first, so that none is fused into an op that
+  // wants a slot
+  let assembled =
+    list.map(code, fn(ir) {
+      case ir {
+        opcode.IrFinal(opcode.GetLocal(i)) if i < captures ->
+          opcode.IrFinal(opcode.GetEnv(i))
+        _ -> ir
+      }
+    })
+    |> assemble.assemble(constants)
+  case
+    tuple_array.to_list(assembled.bytecode)
+    |> list.try_map(opcode.nest_captures(_, captures))
+  {
+    Ok(ops) -> #(
+      assemble.Assembled(..assembled, bytecode: tuple_array.from_list(ops)),
+      captures,
+    )
+    Error(Nil) -> flat()
+  }
 }
 
 // a lazy closure's captures are named by its record, not by a child template
@@ -540,6 +590,7 @@ fn stub_template(child: emit.CompiledChild, env_size: Int) -> FuncTemplate {
     lexical: lexical.OwnedLexicalSlots(base: env_size),
     code_kind: child.code_kind,
     regs: bytecode.NoRegs,
+    nested_captures: 0,
   )
 }
 

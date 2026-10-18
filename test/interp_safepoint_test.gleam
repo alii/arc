@@ -65,6 +65,7 @@ fn empty_template() -> FuncTemplate {
     lexical: lexical.NoLexicalSlots,
     code_kind: lexical.ScriptCode,
     regs: bytecode.NoRegs,
+    nested_captures: 0,
   )
 }
 

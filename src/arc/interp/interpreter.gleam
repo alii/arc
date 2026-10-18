@@ -15,8 +15,8 @@ import arc/bytecode/opcode.{
   DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup,
   DynamicImport, DynamicImportDefer, DynamicImportSource, ForInNext, ForInStart,
   GetAsyncIterator, GetBoxed, GetDisposer, GetElem, GetElemKeep, GetElemLocals,
-  GetElemPostInc, GetEvalVar, GetField, GetFieldCall, GetFieldCall1,
-  GetFieldKeep, GetGlobal, GetIterator, GetLocal, GetLocalField,
+  GetElemPostInc, GetEnv, GetEnvBoxed, GetEvalVar, GetField, GetFieldCall,
+  GetFieldCall1, GetFieldKeep, GetGlobal, GetIterator, GetLocal, GetLocalField,
   GetLocalFieldCall, GetLocalFieldKeep, GetPrivateFieldDyn,
   GetPrivateFieldDynKeep, GetPrototypeOf, GetSuperValue, GetSuperValueKeep,
   GetTemplateObject, Gosub, IncLocal, IncLocalCmpConstJump, IncLocalCmpLocalJump,
@@ -27,13 +27,14 @@ import arc/bytecode/opcode.{
   NewObject, NewObjectShaped, NewObjectWith, NewPrivateName, NewRegExp,
   ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry, PostDecLocal, PostIncLocal,
   PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem,
-  PutElemPop, PutEvalVar, PutField, PutFieldPop, PutGlobal, PutLocal,
-  PutLocalCheckInit, PutLocalConstField, PutLocalLocalField, PutPrivateFieldDyn,
-  PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto, SetupDerivedClass, Swap,
-  Throw, ThrowConstAssign, ThrowReferenceError, ToObject, ToPropertyKey,
-  ToStringVal, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, UnpackArray, Unrot4,
-  WithDeleteVar, WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef,
-  WithPutRefValue, WithPutVar, Yield, YieldStar,
+  PutElemPop, PutEnvBoxed, PutEnvBoxedCheckInit, PutEvalVar, PutField,
+  PutFieldPop, PutGlobal, PutLocal, PutLocalCheckInit, PutLocalConstField,
+  PutLocalLocalField, PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3,
+  Safepoint, SetProto, SetupDerivedClass, Swap, Throw, ThrowConstAssign,
+  ThrowReferenceError, ToObject, ToPropertyKey, ToStringVal, TypeOf,
+  TypeofEvalVar, TypeofGlobal, UnaryOp, UnpackArray, Unrot4, WithDeleteVar,
+  WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef, WithPutRefValue,
+  WithPutVar, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -467,6 +468,76 @@ fn loop(
           )
       }
     }
+
+    GetEnvBoxed(index) -> {
+      let v =
+        kernel.box_get(
+          agent,
+          tuple_array.element(index + 1, kernel.nested_captures(1, locals)),
+        )
+      case kernel.is(v, kernel.Miss) {
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+        False ->
+          loop(
+            state,
+            drive,
+            pc + 1,
+            [v, ..stack],
+            locals,
+            agent,
+            code,
+            constants,
+            r0,
+            r1,
+          )
+      }
+    }
+
+    PutEnvBoxed(index) ->
+      case stack {
+        [v, ..rest] -> {
+          let box =
+            tuple_array.element(index + 1, kernel.nested_captures(1, locals))
+          case rt_store.is_handle(box) {
+            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+            True ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                rest,
+                locals,
+                rt_store.cell_set(
+                  agent,
+                  kernel.to_handle_unchecked([box]),
+                  SBox(v),
+                ),
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    GetEnv(index) ->
+      loop(
+        state,
+        drive,
+        pc + 1,
+        [
+          tuple_array.element(index + 1, kernel.nested_captures(1, locals)),
+          ..stack
+        ],
+        locals,
+        agent,
+        code,
+        constants,
+        r0,
+        r1,
+      )
 
     PutBoxed(index) ->
       case stack {
@@ -2735,7 +2806,12 @@ fn loop(
         rt_closure.new_bytecode_function(
           agent,
           template,
-          kernel.capture_env(template.env_descriptors, locals),
+          kernel.capture_env(
+            template.env_descriptors,
+            template.nested_captures,
+            locals,
+            state.func.nested_captures,
+          ),
           state.unit_id,
         )
       loop(
@@ -4315,71 +4391,46 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     }
 
     GetBoxed(index) ->
-      case read_box(state, tuple_array.get_unchecked(index, state.locals)) {
-        Some(value) ->
-          case kernel.is(value, kernel.JsTdz) {
-            True -> tdz_reference_error(state)
-            False ->
-              Ok(
-                State(..state, stack: [value, ..state.stack], pc: state.pc + 1),
-              )
-          }
-        None ->
-          Error(VmFailed(InternalError("GetBoxed", "local is not a box"), state))
-      }
+      get_boxed(state, tuple_array.get_unchecked(index, state.locals))
+    GetEnvBoxed(index) ->
+      get_boxed(
+        state,
+        tuple_array.element(index + 1, kernel.nested_captures(1, state.locals)),
+      )
 
     PutBoxed(index) ->
-      case state.stack {
-        [new_value, ..rest] ->
-          case handle_of(tuple_array.get_unchecked(index, state.locals)) {
-            Some(box) -> {
-              let agent = rt_store.cell_set(state.agent, box, SBox(new_value))
-              Ok(State(..state, agent:, stack: rest, pc: state.pc + 1))
-            }
-            None ->
-              Error(VmFailed(
-                InternalError("PutBoxed", "local is not a box"),
-                state,
-              ))
-          }
-        [] -> underflow(state, "PutBoxed")
-      }
+      put_boxed(state, tuple_array.get_unchecked(index, state.locals))
+    PutEnvBoxed(index) ->
+      put_boxed(
+        state,
+        tuple_array.element(index + 1, kernel.nested_captures(1, state.locals)),
+      )
 
     PutBoxedCheckInit(index) ->
-      case state.stack {
-        [new_value, ..rest] -> {
-          let local = tuple_array.get_unchecked(index, state.locals)
-          case handle_of(local), read_box(state, local) {
-            Some(box), Some(current) ->
-              case kernel.is(current, kernel.JsTdz) {
-                True -> {
-                  let agent =
-                    rt_store.cell_set(state.agent, box, SBox(new_value))
-                  Ok(
-                    State(
-                      ..state,
-                      agent:,
-                      stack: rest,
-                      this: new_value,
-                      pc: state.pc + 1,
-                    ),
-                  )
-                }
-                False ->
-                  state.throw_reference_error(
-                    state,
-                    "'this' is already initialized",
-                  )
-              }
-            _, _ ->
-              Error(VmFailed(
-                InternalError("PutBoxedCheckInit", "local is not a box"),
-                state,
-              ))
-          }
-        }
-        [] -> underflow(state, "PutBoxedCheckInit")
-      }
+      put_boxed_check_init(
+        state,
+        tuple_array.get_unchecked(index, state.locals),
+      )
+    PutEnvBoxedCheckInit(index) ->
+      put_boxed_check_init(
+        state,
+        tuple_array.element(index + 1, kernel.nested_captures(1, state.locals)),
+      )
+
+    GetEnv(index) ->
+      Ok(
+        State(
+          ..state,
+          stack: [
+            tuple_array.element(
+              index + 1,
+              kernel.nested_captures(1, state.locals),
+            ),
+            ..state.stack
+          ],
+          pc: state.pc + 1,
+        ),
+      )
 
     // §9.1.1.4.4 getbindingvalue
     GetGlobal(name) ->
@@ -7610,5 +7661,67 @@ fn call_as_frame(
       )
     }
     _ -> otherwise()
+  }
+}
+
+fn get_boxed(state: State, local: JsVal) -> Result(State, StepExit) {
+  case read_box(state, local) {
+    Some(value) ->
+      case kernel.is(value, kernel.JsTdz) {
+        True -> tdz_reference_error(state)
+        False ->
+          Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
+      }
+    None ->
+      Error(VmFailed(InternalError("GetBoxed", "local is not a box"), state))
+  }
+}
+
+fn put_boxed(state: State, local: JsVal) -> Result(State, StepExit) {
+  case state.stack {
+    [new_value, ..rest] ->
+      case handle_of(local) {
+        Some(box) -> {
+          let agent = rt_store.cell_set(state.agent, box, SBox(new_value))
+          Ok(State(..state, agent:, stack: rest, pc: state.pc + 1))
+        }
+        None ->
+          Error(VmFailed(InternalError("PutBoxed", "local is not a box"), state))
+      }
+    [] -> underflow(state, "PutBoxed")
+  }
+}
+
+fn put_boxed_check_init(state: State, local: JsVal) -> Result(State, StepExit) {
+  case state.stack {
+    [new_value, ..rest] ->
+      case handle_of(local), read_box(state, local) {
+        Some(box), Some(current) ->
+          case kernel.is(current, kernel.JsTdz) {
+            True -> {
+              let agent = rt_store.cell_set(state.agent, box, SBox(new_value))
+              Ok(
+                State(
+                  ..state,
+                  agent:,
+                  stack: rest,
+                  this: new_value,
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+            False ->
+              state.throw_reference_error(
+                state,
+                "'this' is already initialized",
+              )
+          }
+        _, _ ->
+          Error(VmFailed(
+            InternalError("PutBoxedCheckInit", "local is not a box"),
+            state,
+          ))
+      }
+    [] -> underflow(state, "PutBoxedCheckInit")
   }
 }

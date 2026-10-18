@@ -58,6 +58,20 @@ pub fn slot_of(slots: LexicalSlots, ref: LexicalRef) -> Option(Int) {
   }
 }
 
+pub fn map_slots(slots: LexicalSlots, f: fn(Int) -> Int) -> LexicalSlots {
+  case slots {
+    NoLexicalSlots -> NoLexicalSlots
+    OwnedLexicalSlots(base) -> OwnedLexicalSlots(f(base))
+    CapturedLexicalSlots(this:, active_func:, home_object:, new_target:) ->
+      CapturedLexicalSlots(
+        this: option.map(this, f),
+        active_func: option.map(active_func, f),
+        home_object: option.map(home_object, f),
+        new_target: option.map(new_target, f),
+      )
+  }
+}
+
 pub fn ref_offset(ref: LexicalRef) -> Int {
   case ref {
     ThisRef -> 0

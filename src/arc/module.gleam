@@ -1186,7 +1186,7 @@ fn instantiate_hoisted_functions(
             rt_closure.new_bytecode_function(
               st,
               child,
-              bytecode.env_from_list(captured),
+              bytecode.env_for(child, captured),
               lm.unit_id,
             )
           rt_store.box_set(st, box, mk_object(closure))

@@ -1,6 +1,6 @@
 %% frame locals and registers; sloppy_this may answer miss
 -module(arc_interp_locals_ffi).
--export([frame_locals/9, sloppy_this/2, flush_registers/5, captured/2, captured_with/3]).
+-export([frame_locals/9, sloppy_this/2, flush_registers/5, captured/2]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -289,9 +289,3 @@ captured(_, 0) -> {};
 captured(Locals, Count) ->
     list_to_tuple(onto(Locals, Count, [])).
 
-%% the locals at Slots, in order, then Last
-captured_with(Locals, Slots, Last) ->
-    list_to_tuple(at(Locals, Slots, Last)).
-
-at(_, [], Last) -> [Last];
-at(Locals, [I | Slots], Last) -> [element(I + 1, Locals) | at(Locals, Slots, Last)].

@@ -1,5 +1,6 @@
 import arc/bytecode/binop.{type ClassifiedBinOp, type PureBinOp}
 import arc/bytecode/key.{type PropertyKey}
+import gleam/list
 import gleam/option.{type Option, None, Some}
 
 pub type TemplateQuasi {
@@ -182,6 +183,13 @@ pub type Op {
   PutBoxed(index: Int)
   // bindthisvalue for boxed this
   PutBoxedCheckInit(index: Int)
+  // the same on a box the closure captured, by its place among the captures
+  // the frame keeps as one tuple in slot 0
+  GetEnvBoxed(index: Int)
+  PutEnvBoxed(index: Int)
+  PutEnvBoxedCheckInit(index: Int)
+  // such a capture itself
+  GetEnv(index: Int)
 
   // build with bin_op, never classify at execution time
   BinOp(kind: ClassifiedBinOp)
@@ -464,6 +472,36 @@ pub fn pinned_slots(op: Op) -> List(Int) {
     | PutBoxedCheckInit(i) -> [i]
     BoxLocals(slots:, ..) -> slots
     _ -> []
+  }
+}
+
+/// The op for a frame that keeps its first `count` slots, all captures, as one
+/// tuple in slot 0. An error if the op does to a capture what only a slot can
+/// take
+pub fn nest_captures(op: Op, count: Int) -> Result(Op, Nil) {
+  let moved = fn(slot) { slot - count + 1 }
+  case op {
+    GetBoxed(i) if i < count -> Ok(GetEnvBoxed(i))
+    PutBoxed(i) if i < count -> Ok(PutEnvBoxed(i))
+    PutBoxedCheckInit(i) if i < count -> Ok(PutEnvBoxedCheckInit(i))
+    PutLocalCheckInit(i) if i >= count -> Ok(PutLocalCheckInit(moved(i)))
+    ApplyArguments(slot:, simple_params:) if slot >= count ->
+      Ok(ApplyArguments(slot: moved(slot), simple_params:))
+    BoxLocal(i) if i >= count -> Ok(BoxLocal(moved(i)))
+    GetBoxed(i) -> Ok(GetBoxed(moved(i)))
+    PutBoxed(i) -> Ok(PutBoxed(moved(i)))
+    PutBoxedCheckInit(i) -> Ok(PutBoxedCheckInit(moved(i)))
+    BoxLocals(slots:, uninit:) ->
+      case list.any(slots, fn(slot) { slot < count }) {
+        True -> Error(Nil)
+        False -> Ok(BoxLocals(slots: list.map(slots, moved), uninit:))
+      }
+    PutLocalCheckInit(_) | ApplyArguments(..) | BoxLocal(_) -> Error(Nil)
+    _ ->
+      case list.any(slot_uses(op), fn(use_) { use_.0 < count }) {
+        True -> Error(Nil)
+        False -> Ok(map_slots(op, moved))
+      }
   }
 }
 

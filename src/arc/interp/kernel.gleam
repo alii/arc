@@ -31,11 +31,22 @@ pub fn same(a: JsVal, b: JsVal) -> Bool
 @external(erlang, "arc_interp_ffi", "cell_of")
 pub fn cell_of(st: Agent, v: JsVal) -> Cell
 
-@external(erlang, "arc_interp_ffi", "capture_env")
+// what a closure captures out of `locals`: `nested` is its own template's
+// nested_captures, `from` that of the function whose frame this is
+@external(erlang, "arc_rt_env_ffi", "capture")
 pub fn capture_env(
   descriptors: List(Int),
+  nested: Int,
   locals: TupleArray(JsVal),
+  from: Int,
 ) -> EnvTuple
+
+// the captures of a frame that keeps them nested; position is always 1
+@external(erlang, "erlang", "element")
+pub fn nested_captures(
+  position: Int,
+  locals: TupleArray(JsVal),
+) -> TupleArray(JsVal)
 
 @external(erlang, "arc_interp_ffi", "list_from_array_like")
 pub fn list_from_array_like(st: Agent, array_like: JsVal) -> List(JsVal)
