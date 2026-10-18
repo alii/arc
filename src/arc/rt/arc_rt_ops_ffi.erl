@@ -402,23 +402,28 @@ u32(X) -> int_of(X) band 16#FFFFFFFF.
 bitand(A, B) when is_integer(A), is_integer(B) ->
     w32(A) band w32(B);
 bitand(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) band i32(B);
+bitand({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A band B};
 bitand(_, _) -> miss.
 bitor(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bor w32(B);
 bitor(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bor i32(B);
+bitor({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A bor B};
 bitor(_, _) -> miss.
 bitxor(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bxor w32(B);
 bitxor(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bxor i32(B);
+bitxor({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A bxor B};
 bitxor(_, _) -> miss.
 shr(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bsr (B band 31);
 shr(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bsr (u32(B) band 31);
+shr({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A bsr B};
 shr(_, _) -> miss.
 shl(A, B) when is_integer(A), is_integer(B) ->
     w32(w32(A) bsl (B band 31));
 shl(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) ->
     w32(i32(A) bsl (u32(B) band 31));
+shl({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A bsl B};
 shl(_, _) -> miss.
 ushr(A, B) when is_integer(A), is_integer(B) ->
     (A band 16#FFFFFFFF) bsr (B band 31);
@@ -426,4 +431,5 @@ ushr(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> u32(A) bsr (u32(B) band 31
 ushr(_, _) -> miss.
 bitnot(A) when is_integer(A) -> bnot w32(A);
 bitnot(A) when ?IS_JS_NUMBER(A) -> bnot i32(A);
+bitnot({js_bigint, A}) -> {js_bigint, bnot A};
 bitnot(_) -> miss.
