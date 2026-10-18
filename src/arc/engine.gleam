@@ -87,6 +87,18 @@ pub fn keep_forever(engine: Engine(host)) -> Engine(host) {
   Engine(..engine, agent: rt_gc.keep_all(engine.agent))
 }
 
+/// Runs a full garbage collection now. The engine collects by itself while
+/// code runs, and now and then that is a full collection, which takes a while.
+/// An embedder that knows the engine has gone quiet can call this, so that the
+/// next one is not due in the middle of later work. Costs nothing when hardly
+/// anything was made since the last full collection.
+pub fn collect_garbage(engine: Engine(host)) -> Engine(host) {
+  case engine.agent.store.meta.minors_since_major {
+    0 -> engine
+    _ -> Engine(..engine, agent: rt_gc.collect(engine.agent, []))
+  }
+}
+
 fn from_agent(st: Agent) -> Engine(host) {
   Engine(
     agent: entry.link(st),

@@ -400,6 +400,12 @@ pub fn keep_forever(rt: Runtime(host)) -> Runtime(host) {
   Runtime(..rt, engine: engine.keep_forever(rt.engine))
 }
 
+/// Runs a full garbage collection now, see `engine.collect_garbage`. For when
+/// nothing is left to do but wait.
+pub fn collect_garbage(rt: Runtime(host)) -> Runtime(host) {
+  Runtime(..rt, engine: engine.collect_garbage(rt.engine))
+}
+
 /// the require scripts see
 pub fn require_function(rt: Runtime(host)) -> JsVal {
   rt.core.require
