@@ -31,10 +31,18 @@ hmac(Name, Key, Data) ->
 names() ->
     [Name || {Name, _} <- table()].
 
-algorithm(Name) ->
-    case [Algorithm || {Known, Algorithm} <- table(), string:lowercase(Known) =:= Name] of
-        [Algorithm | _] -> {ok, Algorithm};
-        [] -> error
+%% Name is in lower case; the usual ones skip the search
+algorithm(<<"sha256">>) -> {ok, sha256};
+algorithm(<<"sha1">>) -> {ok, sha};
+algorithm(<<"md5">>) -> {ok, md5};
+algorithm(<<"sha512">>) -> {ok, sha512};
+algorithm(Name) -> algorithm(Name, table()).
+
+algorithm(_, []) -> error;
+algorithm(Name, [{Known, Algorithm} | Rest]) ->
+    case string:lowercase(Known) =:= Name of
+        true -> {ok, Algorithm};
+        false -> algorithm(Name, Rest)
     end.
 
 table() ->
