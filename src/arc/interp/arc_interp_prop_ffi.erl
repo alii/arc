@@ -66,9 +66,9 @@ has_property(_, _, _) -> miss.
 
 has_walk(_, _, _, 0) -> miss;
 has_walk(Cells, {?SSHAPEDOBJECT_TAG, _, Proto, _, Offs}, K, Fuel) ->
-    case is_map_key(?KEY_TEXT(K), Offs) of
-        true -> true;
-        false -> has_next(Cells, Proto, K, Fuel)
+    case Offs of
+        #{?KEY_ID(K) := {SK, _}} when ?SAME_TEXT(SK, K) -> true;
+        _ -> has_next(Cells, Proto, K, Fuel)
     end;
 has_walk(Cells, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
     case named_plain(element(?SOBJECT_KIND, Cell), K) of
@@ -148,9 +148,9 @@ find_accessor(_, _, _) -> no_accessor.
 
 accessor_walk(_, _, _, 0) -> no_accessor;
 accessor_walk(Cells, {?SSHAPEDOBJECT_TAG, _, Proto, _, Offs}, K, Fuel) ->
-    case is_map_key(?KEY_TEXT(K), Offs) of
-        true -> no_accessor;
-        false -> accessor_next(Cells, Proto, K, Fuel)
+    case Offs of
+        #{?KEY_ID(K) := {SK, _}} when ?SAME_TEXT(SK, K) -> no_accessor;
+        _ -> accessor_next(Cells, Proto, K, Fuel)
     end;
 accessor_walk(Cells, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
     case named_plain(element(?SOBJECT_KIND, Cell), K) of
@@ -200,9 +200,8 @@ object_get(Store, Id, K, Absent) ->
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs} ->
-            KeyBin = ?KEY_TEXT(K),
             case Offs of
-                #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
+                #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) -> ?SLOT_AT(Slots, Off);
                 _ -> proto_get(Cells, Proto, K, ?MAX_PROTO_HOPS, Absent)
             end;
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _} ->
@@ -218,9 +217,8 @@ object_get(Store, Id, K, Absent) ->
 chain_get(Cells, Cell, K, Fuel, Absent) ->
     case Cell of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs} ->
-            KeyBin = ?KEY_TEXT(K),
             case Offs of
-                #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
+                #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) -> ?SLOT_AT(Slots, Off);
                 _ -> proto_get(Cells, Proto, K, Fuel, Absent)
             end;
         _ when element(1, Cell) =:= ?SOBJECT_TAG ->
@@ -372,7 +370,7 @@ put_field(Store, {?HANDLE_TAG, Id}, K, V, Create)
         {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Cell ->
             KeyBin = ?KEY_TEXT(K),
             case Offs of
-                #{KeyBin := Off} ->
+                #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) ->
                     NewCell = setelement(?SSHAPEDOBJECT_SLOTS, Cell,
                                          ?SLOT_SET(Slots, Off, V)),
                     setelement(?STORE_CELLS, Store, arc_rt_arena_ffi:set(Id, NewCell, Cells));
@@ -450,7 +448,7 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V)
           when element(1, K) =:= ?KEY_NAMED ->
             KeyBin = ?KEY_TEXT(K),
             case Offs of
-                #{KeyBin := Off} ->
+                #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) ->
                     NewCell = setelement(?SSHAPEDOBJECT_SLOTS, Cell,
                                          ?SLOT_SET(Slots, Off, V)),
                     setelement(?STORE_CELLS, Store, arc_rt_arena_ffi:set(Id, NewCell, Cells));
@@ -634,9 +632,9 @@ chain_lacks_index(_, ?NONE, _, _) -> true;
 chain_lacks_index(_, _, _, 0) -> false;
 chain_lacks_index(Cells, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
     case arc_rt_arena_ffi:get(P, Cells) of
-        {?SSHAPEDOBJECT_TAG, _, Proto, _, Offs} ->
-            (not is_map_key(integer_to_binary(Idx), Offs))
-                andalso chain_lacks_index(Cells, Proto, Idx, Fuel - 1);
+        %% a shape holds names only, and no name spells an index
+        {?SSHAPEDOBJECT_TAG, _, Proto, _, _} ->
+            chain_lacks_index(Cells, Proto, Idx, Fuel - 1);
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length}, Proto, _, _, _, _}
           when Idx >= Length ->
             chain_lacks_index(Cells, Proto, Idx, Fuel - 1);

@@ -401,9 +401,9 @@ enc({?HANDLE_TAG, Id}, {Cells, OP, AP, _} = Cx, Ind, Seen) ->
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs}
           when (Proto =:= {?SOME, {?HANDLE_TAG, OP}} orelse Proto =:= ?NONE),
-               not is_map_key(<<"toJSON">>, Offs) ->
-            Pairs = [{KB, ?SLOT_AT(Slots, Off)}
-                     || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))],
+               not is_map_key(?KEY_ID(?TO_JSON_KEY), Offs) ->
+            Pairs = [{?KEY_TEXT(K), ?SLOT_AT(Slots, Off)}
+                     || {K, Off} <- lists:keysort(2, maps:values(Offs))],
             enc_object(Pairs, Cx, Ind, [Id | Seen]);
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, ?ELEMS_NONE, _}
           when (Proto =:= {?SOME, {?HANDLE_TAG, OP}} orelse Proto =:= ?NONE),

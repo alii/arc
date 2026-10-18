@@ -181,7 +181,7 @@ set_named_ic(St, Obj, K, V, Strict, _) ->
 
 slot_offset(_, Cell, K) ->
     case element(?SSHAPEDOBJECT_OFFSETS, Cell) of
-        #{?KEY_TEXT(K) := Off} -> Off;
+        #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) -> Off;
         _ -> miss
     end.
 
@@ -311,7 +311,7 @@ shaped_run(St, Store, Cells, Id, Obj, Sid, P, Slots, [K | Ks], [V | Vs],
     case Shapes of
         #{Sid := Desc} ->
             case element(?SHAPE_OFFSETS, Desc) of
-                #{?KEY_TEXT(K) := Off} ->
+                #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) ->
                     shaped_run(St, Store, Cells, Id, Obj, Sid, P,
                                ?SLOT_SET(Slots, Off, V), Ks, Vs, Strict,
                                Shapes, true);

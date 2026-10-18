@@ -68,7 +68,7 @@ get_named_site(St, Recv, K, _) -> read_prim(St, Recv, K).
 read_named(St, Store, Cells, Recv, {?SSHAPEDOBJECT_TAG, Sid, Proto, Slots, Offs},
            K, Site) ->
     case Offs of
-        #{?KEY_TEXT(K) := Off} ->
+        #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) ->
             {?SLOT_AT(Slots, Off), ic_fill(St, Store, Site, Sid, Off, K)};
         _ ->
             read_proto(St, Cells, element(?STORE_SHAPES, Store), Proto, Recv,
@@ -124,7 +124,7 @@ proto_read(Cells, Shapes, {?SOME, {?HANDLE_TAG, Id}}, K, Fuel) ->
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs} ->
             case Offs of
-                #{?KEY_TEXT(K) := Off} -> ?SLOT_AT(Slots, Off);
+                #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) -> ?SLOT_AT(Slots, Off);
                 _ -> proto_read(Cells, Shapes, Proto, K, Fuel - 1)
             end;
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
@@ -182,7 +182,7 @@ global_get(St, K) ->
 
 peek_named(_, {?SSHAPEDOBJECT_TAG, _, _, Slots, Offs}, K) ->
     case Offs of
-        #{?KEY_TEXT(K) := Off} -> ?SLOT_AT(Slots, Off);
+        #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) -> ?SLOT_AT(Slots, Off);
         _ -> miss
     end;
 peek_named(_, Cell, K) when element(1, Cell) =:= ?SOBJECT_TAG ->
@@ -395,7 +395,7 @@ plain_define(Cell, PK, V, Store) ->
 
 shaped_define(Shapes, {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Shaped, K, V) ->
     case Offs of
-        #{?KEY_TEXT(K) := Off} ->
+        #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) ->
             setelement(?SSHAPEDOBJECT_SLOTS, Shaped, ?SLOT_SET(Slots, Off, V));
         _ ->
             case shaped_next(Shapes, Sid, K) of
@@ -544,7 +544,7 @@ index_read(_, _) -> miss.
 
 named_read(Cells, Shapes, {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs}, K) ->
     case Offs of
-        #{?KEY_TEXT(K) := Off} -> ?SLOT_AT(Slots, Off);
+        #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) -> ?SLOT_AT(Slots, Off);
         _ -> proto_read(Cells, Shapes, Proto, K, ?MAX_PROTO_HOPS)
     end;
 named_read(Cells, Shapes, Cell, K) when element(1, Cell) =:= ?SOBJECT_TAG ->
@@ -755,7 +755,7 @@ shape_slots_append(Slots, V) -> erlang:append_element(Slots, V).
 shaped_write(Cells, Shapes, {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Shaped, K,
              V) ->
     case Offs of
-        #{?KEY_TEXT(K) := Off} ->
+        #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) ->
             setelement(?SSHAPEDOBJECT_SLOTS, Shaped, ?SLOT_SET(Slots, Off, V));
         _ ->
             case shaped_next(Shapes, Sid, K) of
@@ -811,7 +811,7 @@ named_write_walk(Cells, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
     case arc_rt_arena_ffi:get(PId, Cells) of
         {?SSHAPEDOBJECT_TAG, _, P2, _, Offs} ->
             case Offs of
-                #{?KEY_TEXT(K) := _} -> true;
+                #{?KEY_ID(K) := {SK, _}} when ?SAME_TEXT(SK, K) -> true;
                 _ -> named_write_walk_next(Cells, Shapes, P2, K, Fuel)
             end;
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
@@ -880,12 +880,12 @@ plain_copy_data_props(_, _, _) -> copy_miss.
 %% follows shape transitions that exist already; the long way makes new ones
 shaped_merge([], _, Sid, Offs, Slots) -> {Sid, Offs, Slots};
 shaped_merge([{?PROTO_KEY, _} | _], _, _, _, _) -> miss;
-shaped_merge([{{?KEY_NAMED, _, KB}, V} | Rest], Shapes, Sid, Offs, Slots) ->
+shaped_merge([{K, V} | Rest], Shapes, Sid, Offs, Slots) ->
     case Offs of
-        #{KB := Off} ->
+        #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) ->
             shaped_merge(Rest, Shapes, Sid, Offs, ?SLOT_SET(Slots, Off, V));
         _ ->
-            case ?SHAPED_NEXT(Shapes, Sid, KB) of
+            case ?SHAPED_NEXT(Shapes, Sid, ?KEY_TEXT(K)) of
                 miss -> miss;
                 {To, ToOffs} ->
                     shaped_merge(Rest, Shapes, To, ToOffs,
@@ -904,8 +904,7 @@ source_pairs({?SOBJECT_TAG, ?ORDINARY, _, Props, [], ?ELEMS_NONE, _}) ->
              || {K, P} <- Sorted, element(?DATAPROPERTY_ENUMERABLE, P) =:= true]
     end;
 source_pairs({?SSHAPEDOBJECT_TAG, _, _, Slots, Offs}) ->
-    [{arc_bytecode_key_ffi:named(KB), ?SLOT_AT(Slots, Off)}
-     || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))];
+    [{K, ?SLOT_AT(Slots, Off)} || {K, Off} <- lists:keysort(2, maps:values(Offs))];
 source_pairs(_) -> miss.
 
 plain_named({{?KEY_NAMED, _, _}, P}) -> element(1, P) =:= ?DATAPROPERTY_TAG;
@@ -931,7 +930,7 @@ plain_for_in_keys(_, _) -> miss.
 
 for_in_chain(_, _, _, _, 0) -> miss;
 for_in_chain(Cells, {?SSHAPEDOBJECT_TAG, _, Proto, _, Offs}, Seen, Acc, Fuel) ->
-    Keys = [KB || {KB, _} <- lists:keysort(2, maps:to_list(Offs))],
+    Keys = [?KEY_TEXT(K) || {K, _} <- lists:keysort(2, maps:values(Offs))],
     for_in_add(Cells, Proto, Keys, [], Seen, Acc, Fuel);
 for_in_chain(Cells, {?SOBJECT_TAG, Kind, Proto, Props, _, ?ELEMS_NONE, _},
              Seen, Acc, Fuel) when Kind =:= ?ORDINARY; Kind =:= ?GLOBALOBJ ->
@@ -969,8 +968,8 @@ plain_own_enum_pairs(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_SIZE 
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, _, _, Slots, Offs} ->
-            {plain_pairs, [{KB, ?SLOT_AT(Slots, Off)}
-                           || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))]};
+            {plain_pairs, [{?KEY_TEXT(K), ?SLOT_AT(Slots, Off)}
+                           || {K, Off} <- lists:keysort(2, maps:values(Offs))]};
         {?SOBJECT_TAG, ?ORDINARY, _, Props, _, ?ELEMS_NONE, _} ->
             case lists:all(fun plain_named/1, maps:to_list(Props)) of
                 false -> miss;

@@ -58,24 +58,43 @@ fn read_object(st: Agent, h: Handle) -> Cell {
 }
 
 fn own_property_shaped(
-  offsets: Dict(BitArray, Int),
+  offsets: types.ShapeOffsets,
   slots: types.ShapeSlots,
   pk: PropertyKey,
 ) -> Option(Property) {
+  use off <- option.map(shape_offset(offsets, pk))
+  DataProperty(
+    value: shape_slots_get(slots, off),
+    writable: True,
+    enumerable: True,
+    configurable: True,
+    seq: off,
+  )
+}
+
+type ShapeLookup {
+  SlotAt(offset: Int)
+  NoSlot
+  // another name with the same id has the place this one would take
+  IdTaken
+}
+
+fn look_up_shape(offsets: types.ShapeOffsets, pk: PropertyKey) -> ShapeLookup {
   case pk {
-    Private(..) -> None
-    _ ->
-      case dict.get(offsets, bit_array.from_string(key.to_text(pk))) {
-        Ok(off) ->
-          Some(DataProperty(
-            value: shape_slots_get(slots, off),
-            writable: True,
-            enumerable: True,
-            configurable: True,
-            seq: off,
-          ))
-        Error(Nil) -> None
+    Named(id, name) ->
+      case dict.get(offsets, id) {
+        Ok(#(Named(_, held), off)) if held == name -> SlotAt(off)
+        Ok(_) -> IdTaken
+        Error(Nil) -> NoSlot
       }
+    Index(_) | Private(..) -> NoSlot
+  }
+}
+
+fn shape_offset(offsets: types.ShapeOffsets, pk: PropertyKey) -> Option(Int) {
+  case look_up_shape(offsets, pk) {
+    SlotAt(off) -> Some(off)
+    NoSlot | IdTaken -> None
   }
 }
 
@@ -125,12 +144,9 @@ pub fn as_sobject(cell: Cell) -> Cell {
   case cell {
     SShapedObject(proto:, slots:, offsets:, ..) -> {
       let props =
-        dict.fold(offsets, prop_map.new(), fn(acc, key_bin, off) {
+        dict.fold(offsets, prop_map.new(), fn(acc, _id, slot) {
+          let #(key, off) = slot
           let value = shape_slots_get(slots, off)
-          let key = case bit_array.to_string(key_bin) {
-            Ok(s) -> key.canonical(s)
-            Error(Nil) -> names.empty
-          }
           prop_map.insert(
             acc,
             key,
@@ -168,14 +184,14 @@ pub fn devolve(st: Agent, h: Handle) -> Agent {
 // it leaves its shape so each new key does not mint another one
 pub fn devolve_dictionary(st: Agent, receiver: JsVal, key: ObjectKey) -> Agent {
   case types.classify(receiver), key {
-    types.KHandle(h), StringKey(Named(_, name)) ->
+    types.KHandle(h), StringKey(Named(..) as pk) ->
       case rt_store.cell_get(st, h) {
         SShapedObject(proto: Some(proto), offsets:, ..) as s
           if proto == st.realm.object.prototype
         ->
-          case dict.has_key(offsets, bit_array.from_string(name)) {
-            True -> st
-            False -> rt_store.cell_set(st, h, as_sobject(s))
+          case shape_offset(offsets, pk) {
+            Some(_) -> st
+            None -> rt_store.cell_set(st, h, as_sobject(s))
           }
         _ -> st
       }
@@ -998,8 +1014,8 @@ fn set_on_receiver(
     KHandle(recv_h) -> {
       case read_object(st, recv_h), key {
         SShapedObject(shape_id:, proto:, slots:, offsets:),
-          StringKey(Named(_, name))
-        -> set_own_shaped(st, recv_h, shape_id, proto, slots, offsets, name, v)
+          StringKey(Named(..) as pk)
+        -> set_own_shaped(st, recv_h, shape_id, proto, slots, offsets, pk, v)
         SObject(kind: ProxyObj(..), ..), StringKey(Named(..))
         | SObject(kind: ProxyObj(..), ..), StringKey(Index(_))
         | SObject(kind: ProxyObj(..), ..), SymbolKey(_)
@@ -1048,13 +1064,15 @@ fn set_own_shaped(
   shape_id: Int,
   proto: Option(Handle),
   slots: types.ShapeSlots,
-  offsets: Dict(BitArray, Int),
-  name: String,
+  offsets: types.ShapeOffsets,
+  pk: PropertyKey,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let key_bin = bit_array.from_string(name)
-  case dict.get(offsets, key_bin) {
-    Ok(off) -> {
+  let as_dictionary = fn() {
+    set_on_receiver(devolve(st, h), types.mk_object(h), StringKey(pk), v)
+  }
+  case look_up_shape(offsets, pk) {
+    SlotAt(off) -> {
       let slots = shape_slots_set(slots, off, v)
       #(
         True,
@@ -1065,16 +1083,13 @@ fn set_own_shaped(
         ),
       )
     }
-    Error(Nil) -> {
-      use <- bool.lazy_guard(dict.size(offsets) >= limits.max_shape_slots, fn() {
-        set_on_receiver(
-          devolve(st, h),
-          types.mk_object(h),
-          StringKey(named(name)),
-          v,
-        )
-      })
-      case shape_after(st, shape_id, key_bin) {
+    IdTaken -> as_dictionary()
+    NoSlot -> {
+      use <- bool.lazy_guard(
+        dict.size(offsets) >= limits.max_shape_slots,
+        as_dictionary,
+      )
+      case shape_after(st, shape_id, pk) {
         None -> #(False, st)
         Some(#(to, offsets, st)) -> {
           let slots = shape_slots_append(slots, v)
@@ -1094,18 +1109,20 @@ fn set_own_shaped(
 
 // a literal's shape, one step from the empty shape however many keys it has:
 // the step is filed under its keys joined by a byte no property name holds.
+// the compilers only ask for keys with distinct ids.
 // also called by name from arc_rt_obj_ic_ffi
 pub fn literal_shape(
   st: Agent,
   keys: List(PropertyKey),
-) -> #(Int, Dict(BitArray, Int), Agent) {
-  let keys = list.map(keys, fn(k) { bit_array.from_string(key.to_text(k)) })
+) -> #(Int, types.ShapeOffsets, Agent) {
   let store = st.store
   let assert Ok(ShapeDesc(transitions:, ..) as empty) =
     dict.get(store.shapes, 0)
     as "rt_obj: the empty shape is missing (engine invariant)"
   let step =
-    list.fold(keys, <<>>, fn(joined, key) { <<joined:bits, 255, key:bits>> })
+    list.fold(keys, <<>>, fn(joined, k) {
+      <<joined:bits, 255, key.to_text(k):utf8>>
+    })
   let known =
     dict.get(transitions, step)
     |> result.try(fn(to) {
@@ -1115,7 +1132,9 @@ pub fn literal_shape(
   use <- result.lazy_unwrap(known)
   let to = store.next_shape
   let offsets =
-    dict.from_list(list.index_map(keys, fn(key, slot) { #(key, slot) }))
+    dict.from_list(
+      list.index_map(keys, fn(k, slot) { #(key.id(k), #(k, slot)) }),
+    )
   let shapes =
     store.shapes
     |> dict.insert(
@@ -1142,8 +1161,9 @@ pub fn literal_shape(
 pub fn shape_after(
   st: Agent,
   shape_id: Int,
-  key_bin: BitArray,
-) -> Option(#(Int, Dict(BitArray, Int), Agent)) {
+  pk: PropertyKey,
+) -> Option(#(Int, types.ShapeOffsets, Agent)) {
+  let key_bin = bit_array.from_string(key.to_text(pk))
   let store = st.store
   use ShapeDesc(slot_count:, offsets:, transitions:) as from <- option.map(
     dict.get(store.shapes, shape_id) |> option.from_result,
@@ -1156,7 +1176,7 @@ pub fn shape_after(
     })
   use <- result.lazy_unwrap(known)
   let to = store.next_shape
-  let offsets = dict.insert(offsets, key_bin, slot_count)
+  let offsets = dict.insert(offsets, key.id(pk), #(pk, slot_count))
   let shapes =
     store.shapes
     |> dict.insert(
@@ -2016,13 +2036,10 @@ pub fn own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
   }
 }
 
-fn shaped_own_keys(offsets: Dict(BitArray, Int)) -> List(ObjectKey) {
-  dict.to_list(offsets)
+fn shaped_own_keys(offsets: types.ShapeOffsets) -> List(ObjectKey) {
+  dict.values(offsets)
   |> list.sort(fn(a, b) { int.compare(a.1, b.1) })
-  |> list.filter_map(fn(pair) {
-    bit_array.to_string(pair.0)
-    |> result.map(fn(name) { StringKey(named(name)) })
-  })
+  |> list.map(fn(slot) { StringKey(slot.0) })
 }
 
 fn sobject_own_keys(st: Agent, cell: Cell) -> #(List(ObjectKey), Agent) {
@@ -3300,10 +3317,10 @@ pub fn define_own_data(
   configurable configurable: Bool,
 ) -> #(Bool, Agent) {
   case key, writable && enumerable && configurable {
-    StringKey(Named(_, name)), True ->
+    StringKey(Named(..) as pk), True ->
       case rt_store.cell_get(st, h) {
         SShapedObject(shape_id:, proto:, slots:, offsets:) ->
-          set_own_shaped(st, h, shape_id, proto, slots, offsets, name, value)
+          set_own_shaped(st, h, shape_id, proto, slots, offsets, pk, value)
         _ ->
           write_own_data(
             st,

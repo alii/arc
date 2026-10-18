@@ -326,7 +326,7 @@ call_via_walk(St, Recv = {?HANDLE_TAG, RId}, RCell, K, Args, Site)
             call_found_fill(St, Cells, V, K, Recv, Args,
                             {Site, {?ICOWN_TAG, RId, RCell}, []});
         V when Ic =/= none ->
-            #{?KEY_TEXT(K) := Off} = element(?SSHAPEDOBJECT_OFFSETS, RCell),
+            #{?KEY_ID(K) := {_, Off}} = element(?SSHAPEDOBJECT_OFFSETS, RCell),
             call_found_fill(St, Cells, V, K, Recv, Args,
                             {Site,
                              {ic_shaped_own,
@@ -439,7 +439,7 @@ own_named(Cell, K) ->
 
 own_shaped(RCell, K) ->
     case element(?SSHAPEDOBJECT_OFFSETS, RCell) of
-        #{?KEY_TEXT(K) := Off} -> ?SLOT_AT(element(?SSHAPEDOBJECT_SLOTS, RCell), Off);
+        #{?KEY_ID(K) := {SK, Off}} when ?SAME_TEXT(SK, K) -> ?SLOT_AT(element(?SSHAPEDOBJECT_SLOTS, RCell), Off);
         _ -> absent
     end.
 

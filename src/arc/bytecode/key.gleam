@@ -18,6 +18,15 @@ pub type PropertyKey {
   Private(id: Int, text: String)
 }
 
+/// what a map of properties files the key under: its id, or for an index a
+/// negative number, which no id is
+pub fn id(key: PropertyKey) -> Int {
+  case key {
+    Named(id:, ..) | Private(id:, ..) -> id
+    Index(n) -> -1 - n
+  }
+}
+
 pub fn named(name: String) -> PropertyKey {
   Named(hash(name) * 2, name)
 }

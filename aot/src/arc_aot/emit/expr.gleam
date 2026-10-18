@@ -2760,22 +2760,25 @@ type PlainMember {
 fn plain_members(
   ps: List(ast.Property),
   acc: List(PlainMember),
-  seen: set.Set(String),
+  seen: set.Set(Int),
 ) -> #(List(PlainMember), List(ast.Property)) {
   let done = fn() { #(list.reverse(acc), ps) }
   case ps {
     [ast.InitProperty(key:, value:, ..), ..rest] ->
       case plain_member_name(key) {
-        Some(name) ->
-          case set.contains(seen, name) {
+        Some(name) -> {
+          // a name again, or one that shares an id with an earlier one
+          let id = key.id(key.named(name))
+          case set.contains(seen, id) {
             True -> done()
             False ->
               plain_members(
                 rest,
                 [PlainMember(key:, value:, name:), ..acc],
-                set.insert(seen, name),
+                set.insert(seen, id),
               )
           }
+        }
         None -> done()
       }
     _ -> done()

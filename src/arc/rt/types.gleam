@@ -1810,7 +1810,7 @@ pub type Cell {
     shape_id: Int,
     proto: Option(Handle),
     slots: ShapeSlots,
-    offsets: Dict(BitArray, Int),
+    offsets: ShapeOffsets,
   )
 }
 
@@ -1832,10 +1832,15 @@ pub fn plain_object(
 
 pub type ShapeSlots
 
+/// which slot each name has, filed under the key's id. No two names in one
+/// shape share an id: an object that needs both leaves its shape
+pub type ShapeOffsets =
+  Dict(Int, #(PropertyKey, Int))
+
 pub type ShapeDesc {
   ShapeDesc(
     slot_count: Int,
-    offsets: Dict(BitArray, Int),
+    offsets: ShapeOffsets,
     transitions: Dict(BitArray, Int),
   )
 }

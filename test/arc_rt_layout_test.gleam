@@ -180,7 +180,7 @@ pub fn store_test() {
   let desc =
     ShapeDesc(
       slot_count: 1,
-      offsets: dict.from_list([#(<<"k":utf8>>, 0)]),
+      offsets: offsets_of(["k"]),
       transitions: dict.new(),
     )
   let store =
@@ -478,7 +478,7 @@ pub fn kernel_macros_test() {
   let to =
     ShapeDesc(
       slot_count: 1,
-      offsets: dict.from_list([#(k, 0)]),
+      offsets: offsets_of(["k"]),
       transitions: dict.new(),
     )
   let from =
@@ -493,11 +493,19 @@ pub fn kernel_macros_test() {
   assert shaped_next(shapes, 3, k) == dyn(Miss)
 }
 
+fn offsets_of(names: List(String)) -> types.ShapeOffsets {
+  dict.from_list(
+    list.index_map(names, fn(name, slot) {
+      #(key.id(named(name)), #(named(name), slot))
+    }),
+  )
+}
+
 pub fn sshaped_object_test() {
   let s0 = types.mk_string("s0")
   let s1 = types.mk_string("s1")
   let sl = slots([s0, s1, types.mk_string("s2")])
-  let offs = dict.from_list([#(<<"k":utf8>>, 0)])
+  let offs = offsets_of(["k"])
   let obj =
     SShapedObject(
       shape_id: 21,
@@ -525,7 +533,7 @@ pub fn shape_desc_test() {
   let desc =
     ShapeDesc(
       slot_count: 2,
-      offsets: dict.from_list([#(<<"a":utf8>>, 0), #(<<"b":utf8>>, 1)]),
+      offsets: offsets_of(["a", "b"]),
       transitions: dict.from_list([#(<<"c":utf8>>, 9)]),
     )
   assert tag_of(desc) == tag("SHAPE_TAG")

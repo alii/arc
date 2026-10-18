@@ -239,6 +239,8 @@
 %% named and private keys are {Tag, Id, Text}
 -define(KEY_ID(K), element(2, K)).
 -define(KEY_TEXT(K), element(3, K)).
+%% two keys with one id are the same key only if this holds too
+-define(SAME_TEXT(A, B), (element(3, A) =:= element(3, B))).
 %% ids as arc_bytecode_key_ffi:named/1 gives them, checked by arc_rt_layout_test
 -define(LENGTH_KEY, {?KEY_NAMED, 450907079707063178, <<"length">>}).
 -define(NAME_KEY, {?KEY_NAMED, 174053263642217938, <<"name">>}).

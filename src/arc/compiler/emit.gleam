@@ -4231,7 +4231,7 @@ fn literal_head(
   properties: List(ast.Property),
   keys: List(key.PropertyKey),
   head: List(NamedMember),
-  seen: Set(String),
+  seen: Set(Int),
 ) -> LiteralHead {
   let done = LiteralHead(keys:, members: list.reverse(head), rest: properties)
   case properties {
@@ -4242,7 +4242,7 @@ fn literal_head(
             rest,
             [pk, ..keys],
             [NamedMember(name:, value:), ..head],
-            set.insert(seen, name),
+            set.insert(seen, key.id(pk)),
           )
         None -> done
       }
@@ -4252,7 +4252,7 @@ fn literal_head(
 
 fn literal_key(
   k: ast.PropertyName,
-  seen: Set(String),
+  seen: Set(Int),
 ) -> Option(#(String, key.PropertyKey)) {
   let name = case k {
     ast.IdentifierName(name:, ..) -> Some(name)
@@ -4260,9 +4260,14 @@ fn literal_key(
     _ -> None
   }
   use name <- option.then(name)
-  use <- bool.guard(name == "__proto__" || set.contains(seen, name), None)
+  use <- bool.guard(name == "__proto__", None)
+  // a name again, or one that shares an id with an earlier one
   case key.canonical(name) {
-    key.Named(..) as pk -> Some(#(name, pk))
+    key.Named(id:, ..) as pk ->
+      case set.contains(seen, id) {
+        True -> None
+        False -> Some(#(name, pk))
+      }
     _ -> None
   }
 }
