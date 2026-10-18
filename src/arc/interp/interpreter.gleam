@@ -2116,7 +2116,30 @@ fn loop(
         [recv, ..rest] -> {
           let v = kernel.get_field(agent, recv, k)
           case kernel.is(v, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+            True ->
+              case kernel.find_accessor(agent, recv, k) {
+                kernel.Accessor(get: Some(getter), ..) ->
+                  loop_call(
+                    state,
+                    drive,
+                    pc,
+                    stack,
+                    locals,
+                    agent,
+                    code,
+                    constants,
+                    r0,
+                    r1,
+                    kernel.cell_of(agent, getter),
+                    getter,
+                    recv,
+                    [],
+                    rest,
+                    None,
+                    kernel.literal([kernel.Undefined]),
+                  )
+                _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+              }
             False ->
               loop(
                 state,
@@ -2289,21 +2312,40 @@ fn loop(
     }
 
     GetLocalField(index, key.Named(_) as k) -> {
-      let v =
-        kernel.get_field(
-          agent,
-          case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          },
-          k,
-        )
+      let recv = case index < 0 {
+        True ->
+          case index {
+            -1 -> r0
+            _ -> r1
+          }
+        False -> tuple_array.element(index + 1, locals)
+      }
+      let v = kernel.get_field(agent, recv, k)
       case kernel.is(v, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+        True ->
+          case kernel.find_accessor(agent, recv, k) {
+            kernel.Accessor(get: Some(getter), ..) ->
+              loop_call(
+                state,
+                drive,
+                pc,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+                kernel.cell_of(agent, getter),
+                getter,
+                recv,
+                [],
+                stack,
+                None,
+                kernel.literal([kernel.Undefined]),
+              )
+            _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+          }
         False ->
           loop(
             state,
