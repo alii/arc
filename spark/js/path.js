@@ -50,67 +50,8 @@ function isWindowsDeviceRoot(code) {
          (code >= CHAR_LOWERCASE_A && code <= CHAR_LOWERCASE_Z);
 }
 
-function normalizeString(path, allowAboveRoot, separator, isPathSeparator) {
-  let res = "";
-  let lastSegmentLength = 0;
-  let lastSlash = -1;
-  let dots = 0;
-  let code = 0;
-  for (let i = 0; i <= path.length; ++i) {
-    if (i < path.length)
-      code = path.charCodeAt(i);
-    else if (isPathSeparator(code))
-      break;
-    else
-      code = CHAR_FORWARD_SLASH;
-
-    if (isPathSeparator(code)) {
-      if (lastSlash === i - 1 || dots === 1) {
-      } else if (dots === 2) {
-        if (res.length < 2 || lastSegmentLength !== 2 ||
-            res.charCodeAt(res.length - 1) !== CHAR_DOT ||
-            res.charCodeAt(res.length - 2) !== CHAR_DOT) {
-          if (res.length > 2) {
-            const lastSlashIndex = res.length - lastSegmentLength - 1;
-            if (lastSlashIndex === -1) {
-              res = "";
-              lastSegmentLength = 0;
-            } else {
-              res = res.slice(0, lastSlashIndex);
-              lastSegmentLength =
-                res.length - 1 - res.lastIndexOf(separator);
-            }
-            lastSlash = i;
-            dots = 0;
-            continue;
-          } else if (res.length !== 0) {
-            res = "";
-            lastSegmentLength = 0;
-            lastSlash = i;
-            dots = 0;
-            continue;
-          }
-        }
-        if (allowAboveRoot) {
-          res += res.length > 0 ? `${separator}..` : "..";
-          lastSegmentLength = 2;
-        }
-      } else {
-        if (res.length > 0)
-          res += `${separator}${path.slice(lastSlash + 1, i)}`;
-        else
-          res = path.slice(lastSlash + 1, i);
-        lastSegmentLength = i - lastSlash - 1;
-      }
-      lastSlash = i;
-      dots = 0;
-    } else if (code === CHAR_DOT && dots !== -1) {
-      ++dots;
-    } else {
-      dots = -1;
-    }
-  }
-  return res;
+function normalizeString(path, allowAboveRoot, separator) {
+  return native.normalizeString(path, allowAboveRoot, separator);
 }
 
 function formatExt(ext) {
@@ -248,8 +189,7 @@ const win32 = {
       }
     }
 
-    resolvedTail = normalizeString(resolvedTail, !resolvedAbsolute, "\\",
-                                   isPathSeparator);
+    resolvedTail = normalizeString(resolvedTail, !resolvedAbsolute, "\\");
 
     return resolvedAbsolute ?
       `${resolvedDevice}\\${resolvedTail}` :
@@ -336,7 +276,7 @@ const win32 = {
 
     let tail = rootEnd < len ?
       normalizeString(path.slice(rootEnd),
-                      !isAbsolute, "\\", isPathSeparator) :
+                      !isAbsolute, "\\") :
       "";
     if (tail.length === 0 && !isAbsolute)
       tail = ".";
@@ -982,8 +922,7 @@ const posix = {
         cwd.charCodeAt(0) === CHAR_FORWARD_SLASH;
     }
 
-    resolvedPath = normalizeString(resolvedPath, !resolvedAbsolute, "/",
-                                   isPosixPathSeparator);
+    resolvedPath = normalizeString(resolvedPath, !resolvedAbsolute, "/");
 
     if (resolvedAbsolute) {
       return `/${resolvedPath}`;
@@ -1000,7 +939,7 @@ const posix = {
     const isAbsolute = path[0] === "/";
     const trailingSeparator = path[path.length - 1] === "/";
 
-    path = normalizeString(path, !isAbsolute, "/", isPosixPathSeparator);
+    path = normalizeString(path, !isAbsolute, "/");
 
     if (path.length === 0) {
       if (isAbsolute)
