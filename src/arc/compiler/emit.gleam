@@ -4069,11 +4069,16 @@ fn emit_switch(
       }
     })
 
+  // a case can be entered past the declarations of the ones before it
+  let initialized = e.initialized
   use e <- result.try(
     list.try_fold(arms, e, fn(e, arm) {
-      emit_stmts(emit_ir(e, IrLabel(arm.body)), arm.consequent)
+      Emitter(..e, initialized:)
+      |> emit_ir(IrLabel(arm.body))
+      |> emit_stmts(arm.consequent)
     }),
   )
+  let e = Emitter(..e, initialized:)
 
   let e = emit_ir(e, IrLabel(end_label))
   let e = leave_scope(e, save)
