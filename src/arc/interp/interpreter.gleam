@@ -518,8 +518,130 @@ fn loop(
             r0,
             r1,
           )
-        False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+        // only the outermost run collects
+        False ->
+          case state.outer_depth == 0 {
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
       }
+
+    BoxLocal(index) ->
+      case index < 0 {
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+        False -> {
+          let #(box, agent) =
+            rt_store.cell_new(
+              agent,
+              SBox(tuple_array.element(index + 1, locals)),
+            )
+          loop(
+            state,
+            drive,
+            pc + 1,
+            stack,
+            tuple_array.set_unchecked(index, mk_object(box), locals),
+            agent,
+            code,
+            constants,
+            r0,
+            r1,
+          )
+        }
+      }
+
+    ToObject ->
+      case stack {
+        [val, ..] ->
+          case kernel.is_object(val) {
+            True ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+          }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    ToStringVal ->
+      case stack {
+        [val, ..] ->
+          case kernel.is_string(val) {
+            True ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+          }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    ArrayFrom(count) ->
+      case pop_n(stack, count) {
+        Some(#(items, rest)) -> {
+          let #(arr, agent) = rt_obj.new_array(agent, items)
+          loop(
+            state,
+            drive,
+            pc + 1,
+            [arr, ..rest],
+            locals,
+            agent,
+            code,
+            constants,
+            r0,
+            r1,
+          )
+        }
+        None -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    CreateRestArray(from_index) -> {
+      let #(arr, agent) =
+        rt_obj.new_array(agent, list.drop(state.call_args, from_index))
+      loop(
+        state,
+        drive,
+        pc + 1,
+        [arr, ..stack],
+        locals,
+        agent,
+        code,
+        constants,
+        r0,
+        r1,
+      )
+    }
 
     Jump(Pc(target)) ->
       loop(state, drive, target, stack, locals, agent, code, constants, r0, r1)

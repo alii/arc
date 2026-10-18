@@ -3,7 +3,7 @@
 -export([for_in_list/1, for_in_next/1,
          type_of/2,
          box_get/2, cell_of/2, list_from_array_like/2, instance_of/4,
-         capture_env/2]).
+         capture_env/2, is_object/1, is_string/1]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -84,6 +84,11 @@ hole_free(L) ->
         true -> miss;
         false -> L
     end.
+
+is_object({?HANDLE_TAG, _}) -> true;
+is_object(_) -> false.
+
+is_string(V) -> ?IS_STR(V).
 
 %% tdz box misses
 box_get(St, {?HANDLE_TAG, Id}) ->

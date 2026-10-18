@@ -91,6 +91,12 @@ pub fn private_put(store: Store, obj: JsVal, name: JsVal, v: JsVal) -> Store
 @external(erlang, "arc_interp_prop_ffi", "has_property")
 pub fn has_property(st: Agent, key: JsVal, obj: JsVal) -> JsVal
 
+@external(erlang, "arc_interp_ffi", "is_object")
+pub fn is_object(v: JsVal) -> Bool
+
+@external(erlang, "arc_interp_ffi", "is_string")
+pub fn is_string(v: JsVal) -> Bool
+
 @external(erlang, "arc_interp_ffi", "instance_of")
 pub fn instance_of(
   st: Agent,
