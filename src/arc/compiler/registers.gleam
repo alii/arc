@@ -1,7 +1,6 @@
 import arc/bytecode/opcode.{type Op}
 import arc/internal/tuple_array
 import arc/rt/bytecode
-import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -9,21 +8,20 @@ import gleam/option.{Some}
 import gleam/result
 import gleam/set.{type Set}
 
-// picks up to two loop-written slots to keep out of the locals tuple
+// picks up to two written slots to keep out of the locals tuple, where every
+// write would copy it; a write inside a loop counts for more
 pub fn assign_regs(
   code: tuple_array.TupleArray(Op),
   pinned: Set(Int),
 ) -> #(tuple_array.TupleArray(Op), bytecode.Regs) {
   let ops = tuple_array.to_list(code)
-  // only a slot written inside a loop is ever picked
-  use <- bool.guard(!has_loop(ops, 0), #(code, bytecode.NoRegs))
   let #(scores, pinned) =
     score_slots(ops, loop_depths(ops), 0, cold_pcs(code), dict.new(), pinned)
   let picked =
     dict.to_list(scores)
     |> list.filter(fn(e) {
-      let #(slot, SlotScore(written_in_loop:, ..)) = e
-      written_in_loop && !set.contains(pinned, slot)
+      let #(slot, SlotScore(written:, ..)) = e
+      written && !set.contains(pinned, slot)
     })
     |> list.sort(fn(a, b) {
       let #(_, SlotScore(score: score_a, ..)) = a
@@ -55,17 +53,6 @@ pub fn assign_regs(
 }
 
 // nesting depth per pc from backward jumps
-fn has_loop(ops: List(Op), pc: Int) -> Bool {
-  case ops {
-    [] -> False
-    [op, ..rest] ->
-      case opcode.jump_target(op) {
-        Some(target) if target <= pc -> True
-        _ -> has_loop(rest, pc + 1)
-      }
-  }
-}
-
 fn loop_depths(ops: List(Op)) -> List(Int) {
   let deltas =
     list.index_fold(ops, dict.new(), fn(acc, op, pc) {
@@ -100,7 +87,7 @@ fn cold_pcs(code: tuple_array.TupleArray(Op)) -> Set(Int) {
 }
 
 type SlotScore {
-  SlotScore(score: Int, written_in_loop: Bool)
+  SlotScore(score: Int, written: Bool)
 }
 
 fn score_slots(
@@ -126,18 +113,14 @@ fn score_slots(
       let scores =
         list.fold(uses, scores, fn(scores, used) {
           let #(slot, is_write) = used
-          let SlotScore(score:, written_in_loop: hot) =
+          let SlotScore(score:, written:) =
             dict.get(scores, slot)
-            |> result.unwrap(SlotScore(score: 0, written_in_loop: False))
+            |> result.unwrap(SlotScore(score: 0, written: False))
           let add = case is_write {
             True -> w * 3
             False -> w
           }
-          dict.insert(
-            scores,
-            slot,
-            SlotScore(score + add, hot || { is_write && d > 0 }),
-          )
+          dict.insert(scores, slot, SlotScore(score + add, written || is_write))
         })
       let pinned = list.fold(opcode.pinned_slots(op), pinned, set.insert)
       score_slots(ops, depths, pc + 1, cold, scores, pinned)
