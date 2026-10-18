@@ -1,5 +1,6 @@
 %% property kernels for the interpreter; exports may answer miss, never raise
 -module(arc_interp_prop_ffi).
+-export([has_property/3]).
 -export([get_field/3, find_accessor/3, own_data/2, get_elem/3, get_elem_keep/3, put_field/5, put_elem/4,
          define_field/4, new_object/5, new_object_shaped/5, new_receiver/2, get_global/3,
          put_global/6]).
@@ -25,6 +26,47 @@ own_data(Props, K) ->
             element(?DATAPROPERTY_VALUE, Prop);
         _ -> miss
     end.
+
+%% §13.10.1 `in` over a plain chain, miss when anything exotic is on it
+has_property(St, Key, {?HANDLE_TAG, Id}) ->
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    case arc_rt_val_ffi:property_key_of(Key) of
+        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
+            has_walk(Cells, arc_rt_arena_ffi:get(Id, Cells), K, ?MAX_PROTO_HOPS);
+        {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} ->
+            case arc_rt_arena_ffi:get(Id, Cells) of
+                {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length}, _, _, _, Elems, _}
+                  when Idx < Length ->
+                    case elem_read(Elems, Idx) of
+                        miss -> miss;
+                        _ -> true
+                    end;
+                _ -> miss
+            end;
+        _ -> miss
+    end;
+has_property(_, _, _) -> miss.
+
+has_walk(_, _, _, 0) -> miss;
+has_walk(Cells, {?SSHAPEDOBJECT_TAG, _, Proto, _, Offs}, K, Fuel) ->
+    case is_map_key(element(2, K), Offs) of
+        true -> true;
+        false -> has_next(Cells, Proto, K, Fuel)
+    end;
+has_walk(Cells, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
+    case named_plain(element(?SOBJECT_KIND, Cell), K) of
+        false -> miss;
+        true ->
+            case is_map_key(K, element(?SOBJECT_PROPS, Cell)) of
+                true -> true;
+                false -> has_next(Cells, element(?SOBJECT_PROTO, Cell), K, Fuel)
+            end
+    end;
+has_walk(_, _, _, _) -> miss.
+
+has_next(_, ?NONE, _, _) -> false;
+has_next(Cells, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
+    has_walk(Cells, arc_rt_arena_ffi:get(P, Cells), K, Fuel - 1).
 
 %% accessor a plain chain lookup of K finds, else no_accessor
 find_accessor(St, {?HANDLE_TAG, Id}, K) ->

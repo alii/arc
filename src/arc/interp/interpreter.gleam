@@ -801,6 +801,7 @@ fn loop(
         [right, left, ..rest] -> {
           let r = case kind {
             binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+            binop.InOp -> kernel.has_property(agent, left, right)
             _ -> kernel.classified_binop(kind, left, right)
           }
           case kernel.is(r, kernel.Miss) {
@@ -829,6 +830,7 @@ fn loop(
           let right = tuple_array.element(const_index + 1, constants)
           let r = case kind {
             binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+            binop.InOp -> kernel.has_property(agent, left, right)
             _ -> kernel.classified_binop(kind, left, right)
           }
           case kernel.is(r, kernel.Miss) {
@@ -864,6 +866,7 @@ fn loop(
           }
           let r = case kind {
             binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+            binop.InOp -> kernel.has_property(agent, left, right)
             _ -> kernel.classified_binop(kind, left, right)
           }
           case kernel.is(r, kernel.Miss) {
@@ -905,6 +908,7 @@ fn loop(
       }
       let r = case kind {
         binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+        binop.InOp -> kernel.has_property(agent, left, right)
         _ -> kernel.classified_binop(kind, left, right)
       }
       case kernel.is(r, kernel.Miss) {
@@ -937,6 +941,7 @@ fn loop(
       let right = tuple_array.element(const_index + 1, constants)
       let r = case kind {
         binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+        binop.InOp -> kernel.has_property(agent, left, right)
         _ -> kernel.classified_binop(kind, left, right)
       }
       case kernel.is(r, kernel.Miss) {
@@ -962,6 +967,7 @@ fn loop(
         [right, left, ..rest] -> {
           let r = case kind {
             binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+            binop.InOp -> kernel.has_property(agent, left, right)
             _ -> kernel.classified_binop(kind, left, right)
           }
           case kernel.is(r, kernel.Miss) {
@@ -1008,6 +1014,7 @@ fn loop(
           let right = tuple_array.element(const_index + 1, constants)
           let r = case kind {
             binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+            binop.InOp -> kernel.has_property(agent, left, right)
             _ -> kernel.classified_binop(kind, left, right)
           }
           case kernel.is(r, kernel.Miss) {
@@ -1061,6 +1068,7 @@ fn loop(
           }
           let r = case kind {
             binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+            binop.InOp -> kernel.has_property(agent, left, right)
             _ -> kernel.classified_binop(kind, left, right)
           }
           case kernel.is(r, kernel.Miss) {
@@ -1122,6 +1130,7 @@ fn loop(
             False -> {
               let r = case kind {
                 binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+                binop.InOp -> kernel.has_property(agent, left, right)
                 _ -> kernel.classified_binop(kind, left, right)
               }
               case kernel.is(r, kernel.Miss) {
@@ -1165,6 +1174,7 @@ fn loop(
       }
       let r = case kind {
         binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
+        binop.InOp -> kernel.has_property(agent, left, right)
         _ -> kernel.classified_binop(kind, left, right)
       }
       case kernel.is(r, kernel.Miss) {
