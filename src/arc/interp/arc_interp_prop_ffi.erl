@@ -140,8 +140,7 @@ private_define(Store, {?HANDLE_TAG, Id}, Name, V) when tuple_size(Store) =:= ?ST
     end;
 private_define(_, _, _, _) -> miss.
 
-private_key(B) when is_binary(B) -> arc_bytecode_key_ffi:private(B);
-private_key({?STR_TAG, B, _, _}) -> arc_bytecode_key_ffi:private(B);
+private_key({?KEY_PRIVATE, _, _} = K) -> K;
 private_key(_) -> miss.
 
 %% accessor a plain chain lookup of K finds, else no_accessor

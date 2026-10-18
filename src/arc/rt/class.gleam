@@ -7,18 +7,19 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type MethodInstallKind, type ObjectKey,
   type Property, AccessorProperty, BytecodeFn, CompiledFn, DataProperty,
-  InstallGetter, InstallMethod, InstallSetter, KHandle, KNull, KStr, KTdz,
-  SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
+  InstallGetter, InstallMethod, InstallSetter, KHandle, KNull, KTdz, SObject,
+  StringKey, SymbolKey, classify, mk_object,
 }
 import arc/rt/val as rt_val
 import gleam/option.{type Option, None, Some}
 
-fn priv_key_text(v: JsVal) -> String {
-  case classify(v) {
-    KStr(s) -> s
-    _ -> panic as "rt_class: private-name JsVal is not KStr (M16 invariant)"
-  }
-}
+// a private name's run-time value is its property key, which no script can
+// get hold of: it only sits in the variable the class body reads it from
+@external(erlang, "arc_rt_val_ffi", "private_name_key")
+fn private_name_key(v: JsVal) -> PropertyKey
+
+@external(erlang, "gleam_stdlib", "identity")
+fn private_name_value(key: PropertyKey) -> JsVal
 
 fn object_key_display(k: ObjectKey) -> String {
   case k {
@@ -30,7 +31,7 @@ fn object_key_display(k: ObjectKey) -> String {
 // §15.7.14 mint a fresh private name
 pub fn new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
   let #(uid, st) = rt_store.next_private_id(st)
-  #(mk_string(key.private_text(source, uid)), st)
+  #(private_name_value(private(key.private_text(source, uid))), st)
 }
 
 // §15.4.4 makemethod, no-op on native/bound
@@ -227,9 +228,9 @@ pub fn private_field_add(
   priv_key: JsVal,
   v: JsVal,
 ) -> Agent {
-  let text = priv_key_text(priv_key)
-  let st = check_private_add(st, obj, text)
-  write_private_data(st, obj, private(text), v, writable: True)
+  let key = private_name_key(priv_key)
+  let st = check_private_add(st, obj, key)
+  write_private_data(st, obj, key, v, writable: True)
 }
 
 // §7.3.29; home_object already set at class definition
@@ -240,12 +241,12 @@ pub fn private_method_add(
   fn_v: JsVal,
   kind: MethodInstallKind,
 ) -> Agent {
-  let text = priv_key_text(priv_key)
-  let key = private(text)
+  let text = key.to_text(private_name_key(priv_key))
+  let key = private_name_key(priv_key)
   case kind {
     // non-writable so private set rejects methods
     InstallMethod -> {
-      let st = check_private_add(st, obj, text)
+      let st = check_private_add(st, obj, key)
       write_private_data(st, obj, key, fn_v, writable: False)
     }
     // same accessor half twice is a typeerror
@@ -253,7 +254,7 @@ pub fn private_method_add(
       let is_getter = kind == InstallGetter
       let existing = rt_obj.ordinary_own_property(st, obj, StringKey(key))
       let st = case existing {
-        None -> check_private_add(st, obj, text)
+        None -> check_private_add(st, obj, key)
         Some(AccessorProperty(get:, set:, ..)) ->
           case
             is_getter
@@ -272,8 +273,9 @@ pub fn private_method_add(
   }
 }
 
-fn check_private_add(st: Agent, obj: Handle, text: String) -> Agent {
-  case rt_obj.ordinary_own_property(st, obj, StringKey(private(text))) {
+fn check_private_add(st: Agent, obj: Handle, pk: PropertyKey) -> Agent {
+  let text = key.to_text(pk)
+  case rt_obj.ordinary_own_property(st, obj, StringKey(pk)) {
     Some(_) -> throw_private_double_init(st, text, "")
     None ->
       case rt_obj.ordinary_is_extensible(st, obj) {
@@ -369,10 +371,11 @@ fn merge_private_accessor(
 
 // §7.3.30 privateget, getter may re-enter js
 pub fn private_get(st: Agent, obj: JsVal, priv_key: JsVal) -> #(JsVal, Agent) {
-  let text = priv_key_text(priv_key)
+  let text = key.to_text(private_name_key(priv_key))
+  let key = private_name_key(priv_key)
   case classify(obj) {
     KHandle(h) ->
-      case rt_obj.ordinary_own_property(st, h, StringKey(private(text))) {
+      case rt_obj.ordinary_own_property(st, h, StringKey(key)) {
         Some(DataProperty(value:, ..)) -> #(value, st)
         Some(AccessorProperty(get: Some(getter), ..)) ->
           st.store.ops.call(st, getter, obj, [])
@@ -408,8 +411,8 @@ pub fn private_set(
   priv_key: JsVal,
   v: JsVal,
 ) -> #(JsVal, Agent) {
-  let text = priv_key_text(priv_key)
-  let key = private(text)
+  let text = key.to_text(private_name_key(priv_key))
+  let key = private_name_key(priv_key)
   case classify(obj) {
     KHandle(h) ->
       case rt_obj.ordinary_own_property(st, h, StringKey(key)) {
@@ -470,14 +473,11 @@ pub fn private_set(
 
 // §13.10.1 #x in obj
 pub fn private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
-  let text = priv_key_text(priv_key)
+  let text = key.to_text(private_name_key(priv_key))
+  let key = private_name_key(priv_key)
   case classify(obj) {
     KHandle(h) ->
-      option.is_some(rt_obj.ordinary_own_property(
-        st,
-        h,
-        StringKey(private(text)),
-      ))
+      option.is_some(rt_obj.ordinary_own_property(st, h, StringKey(key)))
     _ ->
       rt_val.throw_type_error(
         st,

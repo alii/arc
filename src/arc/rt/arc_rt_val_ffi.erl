@@ -4,7 +4,7 @@
 
 -export([as_integer/1]).
 -export([
-    classify/1, type_of/2,
+    classify/1, private_name_key/1, type_of/2,
     mk_undefined/0, mk_hole/0, mk_array_lit/1, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
     to_boolean_i32/1, to_boolean/1, logical_not/1, is_nullish/1,
@@ -19,6 +19,8 @@
 is_miss(V) -> V =:= miss.
 
 %% no catch-all: a bad wire term should crash
+private_name_key({?KEY_PRIVATE, _, _} = K) -> K.
+
 classify(undefined) -> k_undef;
 classify(null) -> k_null;
 classify(true) -> {k_bool, true};

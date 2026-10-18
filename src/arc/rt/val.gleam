@@ -63,16 +63,17 @@ pub fn throw_syntax_error(st: Agent, msg: String) -> a {
 }
 
 // §9.1.1.1.5/6 tdz read throws referenceerror
+// not by classify: the variable may hold a private name, which is no js value
 pub fn tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
-  case classify(v) {
-    KTdz -> {
+  case v == types.mk_tdz() {
+    True -> {
       let n = bit_array.to_string(name) |> result.unwrap("<name>")
       throw_reference_error(
         st,
         "Cannot access '" <> n <> "' before initialization",
       )
     }
-    _ -> st
+    False -> st
   }
 }
 
