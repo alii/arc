@@ -268,7 +268,7 @@ ic_probe(Cells, RId, RCell, K, Ways) when element(1, RCell) =:= ?SOBJECT_TAG ->
                 {?SOME, {?HANDLE_TAG, PId}} = Proto ->
                     case Ways of
                         #{{?ICPLAIN_TAG, PId} := {Chain, Fn, Kind}} ->
-                            Own = is_map_key(K,
+                            Own = is_map_key(?KEY_ID(K),
                                              element(?SOBJECT_PROPS, RCell))
                                 orelse not arc_rt_obj_ffi:named_plain(
                                              element(?SOBJECT_KIND, RCell),
@@ -430,10 +430,10 @@ ways_put(K, Ways, Shaped, Match, Way) ->
 %% an own accessor shadows proto, so miss rather than absent
 own_named(Cell, K) ->
     case element(?SOBJECT_PROPS, Cell) of
-        #{K := Prop}
-          when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+        #{?KEY_ID(K) := {T, Prop}}
+          when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
             element(?DATAPROPERTY_VALUE, Prop);
-        #{K := _} -> miss;
+        #{?KEY_ID(K) := _} -> miss;
         _ -> absent
     end.
 
@@ -490,7 +490,7 @@ new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
                        element(?FNFLAGS_IS_GENERATOR, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
                     case element(?SOBJECT_PROPS, Cell) of
-                        #{?PROTOTYPE_KEY := Prop}
+                        #{?KEY_ID(?PROTOTYPE_KEY) := {<<"prototype">>, Prop}}
                           when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                             case element(?DATAPROPERTY_VALUE, Prop) of
                                 Proto = {?HANDLE_TAG, _} ->

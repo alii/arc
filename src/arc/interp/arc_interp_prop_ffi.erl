@@ -39,7 +39,8 @@ builtin_getter(St, Recv, K) ->
 
 own_data(Props, K) ->
     case Props of
-        #{K := Prop} when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+        #{?KEY_ID(K) := {T, Prop}}
+          when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
             element(?DATAPROPERTY_VALUE, Prop);
         _ -> miss
     end.
@@ -74,9 +75,10 @@ has_walk(Cells, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
     case named_plain(element(?SOBJECT_KIND, Cell), K) of
         false -> miss;
         true ->
-            case is_map_key(K, element(?SOBJECT_PROPS, Cell)) of
-                true -> true;
-                false -> has_next(Cells, element(?SOBJECT_PROTO, Cell), K, Fuel)
+            case element(?SOBJECT_PROPS, Cell) of
+                #{?KEY_ID(K) := {T, _}} when T =:= ?KEY_TEXT(K) -> true;
+                #{?KEY_ID(K) := _} -> miss;
+                _ -> has_next(Cells, element(?SOBJECT_PROTO, Cell), K, Fuel)
             end
     end;
 has_walk(_, _, _, _) -> miss.
@@ -104,7 +106,8 @@ private_put(Store, {?HANDLE_TAG, Id}, Name, V) ->
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case private_key(Name) of
                 miss -> miss;
-                K -> put_prop(Store, Cells, Id, Cell, K, V, false)
+                K ->
+                    put_prop(Store, Cells, Id, Cell, K, ?KEY_ID(K), ?KEY_TEXT(K), V, false)
             end;
         _ -> miss
     end;
@@ -120,13 +123,14 @@ private_define(Store, {?HANDLE_TAG, Id}, Name, V) when tuple_size(Store) =:= ?ST
             Prop = {?DATAPROPERTY_TAG, V, true, false, true, Seq},
             case arc_rt_arena_ffi:get(Id, Cells) of
                 {?SOBJECT_TAG, Kind, Proto, Props, Sym, Elems, true}
-                  when not is_map_key(K, Props) ->
-                    Cell = {?SOBJECT_TAG, Kind, Proto, Props#{K => Prop}, Sym, Elems, true},
+                  when not is_map_key(?KEY_ID(K), Props) ->
+                    Cell = {?SOBJECT_TAG, Kind, Proto,
+                            Props#{?KEY_ID(K) => ?NAMED_ENTRY(K, Prop)}, Sym, Elems, true},
                     setelement(?STORE_PROP_SEQ, set_plain(Store, Id, Cell, Cells, Kind),
                                Seq + 1);
                 {?SSHAPEDOBJECT_TAG, _, Proto, {}, _} ->
-                    Cell = {?SOBJECT_TAG, ?ORDINARY, Proto, #{K => Prop}, [],
-                            ?ELEMS_NONE, true},
+                    Cell = {?SOBJECT_TAG, ?ORDINARY, Proto,
+                            #{?KEY_ID(K) => ?NAMED_ENTRY(K, Prop)}, [], ?ELEMS_NONE, true},
                     setelement(?STORE_PROP_SEQ,
                                setelement(?STORE_CELLS, Store,
                                           arc_rt_arena_ffi:set(Id, Cell, Cells)),
@@ -157,10 +161,11 @@ accessor_walk(Cells, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
         false -> no_accessor;
         true ->
             case element(?SOBJECT_PROPS, Cell) of
-                #{K := Prop} when element(1, Prop) =:= ?ACCESSORPROPERTY_TAG ->
+                #{?KEY_ID(K) := {T, Prop}}
+                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?ACCESSORPROPERTY_TAG ->
                     {accessor, element(?ACCESSORPROPERTY_GET, Prop),
                      element(?ACCESSORPROPERTY_SET, Prop)};
-                #{K := _} -> no_accessor;
+                #{?KEY_ID(K) := _} -> no_accessor;
                 _ -> accessor_next(Cells, element(?SOBJECT_PROTO, Cell), K, Fuel)
             end
     end;
@@ -206,9 +211,10 @@ object_get(Store, Id, K, Absent) ->
             end;
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _} ->
             case Props of
-                #{K := Prop} when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                #{?KEY_ID(K) := {T, Prop}}
+                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     element(?DATAPROPERTY_VALUE, Prop);
-                #{K := _} -> miss;
+                #{?KEY_ID(K) := _} -> miss;
                 _ -> proto_get(Cells, Proto, K, ?MAX_PROTO_HOPS, Absent)
             end;
         Cell -> chain_get(Cells, Cell, K, ?MAX_PROTO_HOPS, Absent)
@@ -227,11 +233,11 @@ chain_get(Cells, Cell, K, Fuel, Absent) ->
                 false -> named_virtual(Kind, K);
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
-                        #{K := Prop} ->
-                            case element(1, Prop) of
-                                ?DATAPROPERTY_TAG -> element(?DATAPROPERTY_VALUE, Prop);
-                                _ -> miss
-                            end;
+                        #{?KEY_ID(K) := {T, Prop}}
+                          when T =:= ?KEY_TEXT(K),
+                               element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                            element(?DATAPROPERTY_VALUE, Prop);
+                        #{?KEY_ID(K) := _} -> miss;
                         _ ->
                             proto_get(Cells, element(?SOBJECT_PROTO, Cell), K,
                                        Fuel, Absent)
@@ -249,7 +255,7 @@ named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY) -> Length;
 named_virtual(_, _) -> miss.
 
 -compile({inline, [named_plain/2, named_virtual/2, birth_plain/2, object_get/4,
-                   chain_get/5, proto_field/3, put_prop/7, put_new/6, set_plain/5,
+                   chain_get/5, proto_field/3, put_prop/9, put_new/7, set_plain/5,
                    shaped_grow/7, shaped_next/3, chain_takes_write/4,
                    literal_props/3]}).
 named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K, ?LENGTH_KEY).
@@ -265,11 +271,11 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
             if
                 Idx >= Length -> miss;
                 Props =:= #{} -> elem_read(Elems, Idx);
-                is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
+                is_map_key(?INDEX_SLOT(Idx), Props) -> miss;
                 true -> elem_read(Elems, Idx)
             end;
         {?SOBJECT_TAG, {?ARGUMENTSOBJ_TAG, _, _}, _, Props, _, Elems, _} ->
-            case is_map_key({?KEY_INDEX, Idx}, Props) of
+            case is_map_key(?INDEX_SLOT(Idx), Props) of
                 true -> miss;
                 false -> elem_read(Elems, Idx)
             end;
@@ -290,7 +296,7 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
                 false -> miss;
                 true ->
                     case Props of
-                        #{{?KEY_INDEX, Idx} := Prop} ->
+                        #{?INDEX_SLOT(Idx) := {_, Prop}} ->
                             case element(1, Prop) of
                                 ?DATAPROPERTY_TAG -> element(?DATAPROPERTY_VALUE, Prop);
                                 _ -> miss
@@ -391,26 +397,28 @@ put_field(Store, {?HANDLE_TAG, Id}, K, V, Create)
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case named_plain(element(?SOBJECT_KIND, Cell), K) of
                 false -> miss;
-                true -> put_prop(Store, Cells, Id, Cell, K, V, Create)
+                true ->
+                    put_prop(Store, Cells, Id, Cell, K, ?KEY_ID(K), ?KEY_TEXT(K), V, Create)
             end;
         _ -> miss
     end;
 put_field(_, _, _, _, _) -> miss.
 
-put_prop(Store, Cells, Id, Cell, K, V, Create) ->
+%% Slot and Text are K's, spelled out since an index key has neither inside it
+put_prop(Store, Cells, Id, Cell, K, Slot, Text, V, Create) ->
     {_, Kind, Proto, Props, Sym, Elems, Ext} = Cell,
     case Props of
-        #{K := {?DATAPROPERTY_TAG, _, true, E, C, Sq}} ->
+        #{Slot := {Text, {?DATAPROPERTY_TAG, _, true, E, C, Sq}}} ->
             NewCell = {?SOBJECT_TAG, Kind, Proto,
-                       Props#{K := {?DATAPROPERTY_TAG, V, true, E, C, Sq}},
+                       Props#{Slot := {Text, {?DATAPROPERTY_TAG, V, true, E, C, Sq}}},
                        Sym, Elems, Ext},
             set_plain(Store, Id, NewCell, Cells, Kind);
-        #{K := _} -> miss;
+        #{Slot := _} -> miss;
         _ when Create, Ext =:= true ->
             case chain_takes_write(Store, Cells, Proto, K) of
                 false -> miss;
-                true -> put_new(Store, Cells, Id, Cell, K, V);
-                {true, Store1} -> put_new(Store1, Cells, Id, Cell, K, V)
+                true -> put_new(Store, Cells, Id, Cell, Slot, Text, V);
+                {true, Store1} -> put_new(Store1, Cells, Id, Cell, Slot, Text, V)
             end;
         _ -> miss
     end.
@@ -423,11 +431,11 @@ shaped_grow(Store, Cells, Id, {To, ToOffs}, P, Slots, V)
     NewCell = {?SSHAPEDOBJECT_TAG, To, P, erlang:append_element(Slots, V), ToOffs},
     setelement(?STORE_CELLS, Store, arc_rt_arena_ffi:set(Id, NewCell, Cells)).
 
-put_new(Store, Cells, Id, Cell, K, V) when tuple_size(Store) =:= ?STORE_SIZE ->
+put_new(Store, Cells, Id, Cell, Slot, Text, V) when tuple_size(Store) =:= ?STORE_SIZE ->
     {_, Kind, Proto, Props, Sym, Elems, Ext} = Cell,
     Seq = element(?STORE_PROP_SEQ, Store),
     NewCell = {?SOBJECT_TAG, Kind, Proto,
-               Props#{K => ?PLAIN_PROPERTY(V, Seq)},
+               Props#{Slot => {Text, ?PLAIN_PROPERTY(V, Seq)}},
                Sym, Elems, Ext},
     setelement(?STORE_PROP_SEQ, set_plain(Store, Id, NewCell, Cells, Kind), Seq + 1).
 
@@ -458,18 +466,22 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V)
                         Next -> shaped_grow(Store, Cells, Id, Next, P, Slots, V)
                     end
             end;
-        {?SOBJECT_TAG, ?ORDINARY, Proto, Props, Sym, Elems, true} ->
+        {?SOBJECT_TAG, ?ORDINARY, Proto, Props, Sym, Elems, true}
+          when element(1, K) =:= ?KEY_NAMED ->
             case Props of
-                #{K := {?DATAPROPERTY_TAG, _, _, _, true, Sq}} ->
+                #{?KEY_ID(K) := {T, {?DATAPROPERTY_TAG, _, _, _, true, Sq}}}
+                  when T =:= ?KEY_TEXT(K) ->
                     NewCell = {?SOBJECT_TAG, ?ORDINARY, Proto,
-                               Props#{K := {?DATAPROPERTY_TAG, V, true, true, true, Sq}},
+                               Props#{?KEY_ID(K) :=
+                                          {T, {?DATAPROPERTY_TAG, V, true, true, true, Sq}}},
                                Sym, Elems, true},
                     setelement(?STORE_CELLS, Store, arc_rt_arena_ffi:set(Id, NewCell, Cells));
-                #{K := _} -> miss;
+                #{?KEY_ID(K) := _} -> miss;
                 _ ->
                     Seq = element(?STORE_PROP_SEQ, Store),
                     NewCell = {?SOBJECT_TAG, ?ORDINARY, Proto,
-                               Props#{K => ?PLAIN_PROPERTY(V, Seq)},
+                               Props#{?KEY_ID(K) =>
+                                          ?NAMED_ENTRY(K, ?PLAIN_PROPERTY(V, Seq))},
                                Sym, Elems, true},
                     setelement(?STORE_PROP_SEQ,
                                setelement(?STORE_CELLS, Store,
@@ -515,16 +527,19 @@ new_receiver(St, {?HANDLE_TAG, _} = Proto)
 new_receiver(_, _) -> miss.
 
 literal_props([], Stack, _) -> {#{}, Stack};
+%% the compiler only groups names whose ids differ
 literal_props([K1], [V1 | Stack], Seq) ->
-    {#{K1 => ?PLAIN_PROPERTY(V1, Seq)}, Stack};
+    {#{?KEY_ID(K1) => ?NAMED_ENTRY(K1, ?PLAIN_PROPERTY(V1, Seq))}, Stack};
 literal_props([K2, K1], [V2, V1 | Stack], Seq) ->
-    {#{K1 => ?PLAIN_PROPERTY(V1, Seq), K2 => ?PLAIN_PROPERTY(V2, Seq + 1)}, Stack};
+    {#{?KEY_ID(K1) => ?NAMED_ENTRY(K1, ?PLAIN_PROPERTY(V1, Seq)),
+       ?KEY_ID(K2) => ?NAMED_ENTRY(K2, ?PLAIN_PROPERTY(V2, Seq + 1))}, Stack};
 literal_props(Keys, Stack, Seq) ->
     {Pairs, Stack2} = literal_pairs(Keys, Stack, Seq + length(Keys) - 1, []),
     {maps:from_list(Pairs), Stack2}.
 
 literal_pairs([K | Keys], [V | Stack], Seq, Acc) ->
-    literal_pairs(Keys, Stack, Seq - 1, [{K, ?PLAIN_PROPERTY(V, Seq)} | Acc]);
+    literal_pairs(Keys, Stack, Seq - 1,
+                  [{?KEY_ID(K), ?NAMED_ENTRY(K, ?PLAIN_PROPERTY(V, Seq))} | Acc]);
 literal_pairs([], Stack, _, Acc) -> {Acc, Stack}.
 
 chain_takes_write(Store, _, {?SOME, {?HANDLE_TAG, PId}}, {?KEY_NAMED, _, KB})
@@ -542,7 +557,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length} = Kind, Proto, Props, Sym, Elems, true} = Cell
-          when Props =:= #{}; not is_map_key({?KEY_INDEX, Idx}, Props) ->
+          when Props =:= #{}; not is_map_key(?INDEX_SLOT(Idx), Props) ->
             if
                 Idx < Length ->
                     case elem_overwrite(Elems, Idx, V) of
@@ -573,7 +588,8 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
             end;
         {?SOBJECT_TAG, Kind, _, _, _, _, true} = Cell
           when is_atom(Kind), Idx =< ?MAX_ARRAY_INDEX ->
-            put_prop(Store, Cells, Id, Cell, {?KEY_INDEX, Idx}, V, true);
+            put_prop(Store, Cells, Id, Cell, {?KEY_INDEX, Idx}, ?INDEX_SLOT(Idx), <<>>, V,
+                     true);
         _ -> miss
     end;
 put_elem(Store, {?HANDLE_TAG, Id} = Obj, Key, V) when ?IS_STR(Key) ->
@@ -603,8 +619,8 @@ put_first_key(Store, Id, K, V) when tuple_size(Store) =:= ?STORE_SIZE ->
 
 put_first_prop(Store, Cells, Id, Proto, K, V) when tuple_size(Store) =:= ?STORE_SIZE ->
     Seq = element(?STORE_PROP_SEQ, Store),
-    Cell = {?SOBJECT_TAG, ?ORDINARY, Proto, #{K => ?PLAIN_PROPERTY(V, Seq)}, [],
-            ?ELEMS_NONE, true},
+    Cell = {?SOBJECT_TAG, ?ORDINARY, Proto,
+            #{?KEY_ID(K) => ?NAMED_ENTRY(K, ?PLAIN_PROPERTY(V, Seq))}, [], ?ELEMS_NONE, true},
     setelement(?STORE_PROP_SEQ,
                setelement(?STORE_CELLS, Store, arc_rt_arena_ffi:set(Id, Cell, Cells)),
                Seq + 1).
@@ -623,9 +639,11 @@ fill_hole(Store, Cells, Id, Cell, Proto, Elems, Idx, V) ->
             end
     end.
 
-length_writable(#{?LENGTH_KEY := Prop})
+length_writable(#{?KEY_ID(?LENGTH_KEY) := {<<"length">>, Prop}})
   when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
     element(?DATAPROPERTY_WRITABLE, Prop) =:= true;
+%% some other name is where length would be: let the general path look
+length_writable(#{?KEY_ID(?LENGTH_KEY) := _}) -> false;
 length_writable(_) -> true.
 
 chain_lacks_index(_, ?NONE, _, _) -> true;
@@ -640,7 +658,7 @@ chain_lacks_index(Cells, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
             chain_lacks_index(Cells, Proto, Idx, Fuel - 1);
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             index_kind_is_plain(element(?SOBJECT_KIND, Cell))
-                andalso (not is_map_key({?KEY_INDEX, Idx},
+                andalso (not is_map_key(?INDEX_SLOT(Idx),
                                         element(?SOBJECT_PROPS, Cell)))
                 andalso (not elem_has(element(?SOBJECT_ELEMENTS, Cell), Idx))
                 andalso chain_lacks_index(Cells, element(?SOBJECT_PROTO, Cell),

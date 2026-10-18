@@ -49,7 +49,7 @@ new_frame(This, ActiveFunc, HomeObj, NewTarget) ->
     ?FRAME(This, ActiveFunc, HomeObj, NewTarget).
 
 birth_props(LengthV, Name) ->
-    #{?LENGTH_KEY =>
-          {?DATAPROPERTY_TAG, LengthV, false, false, true, 0},
-      ?NAME_KEY =>
-          {?DATAPROPERTY_TAG, Name, false, false, true, 1}}.
+    #{?KEY_ID(?LENGTH_KEY) =>
+          ?NAMED_ENTRY(?LENGTH_KEY, {?DATAPROPERTY_TAG, LengthV, false, false, true, 0}),
+      ?KEY_ID(?NAME_KEY) =>
+          ?NAMED_ENTRY(?NAME_KEY, {?DATAPROPERTY_TAG, Name, false, false, true, 1})}.

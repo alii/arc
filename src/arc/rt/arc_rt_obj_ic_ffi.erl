@@ -48,7 +48,7 @@ global_get_ic_fill(St, K, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
 global_plain(Cell, K, V)
   when tuple_size(Cell) =:= ?SOBJECT_SIZE, element(1, Cell) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_PROPS, Cell) of
-        #{K := Prop} ->
+        #{?KEY_ID(K) := {T, Prop}} when T =:= ?KEY_TEXT(K) ->
             element(1, Prop) =:= ?DATAPROPERTY_TAG
                 andalso element(?DATAPROPERTY_VALUE, Prop) =:= V;
         _ -> false
@@ -89,8 +89,8 @@ get_named_ic(St, {?HANDLE_TAG, Id}, K, Site) ->
             end;
         ?SOBJECT_TAG ->
             case element(?SOBJECT_PROPS, Cell) of
-                #{K := Prop}
-                  when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                #{?KEY_ID(K) := {T, Prop}}
+                  when T =:= ?KEY_TEXT(K), element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     Kind = element(?SOBJECT_KIND, Cell),
                     case is_atom(Kind)
                          orelse arc_rt_obj_ffi:named_plain(Kind, K) of
@@ -134,12 +134,14 @@ set_named(St, Obj = {?HANDLE_TAG, Id}, K, V, Strict)
                           element(?SOBJECT_KIND, Cell) =:= ?ORDINARY ->
                     Props = element(?SOBJECT_PROPS, Cell),
                     case Props of
-                        #{K := Prop}
-                          when element(1, Prop) =:= ?DATAPROPERTY_TAG,
+                        #{?KEY_ID(K) := {T, Prop}}
+                          when T =:= ?KEY_TEXT(K),
+                               element(1, Prop) =:= ?DATAPROPERTY_TAG,
                                tuple_size(Prop) =:= ?DATAPROPERTY_SIZE,
                                element(?DATAPROPERTY_WRITABLE, Prop) =:= true ->
                             NewCell = setelement(?SOBJECT_PROPS, Cell,
-                                                 Props#{K := setelement(?DATAPROPERTY_VALUE, Prop, V)}),
+                                                 Props#{?KEY_ID(K) :=
+                                                            {T, setelement(?DATAPROPERTY_VALUE, Prop, V)}}),
                             setelement(?AGENT_STORE, St,
                                        setelement(?STORE_CELLS, Store,
                                                   arc_rt_arena_ffi:set(Id, NewCell, Cells)));
@@ -406,6 +408,6 @@ alloc_object_props(St, Store, Keys, Vals)
 
 props_of([K | Ks], [V | Vs], Seq, Acc) ->
     props_of(Ks, Vs, Seq + 1,
-             [{K, ?PLAIN_PROPERTY(V, Seq)}
+             [{?KEY_ID(K), ?NAMED_ENTRY(K, ?PLAIN_PROPERTY(V, Seq))}
               | Acc]);
 props_of([], [], Seq, Acc) -> {maps:from_list(Acc), Seq}.

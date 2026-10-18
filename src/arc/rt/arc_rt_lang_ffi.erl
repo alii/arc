@@ -17,7 +17,7 @@ plain_iter_record(St, {?HANDLE_TAG, Id}) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _,
-         #{?DONE_KEY := DoneP, ?ITERATOR_KEY := IterP, ?NEXT_KEY := NextP},
+         #{?KEY_ID(?DONE_KEY) := {<<"done">>, DoneP}, ?KEY_ID(?ITERATOR_KEY) := {<<"iterator">>, IterP}, ?KEY_ID(?NEXT_KEY) := {<<"next">>, NextP}},
          _, _, _}
           when element(1, DoneP) =:= ?DATAPROPERTY_TAG,
                element(1, IterP) =:= ?DATAPROPERTY_TAG,
@@ -70,7 +70,7 @@ iter_step(Store, {?HANDLE_TAG, RecId}) ->
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(RecId, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _,
-         #{?ITERATOR_KEY := IP, ?NEXT_KEY := NP}, _, _, _}
+         #{?KEY_ID(?ITERATOR_KEY) := {<<"iterator">>, IP}, ?KEY_ID(?NEXT_KEY) := {<<"next">>, NP}}, _, _, _}
           when element(1, IP) =:= ?DATAPROPERTY_TAG,
                element(1, NP) =:= ?DATAPROPERTY_TAG ->
             case {element(?DATAPROPERTY_VALUE, NP), element(?DATAPROPERTY_VALUE, IP)} of
@@ -112,7 +112,7 @@ iter_step_with(?TOKEN_ARRAY_ITER_NEXT,
             ?ADVANCE(Index + 1, false, Index);
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _, Els, _} ->
             case map_size(Props) =/= 0
-                 andalso is_map_key({?KEY_INDEX, Index}, Props) of
+                 andalso is_map_key(?INDEX_SLOT(Index), Props) of
                 true -> iter_miss;
                 false ->
                     case elem_at(Els, Index) of
@@ -187,7 +187,7 @@ pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok, View) ->
         true ->
             case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells)} of
                 {{?SOBJECT_TAG, _, _, _, Syms, _, _},
-                 {?SOBJECT_TAG, _, _, #{?NEXT_KEY := NP}, _, _, _}}
+                 {?SOBJECT_TAG, _, _, #{?KEY_ID(?NEXT_KEY) := {<<"next">>, NP}}, _, _, _}}
                   when element(1, NP) =:= ?DATAPROPERTY_TAG ->
                     N = element(?DATAPROPERTY_VALUE, NP),
                     case lists:keyfind(?SYMBOL_ITERATOR, 1, Syms) of
@@ -209,7 +209,7 @@ view_iter_start(St, {?HANDLE_TAG, Id} = V, View) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     Key = view_key(View),
     case arc_rt_arena_ffi:get(Id, Cells) of
-        {?SOBJECT_TAG, {Tag, _}, Proto, Props, _, _, _} when not is_map_key(Key, Props) ->
+        {?SOBJECT_TAG, {Tag, _}, Proto, Props, _, _, _} when not is_map_key(?KEY_ID(Key), Props) ->
             case view_class(Tag, View) of
                 {Class, IterProto, ViewTok, NextTok, As} ->
                     view_pristine(element(?AGENT_REALM, St), Cells, V, Proto, Class,
@@ -260,7 +260,7 @@ view_pristine(Realm, Cells, V, Proto, Class, IterProto, Key, ViewTok, NextTok, V
             case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells),
                   arc_rt_arena_ffi:get(Base, Cells)} of
                 {{?SOBJECT_TAG, _, _, #{Key := MP}, _, _, _},
-                 {?SOBJECT_TAG, _, {?SOME, BaseH}, #{?NEXT_KEY := NP}, IterSyms, _, _},
+                 {?SOBJECT_TAG, _, {?SOME, BaseH}, #{?KEY_ID(?NEXT_KEY) := {<<"next">>, NP}}, IterSyms, _, _},
                  {?SOBJECT_TAG, _, _, _, BaseSyms, _, _}}
                   when element(1, MP) =:= ?DATAPROPERTY_TAG,
                        element(1, NP) =:= ?DATAPROPERTY_TAG ->
@@ -319,7 +319,7 @@ array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _, View} = R) ->
             {iter_step, false, I, setelement(3, R, I + 1)};
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _, Els, _} ->
             case map_size(Props) =/= 0
-                 andalso is_map_key({?KEY_INDEX, I}, Props) of
+                 andalso is_map_key(?INDEX_SLOT(I), Props) of
                 true -> iter_miss;
                 false ->
                     case elem_at(Els, I) of
@@ -426,7 +426,7 @@ lacks_return(_, ?NONE) -> true;
 lacks_return(Cells, {?SOME, {?HANDLE_TAG, Id}}) ->
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _}
-          when not is_map_key(?RETURN_KEY, Props) ->
+          when not is_map_key(?KEY_ID(?RETURN_KEY), Props) ->
             lacks_return(Cells, Proto);
         _ -> false
     end.

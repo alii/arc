@@ -34,19 +34,19 @@ chain_index_range_plain(Cells, {?SOME, {?HANDLE_TAG, Id}}, Start, Count) ->
         _ -> true
     end.
 
-props_have_index(Props, Start, 1) -> is_map_key({?KEY_INDEX, Start}, Props);
+props_have_index(Props, Start, 1) -> is_map_key(?INDEX_SLOT(Start), Props);
 props_have_index(_, _, Count) when Count =< 0 -> false;
 props_have_index(Props, _, _) when map_size(Props) =:= 0 -> false;
 props_have_index(Props, _, Count) when Count > 4 -> any_index_key(maps:next(maps:iterator(Props)));
 props_have_index(Props, Start, Count) -> probe_keys(Props, Start, Start + Count).
 
 any_index_key(none) -> false;
-any_index_key({{?KEY_INDEX, _}, _, _}) -> true;
+any_index_key({Slot, _, _}) when Slot < 0 -> true;
 any_index_key({_, _, I}) -> any_index_key(maps:next(I)).
 
 probe_keys(_, Idx, End) when Idx >= End -> false;
 probe_keys(Props, Idx, End) ->
-    is_map_key({?KEY_INDEX, Idx}, Props) orelse probe_keys(Props, Idx + 1, End).
+    is_map_key(?INDEX_SLOT(Idx), Props) orelse probe_keys(Props, Idx + 1, End).
 
 elements_have_index({?ELEMS_DENSE, A}, Start, Count) ->
     arc_tree_array_ffi:size(A) > 0

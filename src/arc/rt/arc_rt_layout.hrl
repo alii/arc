@@ -239,6 +239,14 @@
 %% named and private keys are {Tag, Id, Text}
 -define(KEY_ID(K), element(2, K)).
 -define(KEY_TEXT(K), element(3, K)).
+%% an object's props are #{Slot => {Text, Property}}. A name's slot is its id,
+%% or, when another name had that first, the next free one two further on (see
+%% rt/prop_map). Kernels only look in the first place: if some other text is
+%% there they answer miss, and if nothing is there the name is absent.
+%% An index has a slot no id can be, and no text
+-define(INDEX_SLOT(Idx), (-1 - (Idx))).
+-define(NAMED_ENTRY(K, Prop), {?KEY_TEXT(K), Prop}).
+-define(INDEX_ENTRY(Prop), {<<>>, Prop}).
 %% two keys with one id are the same key only if this holds too
 -define(SAME_TEXT(A, B), (element(3, A) =:= element(3, B))).
 %% ids as arc_bytecode_key_ffi:named/1 gives them, checked by arc_rt_layout_test

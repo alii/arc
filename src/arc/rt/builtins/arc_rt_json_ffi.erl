@@ -18,14 +18,18 @@ plain_enumerable_keys(Props) ->
     end.
 
 %% enumerable and seq sit at the same positions in both property records
-plain_key(_, Prop, Acc) when element(?DATAPROPERTY_ENUMERABLE, Prop) =:= false ->
-    Acc;
-plain_key({?KEY_INDEX, I}, _, {Idx, Named}) ->
-    {[I | Idx], Named};
-plain_key({?KEY_NAMED, _, _} = K, Prop, {Idx, Named}) ->
-    {Idx, [{element(?DATAPROPERTY_SEQ, Prop), K} | Named]};
-plain_key(_, _, Acc) ->
-    Acc.
+plain_key(Slot, Entry, {Idx, Named} = Acc) ->
+    Prop = element(2, Entry),
+    case element(?DATAPROPERTY_ENUMERABLE, Prop) of
+        false -> Acc;
+        true ->
+            case arc_rt_prop_map_ffi:key_at(Slot, Entry) of
+                {?KEY_INDEX, I} -> {[I | Idx], Named};
+                {?KEY_NAMED, _, _} = K ->
+                    {Idx, [{element(?DATAPROPERTY_SEQ, Prop), K} | Named]};
+                _ -> Acc
+            end
+    end.
 
 %% §25.5.2.3 quotejsonstring as iodata
 quote_tree(Bin) ->
@@ -72,12 +76,12 @@ quote_esc(Bin, P) ->
 hexc(N) when N < 10 -> $0 + N;
 hexc(N) -> $a + N - 10.
 
-%% own data props from parsed entries; props_miss on duplicate keys
+%% own data props from parsed entries; props_miss when two keys want one slot
 plain_prop_dict(Entries, Seq) -> plain_props(Entries, Seq, []).
 
 plain_props([{Name, V} | Rest], Seq, Acc) ->
     Prop = ?PLAIN_PROPERTY(V, Seq),
-    plain_props(Rest, Seq + 1, [{key(Name), Prop} | Acc]);
+    plain_props(Rest, Seq + 1, [entry(Name, Prop) | Acc]);
 plain_props([], Seq, Acc) ->
     Map = maps:from_list(Acc),
     case map_size(Map) =:= length(Acc) of
@@ -85,18 +89,20 @@ plain_props([], Seq, Acc) ->
         false -> props_miss
     end.
 
-key(<<C, _/binary>> = B) when ?DIGIT(C) ->
+entry(<<C, _/binary>> = B, Prop) when ?DIGIT(C) ->
     try binary_to_integer(B) of
         N when N >= 0, N =< ?MAX_ARRAY_INDEX ->
             case integer_to_binary(N) =:= B of
-                true -> {?KEY_INDEX, N};
-                false -> arc_bytecode_key_ffi:named(B)
+                true -> {?INDEX_SLOT(N), ?INDEX_ENTRY(Prop)};
+                false -> named_entry(B, Prop)
             end;
-        _ -> arc_bytecode_key_ffi:named(B)
+        _ -> named_entry(B, Prop)
     catch
-        error:badarg -> arc_bytecode_key_ffi:named(B)
+        error:badarg -> named_entry(B, Prop)
     end;
-key(B) -> arc_bytecode_key_ffi:named(B).
+entry(B, Prop) -> named_entry(B, Prop).
+
+named_entry(B, Prop) -> {arc_bytecode_key_ffi:hash(B) * 2, {B, Prop}}.
 -define(PLAIN(C), (C =/= $" andalso C =/= $\\ andalso C >= 16#20)).
 
 %% src: keep source slices for the reviver context
@@ -367,7 +373,7 @@ plain_stringify(St, V, Gap) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     {?HANDLE_TAG, OP} = element(?BUILTINPAIR_PROTOTYPE, element(?REALM_OBJECT, Realm)),
     {?HANDLE_TAG, AP} = element(?BUILTINPAIR_PROTOTYPE, element(?REALM_ARRAY, Realm)),
-    TJ = ?TO_JSON_KEY,
+    TJ = ?KEY_ID(?TO_JSON_KEY),
     Clean = fun(Id) ->
         case arc_rt_arena_ffi:get(Id, Cells) of
             {?SOBJECT_TAG, _, _, Props, _, _, _} -> not is_map_key(TJ, Props);
@@ -407,7 +413,7 @@ enc({?HANDLE_TAG, Id}, {Cells, OP, AP, _} = Cx, Ind, Seen) ->
             enc_object(Pairs, Cx, Ind, [Id | Seen]);
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, ?ELEMS_NONE, _}
           when (Proto =:= {?SOME, {?HANDLE_TAG, OP}} orelse Proto =:= ?NONE),
-               not is_map_key(?TO_JSON_KEY, Props) ->
+               not is_map_key(?KEY_ID(?TO_JSON_KEY), Props) ->
             enc_object(plain_pairs(Props), Cx, Ind, [Id | Seen]);
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, {?SOME, {?HANDLE_TAG, AP}}, Props, _, Els, _}
           when map_size(Props) =:= 0 ->
@@ -423,10 +429,11 @@ enc(_, _, _, _) -> throw(json_miss).
 
 plain_pairs(Props) ->
     L = maps:to_list(Props),
-    Idx = lists:sort([{N, P} || {{?KEY_INDEX, N}, P} <- L]),
+    Idx = lists:sort([{-1 - Slot, element(2, E)} || {Slot, E} <- L, Slot < 0]),
     Named = lists:sort(fun({_, A}, {_, B}) ->
                 element(?DATAPROPERTY_SEQ, A) =< element(?DATAPROPERTY_SEQ, B) end,
-                       [{B, P} || {{?KEY_NAMED, _, B}, P} <- L]),
+                       [{element(1, E), element(2, E)}
+                        || {Slot, E} <- L, Slot >= 0, Slot band 1 =:= 0]),
     [{key_text(K), value_of(P)} || {K, P} <- Idx ++ Named, enumerable(P)].
 
 key_text(N) when is_integer(N) -> integer_to_binary(N);

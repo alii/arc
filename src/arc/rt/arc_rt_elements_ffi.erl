@@ -12,7 +12,7 @@ own_element(St, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
                element(1, Kind) =:= ?ARGUMENTSOBJ_TAG ->
             if
                 Props =:= #{} -> own_read(Els, Idx);
-                is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
+                is_map_key(?INDEX_SLOT(Idx), Props) -> miss;
                 true -> own_read(Els, Idx)
             end;
         _ -> miss
@@ -42,7 +42,7 @@ arg_list(St, {?HANDLE_TAG, Id}) ->
           when map_size(Props) =:= 0 ->
             dense_prefix(Els, Len);
         {?SOBJECT_TAG, {?ARGUMENTSOBJ_TAG, _, _}, _,
-         #{?LENGTH_KEY := LenProp, ?CALLEE_KEY := _} = Props, _, Els, _}
+         #{?KEY_ID(?LENGTH_KEY) := {<<"length">>, LenProp}, ?KEY_ID(?CALLEE_KEY) := {<<"callee">>, _}} = Props, _, Els, _}
           when map_size(Props) =:= 2,
                element(1, LenProp) =:= ?DATAPROPERTY_TAG,
                is_integer(element(?DATAPROPERTY_VALUE, LenProp)) ->

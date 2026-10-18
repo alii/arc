@@ -23,7 +23,8 @@ push_props_refs(Props, Acc) -> push_prop_list_refs(maps:values(Props), Acc).
 push_symbol_props_refs([{_, P} | T], Acc) -> push_symbol_props_refs(T, push_prop_refs(P, Acc));
 push_symbol_props_refs([], Acc) -> Acc.
 
-push_prop_list_refs([P | T], Acc) -> push_prop_list_refs(T, push_prop_refs(P, Acc));
+push_prop_list_refs([Entry | T], Acc) ->
+    push_prop_list_refs(T, push_prop_refs(element(2, Entry), Acc));
 push_prop_list_refs([], Acc) -> Acc.
 
 push_prop_refs({?DATAPROPERTY_TAG, V, _, _, _, _}, Acc) -> push_refs(V, Acc);
