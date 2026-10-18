@@ -201,6 +201,33 @@ fn map_get(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(result, st)
 }
 
+/// get on a real Map, which cannot throw
+pub fn plain_get(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
+  use entries <- option.map(entries_of(st, this))
+  ordered_entries.get(entries, js_to_map_key(key))
+  |> option.unwrap(mk_undefined())
+}
+
+/// has on a real Map
+pub fn plain_has(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
+  use entries <- option.map(entries_of(st, this))
+  mk_bool(ordered_entries.has(entries, js_to_map_key(key)))
+}
+
+fn entries_of(
+  st: Agent,
+  v: JsVal,
+) -> Option(ordered_entries.OrderedEntries(MapKey, JsVal)) {
+  case classify(v) {
+    types.KHandle(h) ->
+      case rt_store.cell_get(st, h) {
+        SObject(kind: MapObj(entries:), ..) -> Some(entries)
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
 fn map_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(key_arg, val_arg) = two_args_or_undefined(args)
   use map <- require_map(st, this, "set")

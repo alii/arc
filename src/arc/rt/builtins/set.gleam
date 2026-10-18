@@ -156,6 +156,19 @@ fn set_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_bool(ordered_entries.has(read_set_store(st, set), key)), st)
 }
 
+/// has on a real Set, which cannot throw
+pub fn plain_has(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
+  case classify(this) {
+    types.KHandle(h) ->
+      case rt_store.cell_get(st, h) {
+        SObject(kind: SetObj(entries:), ..) ->
+          Some(mk_bool(ordered_entries.has(entries, js_to_map_key(key))))
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
 fn set_delete(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use set <- require_set(st, this, "delete")
   let store = read_set_store(st, set)

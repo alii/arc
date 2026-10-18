@@ -3632,53 +3632,75 @@ fn loop_call(
           && token != function_apply
           && token != reflect_apply
           && depth < limits.max_call_depth
-        -> {
-          let agent = case agent.call_depth == depth {
-            False -> frames.sync_entering(state, agent, pc)
-            True -> {
-              let line = tuple_array.element(pc + 1, state.func.lines)
-              // frames.set_top_line inlined
-              let frames = case agent.frames {
-                [types.FrameInfo(line: l, ..), ..] as frames if l == line ->
-                  frames
-                [top, ..rest] -> [types.FrameInfo(..top, line:), ..rest]
-                [] -> [types.FrameInfo("", frames.stack_source, line)]
-              }
-              Agent(..agent, frames:, call_depth: depth + 1)
-            }
-          }
-          case
-            guard.guard4(rt_builtins.dispatch_native, agent, token, this, args)
-          {
-            Value(value: v, agent:) ->
+        ->
+          case rt_builtins.plain_answer(agent, token, this, args) {
+            Some(v) ->
               loop(
                 state,
                 drive,
                 pc + 1,
                 [v, ..rest],
                 locals,
-                Agent(..agent, call_depth: agent.call_depth - 1),
+                agent,
                 code,
                 constants,
                 r0,
                 r1,
               )
-            Thrown(agent:, thrown:) ->
-              after_step(
-                Error(Threw(
-                  thrown,
-                  State(
-                    ..state,
-                    pc:,
-                    stack: rest,
-                    locals: flush_registers(state, locals, r0, r1),
-                    agent: Agent(..agent, call_depth: agent.call_depth - 1),
-                  ),
-                )),
-                drive,
-              )
+            None -> {
+              let agent = case agent.call_depth == depth {
+                False -> frames.sync_entering(state, agent, pc)
+                True -> {
+                  let line = tuple_array.element(pc + 1, state.func.lines)
+                  // frames.set_top_line inlined
+                  let frames = case agent.frames {
+                    [types.FrameInfo(line: l, ..), ..] as frames if l == line ->
+                      frames
+                    [top, ..rest] -> [types.FrameInfo(..top, line:), ..rest]
+                    [] -> [types.FrameInfo("", frames.stack_source, line)]
+                  }
+                  Agent(..agent, frames:, call_depth: depth + 1)
+                }
+              }
+              case
+                guard.guard4(
+                  rt_builtins.dispatch_native,
+                  agent,
+                  token,
+                  this,
+                  args,
+                )
+              {
+                Value(value: v, agent:) ->
+                  loop(
+                    state,
+                    drive,
+                    pc + 1,
+                    [v, ..rest],
+                    locals,
+                    Agent(..agent, call_depth: agent.call_depth - 1),
+                    code,
+                    constants,
+                    r0,
+                    r1,
+                  )
+                Thrown(agent:, thrown:) ->
+                  after_step(
+                    Error(Threw(
+                      thrown,
+                      State(
+                        ..state,
+                        pc:,
+                        stack: rest,
+                        locals: flush_registers(state, locals, r0, r1),
+                        agent: Agent(..agent, call_depth: agent.call_depth - 1),
+                      ),
+                    )),
+                    drive,
+                  )
+              }
+            }
           }
-        }
         SObject(
           kind: BytecodeFn(
             template:,

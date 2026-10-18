@@ -19,6 +19,7 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/dict.{type Dict}
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set.{type Set}
 
 pub fn init(
@@ -167,6 +168,35 @@ fn weak_map_get(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use weak_map <- require_weak_map(st, this, "get")
   let key = first_arg_or_undefined(args)
   #(lookup_weak_map(st, weak_map, key) |> option.unwrap(mk_undefined()), st)
+}
+
+/// get on a real WeakMap, which cannot throw
+pub fn plain_map_get(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
+  use entries <- option.map(weak_map_entries_of(st, this))
+  case to_weak_key(key) {
+    Some(wk) -> dict.get(entries, wk) |> result.unwrap(mk_undefined())
+    None -> mk_undefined()
+  }
+}
+
+/// has on a real WeakMap
+pub fn plain_map_has(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
+  use entries <- option.map(weak_map_entries_of(st, this))
+  case to_weak_key(key) {
+    Some(wk) -> mk_bool(dict.has_key(entries, wk))
+    None -> mk_bool(False)
+  }
+}
+
+fn weak_map_entries_of(st: Agent, v: JsVal) -> Option(Dict(WeakKey, JsVal)) {
+  case classify(v) {
+    KHandle(h) ->
+      case rt_store.cell_get(st, h) {
+        SObject(kind: WeakMapObj(entries:), ..) -> Some(entries)
+        _ -> None
+      }
+    _ -> None
+  }
 }
 
 fn weak_map_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {

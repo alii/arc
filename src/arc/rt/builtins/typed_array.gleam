@@ -1071,6 +1071,22 @@ fn get_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_int(n), st)
 }
 
+/// the length getter on a real typed array, which cannot throw
+pub fn plain_length(st: Agent, this: JsVal) -> Option(JsVal) {
+  use TypedArrayView(buffer: buf, kind:, byte_offset:, length:, ..) <- option.map(
+    view_of_value(st, this),
+  )
+  let view = buffer.View(buffer: buf, elem_kind: kind, byte_offset:, length:)
+  case buffer.live_view(st, view) {
+    Some(bounds) ->
+      case buffer.view_in_bounds(bounds) {
+        True -> mk_int(buffer.view_len(bounds))
+        False -> mk_int(0)
+      }
+    None -> mk_int(0)
+  }
+}
+
 // §23.2.3.38 undefined for foreign receivers, no throw
 fn get_to_string_tag(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case view_of_value(st, this) {

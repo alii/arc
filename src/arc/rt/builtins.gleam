@@ -512,6 +512,34 @@ fn alloc_global_object(
 }
 
 // called by name from arc_rt_call_ffi and arc_rt_call_ic_ffi
+/// The answer of a call that changes nothing, runs no user code and cannot
+/// throw, so the caller need not prepare for any of that. None says nothing
+/// about the call: dispatch_native decides.
+pub fn plain_answer(
+  st: Agent,
+  token: NativeToken,
+  this: JsVal,
+  args: List(JsVal),
+) -> Option(JsVal) {
+  case token, args {
+    StringN(types.StringPrototypeCharCodeAt), [idx] ->
+      b_string.plain_char_code_at(this, idx)
+    WeakN(types.WeakMapGet), [key] -> weak.plain_map_get(st, this, key)
+    WeakN(types.WeakMapHas), [key] -> weak.plain_map_has(st, this, key)
+    MapN(types.MapGet), [key] -> b_map.plain_get(st, this, key)
+    MapN(types.MapHas), [key] -> b_map.plain_has(st, this, key)
+    SetN(types.SetHas), [key] -> b_set.plain_has(st, this, key)
+    ArrayN(types.ArrayPrototypeIncludes), [search] ->
+      b_array.plain_includes(st, this, search)
+    ArrayN(types.ArrayPrototypeIndexOf), [search] ->
+      b_array.plain_index_of(st, this, search)
+    ArrayN(types.ArrayIsArray), [v] -> b_array.plain_is_array(st, v)
+    TypedArrayN(types.TypedArrayGetLength), [] ->
+      typed_array.plain_length(st, this)
+    _, _ -> None
+  }
+}
+
 pub fn dispatch_native(
   st: Agent,
   token: NativeToken,

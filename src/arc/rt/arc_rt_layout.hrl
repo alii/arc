@@ -348,7 +348,14 @@
                  case element(1, Kind) of
                      ?PROXYOBJ_TAG -> false;
                      ?MODULENS_TAG -> false;
-                     ?TYPEDARRAYOBJ_TAG -> false;
+                     %% §10.4.5 only a numeric string is special, and none
+                     %% starts with a small letter
+                     ?TYPEDARRAYOBJ_TAG ->
+                         case K of
+                             {?KEY_NAMED, <<KeyC, _/binary>>}
+                               when KeyC >= $a, KeyC =< $z -> true;
+                             _ -> false
+                         end;
                      ?ARRAYOBJ_TAG -> K =/= LengthK;
                      ?STRINGOBJ_TAG -> K =/= LengthK;
                      ?BYTECODEFN_TAG ->

@@ -226,6 +226,10 @@ pub fn to_primitive(st: Agent, v: JsVal, hint: ToPrimHint) -> #(JsVal, Agent) {
   }
 }
 
+// the integer a value already is, with no coercion
+@external(erlang, "arc_rt_val_ffi", "as_integer")
+pub fn as_integer(v: JsVal) -> Option(Int)
+
 // the one test for a kernel's miss answer
 @external(erlang, "arc_rt_val_ffi", "is_miss")
 pub fn is_miss(v: a) -> Bool

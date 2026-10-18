@@ -264,6 +264,18 @@ fn string_char_code_at(
   }
 }
 
+/// charCodeAt of a string at an integer: nothing to coerce, nothing to throw
+pub fn plain_char_code_at(this: JsVal, idx: JsVal) -> Option(JsVal) {
+  case js_string.is_str(this), rt_val.as_integer(idx) {
+    True, Some(idx) ->
+      case js_string.codepoint_at(this, idx) {
+        Some(cp) -> Some(mk_int(cp))
+        None -> Some(mk_number(JNan))
+      }
+    _, _ -> None
+  }
+}
+
 fn string_index_of(
   st: Agent,
   this: JsVal,

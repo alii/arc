@@ -1618,6 +1618,37 @@ fn array_includes(
   })
 }
 
+/// includes over a plain array without holes
+pub fn plain_includes(st: Agent, this: JsVal, search: JsVal) -> Option(JsVal) {
+  case scan_whole_array(st, this, search, SameValueZero) {
+    Match(_) -> Some(mk_bool(True))
+    Absent -> Some(mk_bool(False))
+    HoleAt(_) -> None
+  }
+}
+
+/// indexOf over a plain array without holes
+pub fn plain_index_of(st: Agent, this: JsVal, search: JsVal) -> Option(JsVal) {
+  case scan_whole_array(st, this, search, Strict) {
+    Match(i) -> Some(mk_int(i))
+    Absent -> Some(mk_int(-1))
+    HoleAt(_) -> None
+  }
+}
+
+/// isArray of anything but a proxy, which may be revoked
+pub fn plain_is_array(st: Agent, v: JsVal) -> Option(JsVal) {
+  case classify(v) {
+    KHandle(h) ->
+      case rt_store.cell_get(st, h) {
+        SObject(kind: ArrayObj(_), ..) -> Some(mk_bool(True))
+        SObject(kind: types.ProxyObj(..), ..) -> None
+        _ -> Some(mk_bool(False))
+      }
+    _ -> Some(mk_bool(False))
+  }
+}
+
 // one argument and a plain array without holes: nothing can run user code
 fn whole_array_search(
   st: Agent,

@@ -2,6 +2,7 @@
 -module(arc_rt_val_ffi).
 -include("arc_rt_layout.hrl").
 
+-export([as_integer/1]).
 -export([
     classify/1, type_of/2,
     mk_undefined/0, mk_hole/0, mk_array_lit/1, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
@@ -99,6 +100,9 @@ to_boolean(js_tdz) -> false.
 logical_not(V) -> not to_boolean(V).
 
 is_nullish(V) -> ?IS_NULLISH(V).
+
+as_integer(N) when is_integer(N) -> {?SOME, N};
+as_integer(_) -> ?NONE.
 
 strict_eq(js_nan, _) -> false;
 strict_eq(_, js_nan) -> false;
