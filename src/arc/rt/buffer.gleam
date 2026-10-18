@@ -1,6 +1,7 @@
-import arc/bytecode/key.{type PropertyKey, Index}
+import arc/bytecode/key.{Index}
 import arc/internal/tree_array.{type TreeArray}
 import arc/rt/elements
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/typed_array_bytes.{
   U8, clamp_uint8, get_float, get_int, set_float, set_int, zeroed,
@@ -17,7 +18,6 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
-import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -792,7 +792,7 @@ pub fn plain_indexed_values(
 }
 
 fn plain_indexed_values_loop(
-  props: dict.Dict(PropertyKey, Property),
+  props: PropMap(Property),
   elements: JsElements,
   k: Int,
   acc: List(JsVal),
@@ -800,7 +800,7 @@ fn plain_indexed_values_loop(
   case k < 0 {
     True -> Some(acc)
     False -> {
-      let v = case dict.get(props, Index(k)) {
+      let v = case prop_map.get(props, Index(k)) {
         Ok(DataProperty(value: v, ..)) -> Some(v)
         Ok(AccessorProperty(..)) -> None
         Error(Nil) -> elements.get_option(elements, k)

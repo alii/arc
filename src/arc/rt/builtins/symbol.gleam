@@ -1,5 +1,6 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type SymbolId,
@@ -10,7 +11,6 @@ import arc/rt/types.{
   mk_undefined, plain_object, symbol_description, symbol_descriptive_string,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 pub fn init(
@@ -18,7 +18,8 @@ pub fn init(
   object_proto: Handle,
   fn_proto: Handle,
 ) -> #(BuiltinPair, Agent) {
-  let #(prototype, st) = common.alloc_proto(st, Some(object_proto), dict.new())
+  let #(prototype, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
   let #(for_h, st) =
     common.alloc_rooted_native_fn(st, fn_proto, SymbolN(SymbolFor), "for", 1)
   let #(key_for_h, st) =

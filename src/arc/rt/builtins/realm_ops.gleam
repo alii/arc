@@ -4,6 +4,7 @@ import arc/bytecode/error_kind.{
 }
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type Realm, BigIntObj,
@@ -12,7 +13,6 @@ import arc/rt/types.{
   plain_object,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/option.{Some}
 
 fn error_kind_prototype(r: Realm, kind: ErrorKind) -> Handle {
@@ -44,7 +44,7 @@ pub fn alloc_object(
   kind: ObjKind,
   proto: Handle,
 ) -> #(Handle, Agent) {
-  rt_store.cell_new(st, plain_object(kind, Some(proto), dict.new()))
+  rt_store.cell_new(st, plain_object(kind, Some(proto), prop_map.new()))
 }
 
 // §7.1.18 toobject

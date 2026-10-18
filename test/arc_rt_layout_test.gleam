@@ -16,6 +16,7 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledCode, type JsVal, type ShapeSlots, AccessorProperty,
@@ -303,7 +304,7 @@ pub fn sobject_test() {
   let proto = Handle(1)
   let vx = types.mk_string("vx")
   let props =
-    dict.from_list([
+    prop_map.from_list([
       #(
         named("x"),
         DataProperty(
@@ -457,7 +458,7 @@ pub fn kernel_macros_test() {
         constructible: False,
       ),
       proto: None,
-      props: dict.new(),
+      props: prop_map.new(),
       symbol_props: [],
       elements: NoElements,
       extensible: True,
@@ -867,7 +868,7 @@ pub fn bytecode_function_kernels_miss_test() {
   let #(fh, st) =
     rt_store.cell_new(
       st,
-      plain_object(kind, Some(st.realm.function.prototype), dict.new()),
+      plain_object(kind, Some(st.realm.function.prototype), prop_map.new()),
     )
   let f = types.mk_object(fh)
   assert rt_val.is_callable(st, f)

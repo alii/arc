@@ -2,6 +2,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/function as b_function
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type GeneratorNative, type Handle, type JsVal,
@@ -11,7 +12,6 @@ import arc/rt/types.{
   mk_object, mk_undefined, plain_object,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 pub fn init(
@@ -104,7 +104,7 @@ fn init_function_intrinsic(
   fn_ctor: Handle,
   generator_proto: option.Option(Handle),
 ) -> #(BuiltinPair, Agent) {
-  let #(gfn_proto, st) = common.alloc_proto(st, Some(fn_proto), dict.new())
+  let #(gfn_proto, st) = common.alloc_proto(st, Some(fn_proto), prop_map.new())
   let #(len_p, st) = common.fn_length_property(st, 1)
   let #(name_p, st) = common.fn_name_property(st, name)
   let #(proto_p, st) = common.fn_prototype_property(st, gfn_proto)

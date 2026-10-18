@@ -6,6 +6,7 @@ import arc/rt/buffer
 import arc/rt/bytecode.{FuncTemplate}
 import arc/rt/elements
 import arc/rt/limits
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsElements, type JsVal, type ObjKind,
@@ -124,13 +125,13 @@ pub fn as_sobject(cell: Cell) -> Cell {
   case cell {
     SShapedObject(proto:, slots:, offsets:, ..) -> {
       let props =
-        dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
+        dict.fold(offsets, prop_map.new(), fn(acc, key_bin, off) {
           let value = shape_slots_get(slots, off)
           let key = case bit_array.to_string(key_bin) {
             Ok(s) -> key.canonical(s)
             Error(Nil) -> names.empty
           }
-          dict.insert(
+          prop_map.insert(
             acc,
             key,
             types.DataProperty(
@@ -186,7 +187,7 @@ pub fn devolve_dictionary(st: Agent, receiver: JsVal, key: ObjectKey) -> Agent {
 fn own_property_of(
   st: Agent,
   kind: ObjKind,
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
   elements: JsElements,
   key: PropertyKey,
 ) -> Option(Property) {
@@ -224,12 +225,13 @@ fn own_property_of(
     TypedArrayObj(..), Named(_, s) ->
       case buffer.is_canonical_numeric_string(s) {
         True -> None
-        False -> dict.get(props, key) |> option.from_result
+        False -> prop_map.get(props, key) |> option.from_result
       }
-    TypedArrayObj(..), Private(..) -> dict.get(props, key) |> option.from_result
+    TypedArrayObj(..), Private(..) ->
+      prop_map.get(props, key) |> option.from_result
     // §10.4.2 length value tracks ArrayObj, dict holds attributes only
     ArrayObj(length:), Named(_, "length") ->
-      case dict.get(props, key) {
+      case prop_map.get(props, key) {
         Ok(DataProperty(writable:, enumerable:, configurable:, ..)) ->
           Some(DataProperty(
             value: types.mk_int(length),
@@ -251,9 +253,9 @@ fn own_property_of(
     StringObj(value: s), Named(_, "length") -> Some(string_length_property(s))
     StringObj(value: s), Index(i) ->
       string_index_property(s, i)
-      |> option.lazy_or(fn() { dict.get(props, key) |> option.from_result })
+      |> option.lazy_or(fn() { prop_map.get(props, key) |> option.from_result })
     ArrayObj(_), Index(i) | ArgumentsObj(..), Index(i) ->
-      case dict.get(props, key) {
+      case prop_map.get(props, key) {
         Ok(prop) -> Some(prop)
         Error(Nil) ->
           elements.get_option(elements, i)
@@ -284,7 +286,7 @@ fn own_property_of(
       Some(birth_prop(length, 0))
     BoundFn(target_name:, birth: BirthPending(_), ..), Named(_, "name") ->
       Some(birth_prop(types.mk_string("bound " <> target_name), 1))
-    _, _ -> dict.get(props, key) |> option.from_result
+    _, _ -> prop_map.get(props, key) |> option.from_result
   }
 }
 
@@ -302,7 +304,7 @@ pub fn get_own_index(st: Agent, h: Handle, idx: Int) -> OwnIndex {
     | SObject(kind: TypedArrayObj(..), ..) -> OwnIndexExotic
     SObject(kind: ArrayObj(_), props:, elements:, proto:, ..)
     | SObject(kind: ArgumentsObj(..), props:, elements:, proto:, ..) ->
-      case dict.get(props, Index(idx)) {
+      case prop_map.get(props, Index(idx)) {
         Ok(prop) -> OwnIndexProperty(prop)
         Error(Nil) ->
           case elements.get_option(elements, idx) {
@@ -427,7 +429,7 @@ fn alloc_plain(st: Agent, entries: List(#(String, JsVal))) -> #(Handle, Agent) {
   types.SObject(
     kind: Ordinary,
     proto: Some(object_proto),
-    props: dict.from_list(props),
+    props: prop_map.from_list(props),
     symbol_props: [],
     elements: types.NoElements,
     extensible: True,
@@ -440,7 +442,7 @@ pub fn new_object(st: Agent, proto: Option(Handle)) -> #(Handle, Agent) {
     types.SObject(
       kind: Ordinary,
       proto: proto,
-      props: dict.new(),
+      props: prop_map.new(),
       symbol_props: [],
       elements: types.NoElements,
       extensible: True,
@@ -479,8 +481,8 @@ fn birth_prop(value: JsVal, seq: Int) -> Property {
   )
 }
 
-pub fn constructor_props(f: Handle) -> Dict(PropertyKey, Property) {
-  dict.from_list([
+pub fn constructor_props(f: Handle) -> PropMap(Property) {
+  prop_map.from_list([
     #(
       names.constructor,
       types.DataProperty(
@@ -539,8 +541,8 @@ fn settle_birth(
   let assert SObject(kind:, props:, ..) = cell
   let props =
     props
-    |> dict.insert(names.length, birth_prop(length, 0))
-    |> dict.insert(names.name, birth_prop(types.mk_string(name), 1))
+    |> prop_map.insert(names.length, birth_prop(length, 0))
+    |> prop_map.insert(names.name, birth_prop(types.mk_string(name), 1))
   let #(props, st) = case parent {
     None -> #(props, st)
     Some(parent) -> {
@@ -564,7 +566,7 @@ fn settle_birth(
           configurable: False,
           seq: prototype_seq,
         )
-      #(dict.insert(props, names.prototype, prototype), st)
+      #(prop_map.insert(props, names.prototype, prototype), st)
     }
   }
   let kind = case kind {
@@ -616,13 +618,13 @@ pub fn name_if_anonymous(st: Agent, f: Handle, name: String) -> Agent {
       SObject(..cell, kind: CompiledFn(..kind, name:))
     SObject(kind: BytecodeFn(..), props:, ..)
     | SObject(kind: CompiledFn(..), props:, ..) ->
-      case dict.get(props, names.name) {
+      case prop_map.get(props, names.name) {
         Ok(DataProperty(value: v, seq:, ..)) ->
           case types.classify(v) {
             types.KStr("") ->
               SObject(
                 ..cell,
-                props: dict.insert(
+                props: prop_map.insert(
                   props,
                   names.name,
                   birth_prop(types.mk_string(name), seq),
@@ -1176,7 +1178,7 @@ fn set_own_string(
   st: Agent,
   h: Handle,
   kind: ObjKind,
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
   elements: JsElements,
   extensible extensible: Bool,
   key key: PropertyKey,
@@ -1190,12 +1192,12 @@ fn set_own_string(
       }
     ArrayObj(length:), Index(i) -> {
       let length_writable = array_length_writable(props)
-      case dict.get(props, key) {
+      case prop_map.get(props, key) {
         Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
           write_props(
             st,
             h,
-            dict.insert(
+            prop_map.insert(
               props,
               key,
               DataProperty(
@@ -1258,12 +1260,12 @@ fn set_own_string(
         False -> set_ordinary_string(st, h, props, extensible, key, v)
       }
     ArgumentsObj(..), Index(i) ->
-      case dict.get(props, key) {
+      case prop_map.get(props, key) {
         Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
           write_props(
             st,
             h,
-            dict.insert(
+            prop_map.insert(
               props,
               key,
               DataProperty(
@@ -1302,17 +1304,17 @@ fn set_own_string(
 fn set_ordinary_string(
   st: Agent,
   h: Handle,
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
   extensible extensible: Bool,
   key key: PropertyKey,
   v v: JsVal,
 ) -> #(Bool, Agent) {
-  case dict.get(props, key) {
+  case prop_map.get(props, key) {
     Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
       write_props(
         st,
         h,
-        dict.insert(
+        prop_map.insert(
           props,
           key,
           DataProperty(
@@ -1330,7 +1332,7 @@ fn set_ordinary_string(
         False -> #(False, st)
         True -> {
           let #(prop, st) = rt_store.plain_property(st, v)
-          write_props(st, h, dict.insert(props, key, prop))
+          write_props(st, h, prop_map.insert(props, key, prop))
         }
       }
   }
@@ -1376,7 +1378,7 @@ fn set_own_symbol(
 fn write_props(
   st: Agent,
   h: Handle,
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
 ) -> #(Bool, Agent) {
   let st =
     rt_store.cell_update(st, h, fn(cell) {
@@ -1399,8 +1401,8 @@ fn write_symbol_props(
   #(True, st)
 }
 
-fn array_length_writable(props: Dict(PropertyKey, Property)) -> Bool {
-  case dict.get(props, names.length) {
+fn array_length_writable(props: PropMap(Property)) -> Bool {
+  case prop_map.get(props, names.length) {
     Ok(DataProperty(writable:, ..)) -> writable
     Ok(AccessorProperty(..)) | Error(Nil) -> True
   }
@@ -1453,7 +1455,7 @@ fn array_set_length(
       // a non-configurable index stops the shrink at index + 1
       let assert SObject(props:, ..) = read_object(st, h)
       let blocked =
-        dict.fold(props, None, fn(acc, k, prop) {
+        prop_map.fold(props, None, fn(acc, k, prop) {
           case k {
             Index(i) if i >= new_len ->
               case types.prop_configurable(prop) {
@@ -1477,7 +1479,7 @@ fn array_set_length(
           SObject(
             ..cell,
             kind: ArrayObj(final_len),
-            props: dict.filter(p, fn(k, _) {
+            props: prop_map.filter(p, fn(k, _) {
               case k {
                 Index(i) -> i < final_len
                 _ -> True
@@ -1555,7 +1557,7 @@ pub fn define_own_prop(
       let st =
         rt_store.cell_update(st, obj, fn(cell) {
           let assert SObject(props: p, ..) = cell
-          SObject(..cell, props: dict.insert(p, pk, new_prop))
+          SObject(..cell, props: prop_map.insert(p, pk, new_prop))
         })
       #(len_ok, st)
     }
@@ -1576,18 +1578,18 @@ pub fn define_own_prop(
                 ) ->
                   SObject(
                     ..cell,
-                    props: dict.delete(p, pk),
+                    props: prop_map.delete(p, pk),
                     elements: elements.set(e, i, v),
                   )
                 _ ->
                   SObject(
                     ..cell,
-                    props: dict.insert(p, pk, new_prop),
+                    props: prop_map.insert(p, pk, new_prop),
                     elements: elements.delete(e, i),
                   )
               }
             StringKey(pk) ->
-              SObject(..cell, props: dict.insert(p, pk, new_prop))
+              SObject(..cell, props: prop_map.insert(p, pk, new_prop))
             SymbolKey(sym) ->
               SObject(..cell, symbol_props: list.key_set(sp, sym, new_prop))
           }
@@ -1921,11 +1923,11 @@ pub fn delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
       }
     StringKey(pk) -> {
       let ordinary_delete = fn() {
-        case dict.get(props, pk) {
+        case prop_map.get(props, pk) {
           Ok(prop) ->
             case types.prop_configurable(prop) {
               False -> #(False, st)
-              True -> write_props(st, obj, dict.delete(props, pk))
+              True -> write_props(st, obj, prop_map.delete(props, pk))
             }
           Error(Nil) -> #(True, st)
         }
@@ -1940,7 +1942,7 @@ pub fn delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
         )
         ArrayObj(_), Named(_, "length") -> #(False, st)
         ArrayObj(_), Index(i) | ArgumentsObj(..), Index(i) ->
-          case dict.get(props, pk) {
+          case prop_map.get(props, pk) {
             Ok(prop) ->
               case types.prop_configurable(prop) {
                 False -> #(False, st)
@@ -1950,7 +1952,7 @@ pub fn delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
                       let assert SObject(props: p, elements: e, ..) = cell
                       SObject(
                         ..cell,
-                        props: dict.delete(p, pk),
+                        props: prop_map.delete(p, pk),
                         elements: elements.delete(e, i),
                       )
                     })
@@ -2048,7 +2050,7 @@ fn sobject_own_keys(st: Agent, cell: Cell) -> #(List(ObjectKey), Agent) {
     _ -> []
   }
   let #(dict_idx, named) =
-    dict.fold(props, #([], []), fn(acc, k, prop) {
+    prop_map.fold(props, #([], []), fn(acc, k, prop) {
       let #(idx, named) = acc
       case k {
         Index(i) -> #([i, ..idx], named)
@@ -2339,7 +2341,7 @@ pub fn module_namespace_cell(
   SObject(
     kind: ModuleNamespace(exports:),
     proto: None,
-    props: dict.new(),
+    props: prop_map.new(),
     symbol_props: [
       #(
         types.symbol_to_string_tag,
@@ -3530,7 +3532,7 @@ pub fn new_arguments(
     SObject(
       kind: ArgumentsObj(length: len, mapped: mapped_boxes),
       proto: Some(realm.object.prototype),
-      props: dict.from_list([
+      props: prop_map.from_list([
         #(names.length, length_prop),
         #(names.callee, callee_prop),
       ]),
@@ -3552,7 +3554,7 @@ pub fn new_array(st: Agent, elems: List(JsVal)) -> #(JsVal, Agent) {
       SObject(
         kind: ArrayObj(length: len),
         proto: Some(st.realm.array.prototype),
-        props: dict.new(),
+        props: prop_map.new(),
         symbol_props: [],
         elements: Dense(elements),
         extensible: True,

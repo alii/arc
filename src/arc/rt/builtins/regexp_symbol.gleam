@@ -18,6 +18,7 @@ import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
 import arc/rt/limits
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, KHandle, KNull, KUndef, Ordinary, RegExpN,
@@ -26,7 +27,6 @@ import arc/rt/types.{
 }
 import arc/rt/val as rt_val
 import gleam/bool
-import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -902,7 +902,7 @@ type RegExpIterState {
 fn read_iter_state(st: Agent, h: Handle) -> Option(RegExpIterState) {
   case rt_store.cell_get(st, h) {
     SObject(props:, ..) -> {
-      use m <- option.then(case dict.get(props, named(iter_matcher_key)) {
+      use m <- option.then(case prop_map.get(props, named(iter_matcher_key)) {
         Ok(types.DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(mh) -> Some(mh)
@@ -910,7 +910,7 @@ fn read_iter_state(st: Agent, h: Handle) -> Option(RegExpIterState) {
           }
         _ -> None
       })
-      use s <- option.then(case dict.get(props, named(iter_subject_key)) {
+      use s <- option.then(case prop_map.get(props, named(iter_subject_key)) {
         Ok(types.DataProperty(value:, ..)) ->
           case classify(value) {
             types.KStr(s) -> Some(s)
@@ -918,11 +918,11 @@ fn read_iter_state(st: Agent, h: Handle) -> Option(RegExpIterState) {
           }
         _ -> None
       })
-      use g <- option.then(case dict.get(props, named(iter_global_key)) {
+      use g <- option.then(case prop_map.get(props, named(iter_global_key)) {
         Ok(types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
         _ -> None
       })
-      use d <- option.map(case dict.get(props, named(iter_done_key)) {
+      use d <- option.map(case prop_map.get(props, named(iter_done_key)) {
         Ok(types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
         _ -> None
       })
@@ -936,11 +936,11 @@ fn mark_iter_done(st: Agent, h: Handle) -> Agent {
   rt_store.cell_update(st, h, fn(cell) {
     case cell {
       SObject(props:, ..) ->
-        case dict.get(props, named(iter_done_key)) {
+        case prop_map.get(props, named(iter_done_key)) {
           Ok(types.DataProperty(seq:, ..)) ->
             SObject(
               ..cell,
-              props: dict.insert(
+              props: prop_map.insert(
                 props,
                 named(iter_done_key),
                 types.plain_property(mk_bool(True), seq),

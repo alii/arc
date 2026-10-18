@@ -2,6 +2,7 @@ import arc/bytecode/key.{type PropertyKey, private, private_display_name}
 import arc/bytecode/names
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type MethodInstallKind, type ObjectKey,
@@ -10,7 +11,6 @@ import arc/rt/types.{
   SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 fn priv_key_text(v: JsVal) -> String {
@@ -312,7 +312,7 @@ fn write_private_data(
       as "private_method_add target is not an SObject"
     SObject(
       ..cell,
-      props: dict.insert(
+      props: prop_map.insert(
         props,
         key,
         DataProperty(
@@ -352,7 +352,7 @@ fn merge_private_accessor(
       as "private_method_add target is not an SObject"
     SObject(
       ..cell,
-      props: dict.insert(
+      props: prop_map.insert(
         props,
         key,
         AccessorProperty(
@@ -417,11 +417,11 @@ pub fn private_set(
           let st =
             rt_store.cell_update(st, h, fn(cell) {
               let assert SObject(props:, ..) = cell
-              case dict.get(props, key) {
+              case prop_map.get(props, key) {
                 Ok(DataProperty(seq:, writable:, enumerable:, configurable:, ..)) ->
                   SObject(
                     ..cell,
-                    props: dict.insert(
+                    props: prop_map.insert(
                       props,
                       key,
                       DataProperty(

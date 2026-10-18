@@ -78,6 +78,7 @@ import arc/rt/intl_data.{
   ZoneShort, ZoneShortGeneric, ZoneShortOffset,
 }
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/temporal_data.{
   type TemporalData, TemporalDate, TemporalDateTime, TemporalDuration,
@@ -111,7 +112,6 @@ import arc/rt/unicode_case
 import arc/rt/val as rt_val
 import arc/time_zone
 import gleam/bool
-import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
@@ -282,7 +282,7 @@ pub fn init(
       service_method(IntlSegments, IntlSegmentsContaining, 1),
     ])
   let #(segments_proto, st) =
-    common.alloc_proto(st, Some(object_proto), dict.new())
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
   let st = common.add_named_properties(st, segments_proto, seg_containing)
   let #(seg_iter_fn, st) =
     common.alloc_rooted_native_fn(

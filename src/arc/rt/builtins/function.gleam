@@ -5,6 +5,7 @@ import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
+import arc/rt/prop_map
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -16,7 +17,6 @@ import arc/rt/types.{
   classify, mk_bool, mk_int, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/list
 import gleam/option.{Some}
 import gleam/string
@@ -26,7 +26,8 @@ pub fn init(
   object_proto: Handle,
   realm: Int,
 ) -> #(#(BuiltinPair, Handle), Agent) {
-  let #(func_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
+  let #(func_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
   let #(proto_methods, st) =
     common.alloc_methods(st, func_proto, [
       #("call", FunctionN(FunctionCall), 1),

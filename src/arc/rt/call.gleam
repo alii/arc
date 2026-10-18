@@ -1,10 +1,11 @@
-import arc/bytecode/key.{type PropertyKey, named}
+import arc/bytecode/key.{named}
 import arc/bytecode/names
 import arc/internal/tree_array
 import arc/internal/unsafe
 import arc/rt/bytecode.{type FnFlags, FnFlags}
 import arc/rt/limits
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledCode, type DirectEntry, type Handle, type JsVal,
@@ -16,7 +17,7 @@ import arc/rt/types.{
 }
 import arc/rt/val as rt_val
 import gleam/bool
-import gleam/dict.{type Dict}
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -733,7 +734,7 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
     SObject(
       kind: ArrayObj(length: len),
       proto: Some(st.realm.array.prototype),
-      props: dict.new(),
+      props: prop_map.new(),
       symbol_props: [],
       elements:,
       extensible: True,
@@ -743,7 +744,7 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
 
 // birth props take seq 0,1,2; length is a jsval so bind can pass +infinity
 @external(erlang, "arc_rt_call_ffi", "birth_props")
-fn birth_props(length_v: JsVal, name: String) -> Dict(PropertyKey, Property)
+fn birth_props(length_v: JsVal, name: String) -> PropMap(Property)
 
 fn alloc_fn_cell(
   st: Agent,
@@ -854,7 +855,7 @@ pub fn new_closure(
           birth: BirthPending(prototype_parent),
         ),
         proto: Some(proto),
-        props: dict.new(),
+        props: prop_map.new(),
         symbol_props: [],
         elements: types.NoElements,
         extensible: True,
@@ -959,5 +960,5 @@ pub fn bound_new(
       birth: BirthPending(None),
     )
   let proto = Some(st.realm.function.prototype)
-  rt_store.cell_new(st, types.plain_object(kind, proto, dict.new()))
+  rt_store.cell_new(st, types.plain_object(kind, proto, prop_map.new()))
 }

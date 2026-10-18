@@ -5,6 +5,7 @@ import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -380,7 +381,7 @@ fn stack_trace_limit(st: Agent) -> Int {
   let ctor = rt_store.cell_get(st, st.realm.error.constructor)
   case rt_obj.as_sobject(ctor) {
     SObject(props:, ..) ->
-      case dict.get(props, names.stack_trace_limit) {
+      case prop_map.get(props, names.stack_trace_limit) {
         Ok(DataProperty(value: v, ..)) ->
           case classify(v) {
             KNum(JInt(n)) -> int.max(0, n)
@@ -409,7 +410,7 @@ pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
       SObject(kind: ErrorObj(..), ..) as s ->
         SObject(..s, kind: ErrorObj(stack: trace))
       SObject(props:, ..) as s ->
-        SObject(..s, props: dict.insert(props, names.stack, stack_prop))
+        SObject(..s, props: prop_map.insert(props, names.stack, stack_prop))
       other -> other
     }
   })
@@ -434,7 +435,7 @@ fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
   let read = fn(key) {
     case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
       SObject(props:, ..) ->
-        case dict.get(props, named(key)) {
+        case prop_map.get(props, named(key)) {
           Ok(DataProperty(value: v, ..)) ->
             case classify(v) {
               KStr(s) -> Some(s)

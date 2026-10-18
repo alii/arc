@@ -14,6 +14,7 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayIterKind, type BuiltinPair, type ConcatItem,
@@ -35,7 +36,6 @@ import arc/rt/types.{
   symbol_async_iterator, symbol_dispose, symbol_iterator, symbol_to_string_tag,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
@@ -259,7 +259,7 @@ fn alloc_proto_with_symbols(
       SObject(
         kind: Ordinary,
         proto: Some(parent),
-        props: dict.new(),
+        props: prop_map.new(),
         symbol_props:,
         elements: NoElements,
         extensible: True,

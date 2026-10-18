@@ -13,6 +13,7 @@ import arc/rt/call.{
 } as rt_call
 import arc/rt/elements
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type IteratorRecord, type JsVal,
@@ -28,7 +29,6 @@ import arc/rt/types.{
   classify, mk_bool, mk_int, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val.{is_callable} as rt_val
-import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
@@ -1044,7 +1044,7 @@ fn is_plain_promise(st: Agent, o: JsVal) -> Bool {
       case rt_store.cell_get(st, h) {
         SObject(kind: types.PromiseObj(..), proto: Some(p), props:, ..) ->
           p == st.realm.promise.prototype
-          && !dict.has_key(props, names.constructor)
+          && !prop_map.has_key(props, names.constructor)
         _ -> False
       }
     _ -> False

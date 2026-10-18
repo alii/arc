@@ -16,6 +16,7 @@ import arc/rt/intl_data.{
   type IntlService,
 }
 import arc/rt/limits
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/temporal_data.{type TemporalData}
 import arc/rt/wire
 import arc/time_zone
@@ -833,7 +834,7 @@ pub type RegExpNative {
   // per-realm regexp caches: pristine prototype props and compiled patterns
   RegExpConstructor(
     legacy: LegacyStatics,
-    proto_props: Option(Dict(PropertyKey, Property)),
+    proto_props: Option(PropMap(Property)),
     compiled: Dict(String, CompiledRegExp),
   )
   RegExpLegacyGetter(ctor: Handle, which: LegacyStatic)
@@ -1788,7 +1789,7 @@ pub type Cell {
   SObject(
     kind: ObjKind,
     proto: Option(Handle),
-    props: Dict(PropertyKey, Property),
+    props: PropMap(Property),
     symbol_props: List(#(SymbolId, Property)),
     elements: JsElements,
     extensible: Bool,
@@ -1817,7 +1818,7 @@ pub type Cell {
 pub fn plain_object(
   kind: ObjKind,
   proto: Option(Handle),
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
 ) -> Cell {
   SObject(
     kind:,

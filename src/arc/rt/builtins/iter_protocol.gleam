@@ -1,10 +1,11 @@
 import arc/bytecode/error_kind.{TypeError}
-import arc/bytecode/key.{type PropertyKey, Index}
+import arc/bytecode/key.{Index}
 import arc/bytecode/names
 import arc/internal/ordered_entries
 import arc/rt/call.{NormalCompletion, ThrowCompletion, call, try_call} as rt_call
 import arc/rt/elements
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type IteratorRecord, type JsElements,
@@ -17,7 +18,6 @@ import arc/rt/types.{
 }
 import arc/rt/utf8
 import arc/rt/val.{is_callable} as rt_val
-import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -133,7 +133,7 @@ pub fn create_async_from_sync(
       plain_object(
         AsyncFromSyncIterator(sync_rec:),
         Some(st.realm.async_from_sync_proto),
-        dict.new(),
+        prop_map.new(),
       ),
     )
   let wrapper = mk_object(wrapper_h)
@@ -329,7 +329,7 @@ fn array_values_to_list(
 
 fn walk_elements(
   els: JsElements,
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
   i: Int,
   length: Int,
   acc: List(JsVal),
@@ -337,7 +337,7 @@ fn walk_elements(
   case i < length {
     False -> #(acc, i)
     True ->
-      case dict.has_key(props, Index(i)), elements.get_option(els, i) {
+      case prop_map.has_key(props, Index(i)), elements.get_option(els, i) {
         False, Some(v) -> walk_elements(els, props, i + 1, length, [v, ..acc])
         _, _ -> #(acc, i)
       }

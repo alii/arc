@@ -11,6 +11,7 @@ import arc/rt/builtins/realm_ops
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/typed_array_bytes
 import arc/rt/types.{
@@ -381,7 +382,7 @@ fn host_cell(
   SObject(
     kind: HostObj(payload:),
     proto:,
-    props: dict.new(),
+    props: prop_map.new(),
     symbol_props: [],
     elements: NoElements,
     extensible:,

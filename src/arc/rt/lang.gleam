@@ -8,6 +8,7 @@ import arc/rt/builtins/object as b_object
 import arc/rt/call.{NormalCompletion, ThrowCompletion, call} as rt_call
 import arc/rt/js_string
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type IteratorNative, type IteratorRecord, type JsVal,
@@ -19,7 +20,7 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
-import gleam/dict.{type Dict}
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -42,7 +43,7 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let store = st.store
   let seq = store.prop_seq
   let props =
-    dict.from_list([
+    prop_map.from_list([
       #(
         names.iterator,
         types.DataProperty(
@@ -102,10 +103,7 @@ fn as_stack_record(rec: IteratorRecord) -> JsVal {
   unsafe.coerce(rec)
 }
 
-fn record_props(
-  st: Agent,
-  rec: JsVal,
-) -> Option(Dict(PropertyKey, types.Property)) {
+fn record_props(st: Agent, rec: JsVal) -> Option(PropMap(types.Property)) {
   case classify(rec) {
     KHandle(h) ->
       case rt_store.cell_get(st, h) {
@@ -116,10 +114,8 @@ fn record_props(
   }
 }
 
-fn parts_of(
-  props: Dict(PropertyKey, types.Property),
-) -> Option(IteratorRecord) {
-  case dict.get(props, names.iterator), dict.get(props, names.next) {
+fn parts_of(props: PropMap(types.Property)) -> Option(IteratorRecord) {
+  case prop_map.get(props, names.iterator), prop_map.get(props, names.next) {
     Ok(DataProperty(value: iterator, ..)),
       Ok(DataProperty(value: next_method, ..))
     -> Some(IteratorRecord(iterator:, next_method:))
@@ -153,7 +149,7 @@ fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
 fn record_fields(st: Agent, rec: JsVal) -> Option(#(Bool, IteratorRecord)) {
   case record_props(st, rec) {
     Some(props) ->
-      case dict.get(props, names.done), parts_of(props) {
+      case prop_map.get(props, names.done), parts_of(props) {
         Ok(DataProperty(value: done, ..)), Some(record) ->
           Some(#(rt_val.to_boolean(done), record))
         _, _ -> None
@@ -555,7 +551,7 @@ pub fn materialize_record(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
       types.SObject(
         kind:,
         proto: Some(array_iter_proto(st, rec)),
-        props: dict.new(),
+        props: prop_map.new(),
         symbol_props: [],
         elements: types.NoElements,
         extensible: True,

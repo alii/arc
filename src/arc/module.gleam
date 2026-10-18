@@ -21,6 +21,7 @@ import arc/rt/call as rt_call
 import arc/rt/closure as rt_closure
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ReflectNative, Immutable, KHandle,
@@ -1380,7 +1381,7 @@ fn fill_deferred_namespace(
     SObject(
       kind: ProxyObj(target:, handler:, revoked: False),
       proto: None,
-      props: dict.new(),
+      props: prop_map.new(),
       symbol_props: [],
       elements: NoElements,
       // private field checks read this directly

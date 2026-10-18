@@ -6,6 +6,7 @@ import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/realm_ops
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type DisposableStackNative, type DisposableState,
@@ -23,7 +24,6 @@ import arc/rt/types.{
   mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -86,7 +86,8 @@ fn init_stack_type(
   dispose_symbol dispose_symbol: SymbolId,
   disposed_fn disposed_fn: DisposableStackNative,
 ) -> #(BuiltinPair, Agent) {
-  let #(proto_h, st) = common.alloc_proto(st, Some(object_proto), dict.new())
+  let #(proto_h, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
 
   let #(methods, st) =
     common.alloc_methods(st, function_proto, [

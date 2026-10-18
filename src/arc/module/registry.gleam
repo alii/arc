@@ -2,12 +2,12 @@
 
 import arc/bytecode/key.{type PropertyKey, named}
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, DataProperty, KHandle, KStr, SObject,
   StringKey, classify, mk_object, mk_string,
 }
-import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 fn status_property() -> PropertyKey {
@@ -244,7 +244,7 @@ fn put_hidden_property(
     SObject(props:, ..) ->
       SObject(
         ..cell,
-        props: dict.insert(props, key, types.builtin_property(val, seq)),
+        props: prop_map.insert(props, key, types.builtin_property(val, seq)),
       )
     _ -> panic as "arc/module/registry: hidden property target is not an object"
   }

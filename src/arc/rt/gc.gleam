@@ -4,6 +4,7 @@ import arc/rt/arena.{type Arena}
 import arc/rt/bytecode.{
   type FuncTemplate, type SuspendedFrame, FuncTemplate, SuspendedFrame,
 }
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/types.{
   type Agent, type AsyncGenRequest, type Cell, type Handle, type IcEntry,
   type JsElements, type JsVal, type ObjKind, type PromiseReaction,
@@ -38,7 +39,7 @@ pub fn push_refs(term: a, acc: List(Int)) -> List(Int)
 fn diff_refs(before: a, now: a, acc: List(Int)) -> List(Int)
 
 @external(erlang, "arc_rt_gc_ffi", "push_props_refs")
-fn push_props_refs(props: Dict(k, Property), acc: List(Int)) -> List(Int)
+fn push_props_refs(props: PropMap(Property), acc: List(Int)) -> List(Int)
 
 @external(erlang, "arc_rt_gc_ffi", "push_symbol_props_refs")
 fn push_symbol_props_refs(

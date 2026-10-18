@@ -13,6 +13,7 @@ import arc/rt/elements
 import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayNative, type BuiltinPair, type Cell, type Handle,
@@ -42,7 +43,7 @@ import arc/rt/types.{
 import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bool
-import gleam/dict.{type Dict}
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -147,11 +148,11 @@ pub fn init(
     "toSorted", "toSpliced", "values",
   ]
   let #(unscopable_props, st) =
-    list.fold(unscopable_names, #(dict.new(), st), fn(acc, name) {
+    list.fold(unscopable_names, #(prop_map.new(), st), fn(acc, name) {
       let #(props, st) = acc
       let #(seq, st) = rt_store.next_prop_seq(st)
       #(
-        dict.insert(
+        prop_map.insert(
           props,
           named(name),
           types.plain_property(mk_bool(True), seq),
@@ -296,7 +297,7 @@ pub fn alloc_array(
       SObject(
         kind: ArrayObj(length),
         proto: Some(array_proto),
-        props: dict.new(),
+        props: prop_map.new(),
         symbol_props: [],
         elements:,
         extensible: True,
@@ -356,9 +357,9 @@ fn object_length(st: Agent, h: Handle) -> #(Int, Agent) {
 fn length_of_properties(
   st: Agent,
   h: Handle,
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
 ) -> #(Int, Agent) {
-  case dict.get(props, names.length) {
+  case prop_map.get(props, names.length) {
     Ok(DataProperty(value: len_val, ..)) -> rt_val.to_length(st, len_val)
     _ -> {
       rt_abstract_ops.length_of_array_like(st, mk_object(h))
@@ -550,8 +551,8 @@ pub fn dense_snapshot(
   }
 }
 
-fn properties_have_index_keys(props: Dict(PropertyKey, Property)) -> Bool {
-  !dict.is_empty(props) && any_index_key(dict.keys(props))
+fn properties_have_index_keys(props: PropMap(Property)) -> Bool {
+  !prop_map.is_empty(props) && any_index_key(prop_map.keys(props))
 }
 
 fn any_index_key(keys: List(PropertyKey)) -> Bool {
@@ -579,7 +580,7 @@ pub fn with_plain_elements(
       extensible: True,
       ..,
     ) as cell -> {
-      let length_writable = case dict.get(props, names.length) {
+      let length_writable = case prop_map.get(props, names.length) {
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
@@ -622,7 +623,7 @@ fn push_dense(
       ..,
     ) -> {
       let arg_count = list.length(args)
-      let length_writable = case dict.get(props, names.length) {
+      let length_writable = case prop_map.get(props, names.length) {
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
@@ -655,7 +656,7 @@ fn push_dense(
 @external(erlang, "arc_rt_array_ffi", "index_range_plain")
 fn index_range_plain(
   st: Agent,
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
   proto: Option(Handle),
   start: Int,
   count: Int,
@@ -1345,7 +1346,7 @@ fn intrinsic_species(st: Agent, cell: Cell) -> Bool {
   case cell {
     SObject(kind: ArrayObj(_), proto: Some(p), props:, ..) ->
       p == array.prototype
-      && !dict.has_key(props, names.constructor)
+      && !prop_map.has_key(props, names.constructor)
       && common.species_intact(st, array)
     _ -> False
   }

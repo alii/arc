@@ -43,6 +43,7 @@ import arc/rt/builtins/weak
 import arc/rt/builtins/weak_ref as b_weak_ref
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -89,7 +90,7 @@ fn init_realm(st: Agent) -> #(Realm, Agent) {
     dict.fold(st.realms, st.realm.id + 1, fn(next, known, _realm) {
       int.max(next, known + 1)
     })
-  let #(object_proto, st) = common.alloc_proto(st, None, dict.new())
+  let #(object_proto, st) = common.alloc_proto(st, None, prop_map.new())
   let #(#(function, throw_type_error), st) =
     b_function.init(st, object_proto, id)
   let fn_proto = function.prototype

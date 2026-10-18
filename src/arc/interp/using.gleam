@@ -4,13 +4,13 @@ import arc/internal/tuple_array
 import arc/rt/builtins/disposable_stack as b_disposable_stack
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/closure as rt_closure
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, KHandle, KNull, KUndef, classify,
   mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/option.{None, Some}
 
 pub fn using_disposer(
@@ -51,7 +51,7 @@ fn bound_disposer(st: Agent, method: Handle, val: JsVal) -> #(JsVal, Agent) {
     )
   let proto = Some(st.realm.function.prototype)
   let #(h, st) =
-    rt_store.cell_new(st, types.plain_object(kind, proto, dict.new()))
+    rt_store.cell_new(st, types.plain_object(kind, proto, prop_map.new()))
   #(mk_object(h), st)
 }
 

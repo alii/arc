@@ -11,6 +11,7 @@ import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/limits
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -371,7 +372,7 @@ fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
     }
     JsonObject(entries) -> {
       let #(entries, st) = materialize_object_entries(st, entries, [])
-      let #(props, st) = props_from_entries(st, entries, dict.new())
+      let #(props, st) = props_from_entries(st, entries, prop_map.new())
       let #(h, st) =
         rt_store.cell_new(
           st,
@@ -400,7 +401,7 @@ fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
         use seq <- rt_store.cell_new_with(st, list.length(entries))
         let props = case plain_prop_dict(entries, seq) {
           PlainProps(props:, ..) -> props
-          PropsMiss -> plain_props(entries, dict.new(), seq)
+          PropsMiss -> plain_props(entries, prop_map.new(), seq)
         }
         plain_object(Ordinary, Some(object_proto), props)
       }
@@ -438,7 +439,7 @@ fn materialize_plain_entries(
 }
 
 type PlainProps {
-  PlainProps(props: dict.Dict(PropertyKey, types.Property), seq: Int)
+  PlainProps(props: PropMap(types.Property), seq: Int)
   PropsMiss
 }
 
@@ -447,21 +448,21 @@ fn plain_prop_dict(entries: List(#(String, JsVal)), seq: Int) -> PlainProps
 
 fn plain_props(
   entries: List(#(String, JsVal)),
-  acc: dict.Dict(PropertyKey, types.Property),
+  acc: PropMap(types.Property),
   seq: Int,
-) -> dict.Dict(PropertyKey, types.Property) {
+) -> PropMap(types.Property) {
   case entries {
     [] -> acc
     [#(name, value), ..rest] -> {
       let pk = key.canonical(name)
-      case dict.get(acc, pk) {
+      case prop_map.get(acc, pk) {
         Ok(first) -> {
           let prop = types.plain_property(value, types.prop_seq(first))
-          plain_props(rest, dict.insert(acc, pk, prop), seq)
+          plain_props(rest, prop_map.insert(acc, pk, prop), seq)
         }
         Error(Nil) -> {
           let prop = types.plain_property(value, seq)
-          plain_props(rest, dict.insert(acc, pk, prop), seq + 1)
+          plain_props(rest, prop_map.insert(acc, pk, prop), seq + 1)
         }
       }
     }
@@ -500,21 +501,21 @@ fn materialize_object_entries(
 fn props_from_entries(
   st: Agent,
   entries: List(#(String, ParseRecord)),
-  acc: dict.Dict(PropertyKey, types.Property),
-) -> #(dict.Dict(PropertyKey, types.Property), Agent) {
+  acc: PropMap(types.Property),
+) -> #(PropMap(types.Property), Agent) {
   case entries {
     [] -> #(acc, st)
     [#(name, record), ..rest] -> {
       let pk = key.canonical(name)
       let value = record_value(record)
-      case dict.get(acc, pk) {
+      case prop_map.get(acc, pk) {
         Ok(first) -> {
           let prop = types.plain_property(value, types.prop_seq(first))
-          props_from_entries(st, rest, dict.insert(acc, pk, prop))
+          props_from_entries(st, rest, prop_map.insert(acc, pk, prop))
         }
         Error(Nil) -> {
           let #(prop, st) = rt_store.plain_property(st, value)
-          props_from_entries(st, rest, dict.insert(acc, pk, prop))
+          props_from_entries(st, rest, prop_map.insert(acc, pk, prop))
         }
       }
     }
@@ -543,7 +544,7 @@ fn json_raw_json(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
           SObject(
             kind: RawJsonObj(raw: json_text),
             proto: None,
-            props: dict.from_list([#(names.raw_json, prop)]),
+            props: prop_map.from_list([#(names.raw_json, prop)]),
             symbol_props: [],
             elements: types.NoElements,
             extensible: False,
@@ -1128,6 +1129,4 @@ fn string_key(key: types.ObjectKey) -> Result(PropertyKey, Nil) {
 }
 
 @external(erlang, "arc_rt_json_ffi", "plain_enumerable_keys")
-fn plain_enumerable_keys(
-  props: dict.Dict(PropertyKey, types.Property),
-) -> List(PropertyKey)
+fn plain_enumerable_keys(props: PropMap(types.Property)) -> List(PropertyKey)

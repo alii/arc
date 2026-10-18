@@ -2,12 +2,12 @@ import arc/bytecode/names
 import arc/rt/bytecode.{type EnvTuple, type FnFlags, type FuncTemplate}
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, BirthPending, BytecodeFn, DataProperty, Ordinary,
   mk_object,
 }
-import gleam/dict
 import gleam/option.{None, Some}
 
 // does not root the result
@@ -52,7 +52,7 @@ pub fn new_bytecode_function(
         types.SObject(
           kind: kind,
           proto:,
-          props: dict.new(),
+          props: prop_map.new(),
           symbol_props: [],
           elements: types.NoElements,
           extensible: True,
@@ -78,12 +78,12 @@ fn new_with_eager_prototype(
     True, True -> #(
       rt_call.async_generator_fn_prototype(st, st.realm),
       realm.async_gen.prototype,
-      fn(_) { dict.new() },
+      fn(_) { prop_map.new() },
     )
     True, False -> #(
       realm.generator_fn.prototype,
       realm.generator.prototype,
-      fn(_) { dict.new() },
+      fn(_) { prop_map.new() },
     )
     False, _ -> #(
       realm.function.prototype,
@@ -112,7 +112,7 @@ fn new_with_eager_prototype(
         unit_id:,
         birth: BirthPending(None),
       )
-    let props = dict.from_list([#(names.prototype, prototype_prop)])
+    let props = prop_map.from_list([#(names.prototype, prototype_prop)])
     #(
       types.SObject(
         kind: kind,

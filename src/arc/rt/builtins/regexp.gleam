@@ -1,4 +1,4 @@
-import arc/bytecode/key.{type PropertyKey, named}
+import arc/bytecode/key.{named}
 import arc/bytecode/names
 import arc/internal/bytes
 import arc/internal/digits
@@ -11,6 +11,7 @@ import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
 import arc/rt/elements
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacyStatic,
@@ -361,7 +362,7 @@ fn write_legacy_statics(
 type CtorState {
   CtorState(
     legacy: LegacyStatics,
-    proto_props: Option(Dict(PropertyKey, Property)),
+    proto_props: Option(PropMap(Property)),
     compiled: Dict(String, types.CompiledRegExp),
   )
 }
@@ -427,11 +428,8 @@ fn proto_pristine(st: Agent) -> #(Bool, Agent) {
   }
 }
 
-fn verify_pristine(
-  st: Agent,
-  props: Dict(PropertyKey, Property),
-) -> #(Bool, Agent) {
-  let exec = case dict.get(props, names.exec) {
+fn verify_pristine(st: Agent, props: PropMap(Property)) -> #(Bool, Agent) {
+  let exec = case prop_map.get(props, names.exec) {
     Ok(DataProperty(value:, ..)) -> is_intrinsic_exec(st, value)
     _ -> False
   }
@@ -1161,7 +1159,7 @@ fn alloc_array_with_props(
   SObject(
     kind: ArrayObj(list.length(values)),
     proto: Some(array_proto),
-    props: dict.from_list(props),
+    props: prop_map.from_list(props),
     symbol_props: [],
     elements: elements.from_list(values),
     extensible: True,
@@ -1260,7 +1258,7 @@ fn own_flags(st: Agent, h: Handle) -> #(Option(String), Agent) {
     SObject(kind: RegExpObj(flags:, ..), proto: Some(p), props:, ..)
       if p == proto
     ->
-      case dict.size(props) == 1 {
+      case prop_map.size(props) == 1 {
         False -> #(None, st)
         True -> {
           // stored canonical at allocation
@@ -1291,11 +1289,11 @@ fn canonical_flags(flags: String) -> String {
 
 fn intrinsic_getter(
   st: Agent,
-  props: dict.Dict(PropertyKey, types.Property),
+  props: PropMap(types.Property),
   name: String,
   expected: RegExpNative,
 ) -> Bool {
-  case dict.get(props, named(name)) {
+  case prop_map.get(props, named(name)) {
     Ok(types.AccessorProperty(get: Some(g), ..)) ->
       case classify(g) {
         KHandle(gh) ->
@@ -1330,7 +1328,7 @@ pub fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
   let proto = st.realm.regexp.prototype
   case rt_store.cell_get(st, h) {
     SObject(kind: RegExpObj(..), proto: Some(p), props:, ..) if p == proto ->
-      case dict.has_key(props, names.exec) {
+      case prop_map.has_key(props, names.exec) {
         True -> #(False, st)
         False -> proto_pristine(st)
       }

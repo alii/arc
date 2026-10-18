@@ -7,6 +7,7 @@ import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
 import arc/rt/limits
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type AsyncGenRequest, type AsyncGenResumeKind, type AsyncGenState,
@@ -27,7 +28,6 @@ import arc/rt/types.{
   job_queue_push, mk_bool, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val.{is_callable} as rt_val
-import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -409,7 +409,7 @@ pub fn alloc_iter_result(
   let object_proto = st.realm.object.prototype
   use seq <- rt_store.cell_new_with(st, 2)
   let props =
-    dict.from_list([
+    prop_map.from_list([
       #(
         names.value,
         types.DataProperty(
@@ -451,7 +451,7 @@ fn alloc_shell(
     types.SObject(
       kind: kind,
       proto: proto,
-      props: dict.new(),
+      props: prop_map.new(),
       symbol_props: [],
       elements: types.NoElements,
       extensible: True,

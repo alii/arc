@@ -1,6 +1,7 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ProxyNative,
@@ -8,7 +9,6 @@ import arc/rt/types.{
   ProxyRevoke, SObject, classify, mk_object, mk_undefined, plain_object,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/option.{None, Some}
 
 pub fn init(
@@ -82,7 +82,11 @@ fn proxy_create(st: Agent, args: List(JsVal)) -> #(Handle, Agent) {
   let handler = require_object(st, handler_v, "Proxy handler")
   rt_store.cell_new(
     st,
-    plain_object(ProxyObj(target:, handler:, revoked: False), None, dict.new()),
+    plain_object(
+      ProxyObj(target:, handler:, revoked: False),
+      None,
+      prop_map.new(),
+    ),
   )
 }
 

@@ -5,6 +5,7 @@ import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type LexicalSlots}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/bytecode.{type EnvTuple}
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsVal, type LexicalGlobal,
   type Property, type Store, type SymbolId,
@@ -133,7 +134,7 @@ pub fn get_field(st: Agent, obj: JsVal, key: PropertyKey) -> JsVal
 pub fn builtin_getter(st: Agent, obj: JsVal, key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "own_data")
-pub fn own_data(props: Dict(PropertyKey, Property), key: PropertyKey) -> JsVal
+pub fn own_data(props: PropMap(Property), key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_global")
 pub fn get_global(

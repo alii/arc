@@ -9,13 +9,13 @@ import arc/rt/bytecode.{
 import arc/rt/gc as rt_gc
 import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, Agent, BirthSettled, BytecodeFn,
   GenSuspendedYield, HostJob, KHandle, ResumeFrame, SGenerator, Store, classify,
   mk_object, mk_undefined, plain_object,
 }
-import gleam/dict
 import gleam/option.{None, Some}
 import gleam/set
 import rt_helpers
@@ -279,7 +279,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
           birth: BirthSettled,
         ),
         None,
-        dict.new(),
+        prop_map.new(),
       ),
     )
   let st = rt_lang.global_set(st, <<"f">>, mk_object(fn_h))

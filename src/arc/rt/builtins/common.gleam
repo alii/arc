@@ -1,10 +1,11 @@
 // alloc and install kit for builtin objects
 
-import arc/bytecode/key.{type PropertyKey, named}
+import arc/bytecode/key.{named}
 import arc/bytecode/names
 import arc/internal/tree_array
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
@@ -12,7 +13,6 @@ import arc/rt/types.{
   BuiltinPair, DataProperty, Dense, ErrorObj, NativeFn, NoElements, Ordinary,
   SObject, mk_int, mk_object, mk_string, plain_object,
 }
-import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -81,17 +81,15 @@ pub fn fn_prototype_property(st: Agent, proto: Handle) -> #(Property, Agent) {
   rt_store.frozen_property(st, mk_object(proto))
 }
 
-pub fn named_props(
-  props: List(#(String, Property)),
-) -> Dict(PropertyKey, Property) {
-  use acc, #(k, v) <- list.fold(props, dict.new())
-  dict.insert(acc, named(k), v)
+pub fn named_props(props: List(#(String, Property))) -> PropMap(Property) {
+  use acc, #(k, v) <- list.fold(props, prop_map.new())
+  prop_map.insert(acc, named(k), v)
 }
 
 pub fn alloc_proto(
   st: Agent,
   proto: Option(Handle),
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
 ) -> #(Handle, Agent) {
   let #(h, st) = rt_store.cell_new(st, plain_object(Ordinary, proto, props))
   #(h, rt_store.pin_root(st, h))
@@ -108,7 +106,7 @@ pub fn alloc_plain_object(
       let #(name, value) = entry
       #(named(name), types.plain_property(value, seq + i))
     })
-  plain_object(Ordinary, Some(object_proto), dict.from_list(entries))
+  plain_object(Ordinary, Some(object_proto), prop_map.from_list(entries))
 }
 
 pub fn alloc_rooted_native_fn(
@@ -231,7 +229,7 @@ pub fn init_type(
   arity: Int,
   ctor_props: List(#(String, Property)),
 ) -> #(BuiltinPair, Agent) {
-  let #(proto_h, st) = alloc_proto(st, Some(parent_proto), dict.new())
+  let #(proto_h, st) = alloc_proto(st, Some(parent_proto), prop_map.new())
   init_type_on(
     st,
     proto_h,
@@ -332,7 +330,7 @@ pub fn init_type_on(
       let assert SObject(props: existing, ..) = cell
       let merged = {
         use acc, #(k, v) <- list.fold(all_proto_props, existing)
-        dict.insert(acc, named(k), v)
+        prop_map.insert(acc, named(k), v)
       }
       SObject(..cell, props: merged)
     })
@@ -356,7 +354,7 @@ pub fn add_named_property(
 ) -> Agent {
   rt_store.cell_update(st, h, fn(cell) {
     let assert SObject(props:, ..) = cell
-    SObject(..cell, props: dict.insert(props, named(name), prop))
+    SObject(..cell, props: prop_map.insert(props, named(name), prop))
   })
 }
 
@@ -461,7 +459,7 @@ pub fn alloc_array(
     SObject(
       kind: ArrayObj(length: len),
       proto: Some(array_proto),
-      props: dict.new(),
+      props: prop_map.new(),
       symbol_props: [],
       elements:,
       extensible: True,

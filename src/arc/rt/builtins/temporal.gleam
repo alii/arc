@@ -16,6 +16,7 @@ import arc/rt/builtins/temporal_time_zone.{
   epoch_ns_to_iso_in, system_time_zone, time_zone_id, to_temporal_time_zone,
 }
 import arc/rt/builtins/temporal_zoned_date_time
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/temporal_data.{type TemporalZone}
 import arc/rt/types.{
@@ -43,7 +44,6 @@ import arc/rt/types.{
   TemporalZonedDateTimeStatic, classify, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/list
 import gleam/option.{Some}
 
@@ -52,14 +52,22 @@ pub fn init(
   object_proto: Handle,
   function_proto: Handle,
 ) -> #(Handle, TemporalProtos, Agent) {
-  let #(pd_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  let #(pt_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  let #(pdt_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  let #(pym_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  let #(pmd_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  let #(dur_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  let #(ins_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  let #(zdt_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
+  let #(pd_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
+  let #(pt_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
+  let #(pdt_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
+  let #(pym_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
+  let #(pmd_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
+  let #(dur_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
+  let #(ins_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
+  let #(zdt_proto, st) =
+    common.alloc_proto(st, Some(object_proto), prop_map.new())
   let protos =
     TemporalProtos(
       plain_date: pd_proto,

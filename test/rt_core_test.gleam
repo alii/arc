@@ -8,6 +8,7 @@ import arc/rt/gc as rt_gc
 import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, Agent, BirthSettled, BytecodeFn, FrameInfo, JFloat,
@@ -16,7 +17,6 @@ import arc/rt/types.{
   plain_object,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/option.{None}
 import rt_helpers.{as_code, frame_at}
 
@@ -278,7 +278,11 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
   let #(fh, st) =
     rt_store.cell_new(
       st,
-      plain_object(kind, option.Some(st.realm.function.prototype), dict.new()),
+      plain_object(
+        kind,
+        option.Some(st.realm.function.prototype),
+        prop_map.new(),
+      ),
     )
   let f = mk_object(fh)
   assert type_of(st, f) == "function"

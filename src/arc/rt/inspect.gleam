@@ -5,6 +5,7 @@ import arc/rt/buffer
 import arc/rt/elements
 import arc/rt/intl_data
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/temporal_data.{
   type TemporalData, TemporalDate, TemporalDateTime, TemporalDuration,
@@ -25,7 +26,7 @@ import arc/rt/types.{
 }
 import arc/rt/val as rt_val
 import gleam/bool
-import gleam/dict.{type Dict}
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -241,7 +242,7 @@ fn inspect_array_loop(
 
 fn inspect_plain_object(
   st: Agent,
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
   depth: Int,
   visited: Set(Handle),
 ) -> String {
@@ -282,10 +283,10 @@ fn inspect_plain_object(
 }
 
 fn ordered_property_pairs(
-  props: Dict(PropertyKey, Property),
+  props: PropMap(Property),
 ) -> List(#(PropertyKey, Property)) {
   let #(idx, named) =
-    dict.fold(props, #([], []), fn(acc, key, prop) {
+    prop_map.fold(props, #([], []), fn(acc, key, prop) {
       let #(idx, named) = acc
       case key {
         Index(i) -> #([#(i, prop), ..idx], named)
@@ -358,7 +359,7 @@ fn error_property(
   use <- bool.guard(fuel <= 0, None)
   case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
     SObject(props:, proto:, ..) ->
-      case dict.get(props, named(key)) {
+      case prop_map.get(props, named(key)) {
         Ok(DataProperty(value:, ..)) ->
           case classify(value) {
             KStr(s) -> Some(s)
