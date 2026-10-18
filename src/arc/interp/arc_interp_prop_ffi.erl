@@ -176,23 +176,24 @@ accessor_next(Cells, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
 accessor_next(_, _, _, _) -> no_accessor.
 
 %% §9.1.1.4.6 global getbindingvalue, plain case
-get_global(St, Lex, Name) ->
+get_global(St, Lex, K) ->
     case Lex of
-        #{Name := Binding} ->
+        #{?KEY_ID(K) := {T, Binding}} when T =:= ?KEY_TEXT(K) ->
             case element(?LEXICAL_GLOBAL_VALUE, Binding) of
                 js_tdz -> miss;
                 V -> V
             end;
+        #{?KEY_ID(K) := _} -> miss;
         _ ->
             {?HANDLE_TAG, G} = element(?REALM_GLOBAL_OBJECT, element(?AGENT_REALM, St)),
-            object_get(element(?AGENT_STORE, St), G, arc_bytecode_key_ffi:named(Name), miss)
+            object_get(element(?AGENT_STORE, St), G, K, miss)
     end.
 
 %% §9.1.1.4.5 setmutablebinding on the global object
-put_global(Store, Lex, Global, Name, V, Strict) ->
-    case is_map_key(Name, Lex) of
+put_global(Store, Lex, Global, K, V, Strict) ->
+    case is_map_key(?KEY_ID(K), Lex) of
         true -> miss;
-        false -> put_field(Store, Global, arc_bytecode_key_ffi:named(Name), V, not Strict)
+        false -> put_field(Store, Global, K, V, not Strict)
     end.
 
 %% getters miss so the general path passes the primitive as this

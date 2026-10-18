@@ -91,7 +91,7 @@ pub fn agent_roots(st: Agent) -> List(Int) {
   // registry copy of the current realm may be stale
   let realms = dict.insert(st.realms, st.realm.id, st.realm)
   dict.fold(realms, acc, fn(acc, _id, realm) {
-    dict.fold(realm.lexical_globals, acc, fn(acc, _name, binding) {
+    prop_map.fold(realm.lexical_globals, acc, fn(acc, _name, binding) {
       push_refs(types.lexical_global_value(binding), acc)
     })
   })

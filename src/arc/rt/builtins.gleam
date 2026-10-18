@@ -254,7 +254,7 @@ fn init_realm(st: Agent) -> #(Realm, Agent) {
       global_object:,
       shared_array_buffer:,
       id:,
-      lexical_globals: dict.new(),
+      lexical_globals: prop_map.new(),
       suppressed_error: errors.suppressed_error,
       fn_shared: types.FnShared(
         proto: Some(function.prototype),

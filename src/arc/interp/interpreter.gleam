@@ -74,6 +74,7 @@ import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
+import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
@@ -86,7 +87,6 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
-import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -123,7 +123,8 @@ fn inspect(state: State, v: JsVal) -> String {
 }
 
 fn lexical_global(agent: Agent, name: String) -> Option(LexicalGlobal) {
-  dict.get(agent.realm.lexical_globals, name) |> option.from_result
+  prop_map.get(agent.realm.lexical_globals, key.named(name))
+  |> option.from_result
 }
 
 fn put_lexical_global(
@@ -136,7 +137,11 @@ fn put_lexical_global(
     ..agent,
     realm: Realm(
       ..realm,
-      lexical_globals: dict.insert(realm.lexical_globals, name, binding),
+      lexical_globals: prop_map.insert(
+        realm.lexical_globals,
+        key.named(name),
+        binding,
+      ),
     ),
   )
 }
@@ -2608,8 +2613,8 @@ fn loop(
       }
     }
 
-    GetGlobal(name) -> {
-      let v = kernel.get_global(agent, agent.realm.lexical_globals, name)
+    GetGlobal(k) -> {
+      let v = kernel.get_global(agent, agent.realm.lexical_globals, k)
       case kernel.is(v, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
@@ -2628,8 +2633,8 @@ fn loop(
       }
     }
 
-    TypeofGlobal(name) -> {
-      let v = kernel.get_global(agent, agent.realm.lexical_globals, name)
+    TypeofGlobal(k) -> {
+      let v = kernel.get_global(agent, agent.realm.lexical_globals, k)
       case kernel.is(v, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False -> {
@@ -2654,7 +2659,7 @@ fn loop(
       }
     }
 
-    PutGlobal(name) ->
+    PutGlobal(k) ->
       case stack {
         [val, ..rest] -> {
           let realm = agent.realm
@@ -2663,7 +2668,7 @@ fn loop(
               agent.store,
               realm.lexical_globals,
               realm.global_object,
-              name,
+              k,
               val,
               state.func.is_strict,
             )
@@ -4434,7 +4439,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       )
 
     // §9.1.1.4.4 getbindingvalue
-    GetGlobal(name) ->
+    GetGlobal(k) -> {
+      let name = key.to_text(k)
       case lexical_global(state.agent, name) {
         Some(binding) -> {
           let value = types.lexical_global_value(binding)
@@ -4455,9 +4461,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           State(..state, stack: [value, ..state.stack], pc: state.pc + 1)
         }
       }
+    }
 
     // §9.1.1.4.5 setmutablebinding
-    PutGlobal(name) ->
+    PutGlobal(k) -> {
+      let name = key.to_text(k)
       case state.stack {
         [value, ..rest] ->
           case lexical_global(state.agent, name) {
@@ -4496,6 +4504,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           }
         [] -> underflow(state, "PutGlobal")
       }
+    }
 
     // §9.1.1.4.7 deletebinding, lexical bindings never deletable
     DeleteGlobalVar(name) ->
@@ -4547,7 +4556,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case lookup_eval_env(state, name) {
         Some(v) ->
           Ok(State(..state, stack: [v, ..state.stack], pc: state.pc + 1))
-        None -> step(state, drive, GetGlobal(name))
+        None -> step(state, drive, GetGlobal(key.named(name)))
       }
 
     TypeofEvalVar(name) ->
@@ -4562,14 +4571,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             ),
           )
         }
-        None -> step(state, drive, TypeofGlobal(name))
+        None -> step(state, drive, TypeofGlobal(key.named(name)))
       }
 
     PutEvalVar(name) ->
       case state.eval_env, state.stack {
         Some(env), [v, ..rest] ->
           case rt_env.eval_env_has(state.agent, env, name) {
-            False -> step(state, drive, PutGlobal(name))
+            False -> step(state, drive, PutGlobal(key.named(name)))
             True ->
               Ok(
                 State(
@@ -4580,7 +4589,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 ),
               )
           }
-        _, _ -> step(state, drive, PutGlobal(name))
+        _, _ -> step(state, drive, PutGlobal(key.named(name)))
       }
 
     // §19.2.1.3 no eval scope: global var, deletable
@@ -4876,7 +4885,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // tdz throws, undeclared is "undefined"
-    TypeofGlobal(name) ->
+    TypeofGlobal(k) -> {
+      let name = key.to_text(k)
       case lexical_global(state.agent, name) {
         Some(binding) -> {
           let value = types.lexical_global_value(binding)
@@ -4907,6 +4917,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           State(..state, stack: [mk_string(t), ..state.stack], pc: state.pc + 1)
         }
       }
+    }
 
     BinOp(kind) ->
       case state.stack {

@@ -1191,7 +1191,7 @@ fn emit_annexb_promote(e: Emitter, name: String) -> Emitter {
         AnnexBFallthrough -> {
           let e = emit_slot_get(e, scope.binding_ref(source))
           case fn_fallthrough(e) {
-            ToGlobal -> emit_op(e, opcode.PutGlobal(name))
+            ToGlobal -> emit_op(e, opcode.PutGlobal(key.named(name)))
             ToEvalEnv -> emit_op(e, opcode.PutEvalVar(name))
           }
         }
@@ -1378,7 +1378,7 @@ fn emit_var_init(e: Emitter, name: String) -> Emitter {
     scope.Local(slot:, boxed: False, ..) ->
       Emitter(..e, initialized: set.insert(e.initialized, slot))
       |> emit_op(opcode.PutLocal(slot))
-    scope.Global(name:) -> emit_op(e, opcode.PutGlobal(name))
+    scope.Global(name:) -> emit_op(e, opcode.PutGlobal(key.named(name)))
     scope.EvalEnv(name:) -> emit_op(e, opcode.PutEvalVar(name))
   }
 }
@@ -1390,7 +1390,7 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
   let typeof_fallback = fn(e: Emitter) {
     case fallback {
       scope.Local(..) -> emit_target_get(e, fallback) |> emit_op(opcode.TypeOf)
-      scope.Global(name:) -> emit_op(e, opcode.TypeofGlobal(name))
+      scope.Global(name:) -> emit_op(e, opcode.TypeofGlobal(key.named(name)))
       scope.EvalEnv(name:) -> emit_op(e, opcode.TypeofEvalVar(name))
     }
   }
@@ -1543,7 +1543,7 @@ fn emit_target_get(e: Emitter, res: scope.BindingTarget) -> Emitter {
   case res {
     scope.Local(slot:, boxed:, ..) ->
       emit_slot_get(e, scope.SlotRef(slot:, boxed:))
-    scope.Global(name:) -> emit_op(e, opcode.GetGlobal(name))
+    scope.Global(name:) -> emit_op(e, opcode.GetGlobal(key.named(name)))
     scope.EvalEnv(name:) -> emit_op(e, opcode.GetEvalVar(name))
   }
 }
@@ -1556,7 +1556,7 @@ fn emit_target_put(
   after_read after_read: Bool,
 ) -> Emitter {
   case res {
-    scope.Global(name:) -> emit_op(e, opcode.PutGlobal(name))
+    scope.Global(name:) -> emit_op(e, opcode.PutGlobal(key.named(name)))
     scope.EvalEnv(name:) -> emit_op(e, opcode.PutEvalVar(name))
     scope.Local(slot:, boxed:, kind:, declared_kind:) -> {
       let ref = scope.SlotRef(slot:, boxed:)
@@ -2897,7 +2897,7 @@ fn splice_arguments_setup(
       IrFinal(opcode.PutLocal(slot))
     scope.Plain(scope.Global(_))
     | scope.Plain(scope.EvalEnv(_))
-    | scope.WithChain(..) -> IrFinal(opcode.PutGlobal("arguments"))
+    | scope.WithChain(..) -> IrFinal(opcode.PutGlobal(key.named("arguments")))
   }
   let simple_params = !layout.non_simple_fixed && layout.rest == None
   let forward = uses_args && !e.arguments_escape && !fn_info(e).eval_in_subtree

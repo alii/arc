@@ -4,6 +4,7 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
+import arc/rt/prop_map
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type Realm, AccessorProperty, Agent,
@@ -76,17 +77,20 @@ pub fn lexical_globals_persist_across_switches_test() {
       let realm =
         types.Realm(
           ..st.realm,
-          lexical_globals: dict.insert(
+          lexical_globals: prop_map.insert(
             st.realm.lexical_globals,
-            "x",
+            key.named("x"),
             types.Let(mk_string("v")),
           ),
         )
       #(Nil, Agent(..st, realm:))
     })
-  assert dict.get(rt_call.realm_by_id(st, other.id).lexical_globals, "x")
+  assert prop_map.get(
+      rt_call.realm_by_id(st, other.id).lexical_globals,
+      key.named("x"),
+    )
     == Ok(types.Let(mk_string("v")))
-  assert dict.get(st.realm.lexical_globals, "x") == Error(Nil)
+  assert prop_map.get(st.realm.lexical_globals, key.named("x")) == Error(Nil)
 }
 
 pub fn install_262_and_create_realm_test() {

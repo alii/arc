@@ -37,8 +37,8 @@ pub type Op {
   PutLocal(index: Int)
   // throws unless slot is uninitialized (super() result)
   PutLocalCheckInit(index: Int)
-  GetGlobal(name: String)
-  PutGlobal(name: String)
+  GetGlobal(key: PropertyKey)
+  PutGlobal(key: PropertyKey)
   // §9.1.1.4.7 sloppy delete identifier at global scope
   DeleteGlobalVar(name: String)
   // eval_env first, else global; sloppy direct-eval contexts
@@ -195,7 +195,7 @@ pub type Op {
   BinOp(kind: ClassifiedBinOp)
   UnaryOp(kind: UnaryOpKind)
   TypeOf
-  TypeofGlobal(name: String)
+  TypeofGlobal(key: PropertyKey)
 
   // statement-position i++ on a plain local
   IncLocal(index: Int)

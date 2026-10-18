@@ -10,7 +10,6 @@ import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsVal, type LexicalGlobal,
   type Property, type Store, type SymbolId,
 }
-import gleam/dict.{type Dict}
 import gleam/option.{type Option}
 
 pub type Sentinel {
@@ -139,16 +138,16 @@ pub fn own_data(props: PropMap(Property), key: PropertyKey) -> JsVal
 @external(erlang, "arc_interp_prop_ffi", "get_global")
 pub fn get_global(
   st: Agent,
-  lex: Dict(String, LexicalGlobal),
-  name: String,
+  lex: PropMap(LexicalGlobal),
+  key: PropertyKey,
 ) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "put_global")
 pub fn put_global(
   store: Store,
-  lex: Dict(String, LexicalGlobal),
+  lex: PropMap(LexicalGlobal),
   global: Handle,
-  name: String,
+  key: PropertyKey,
   v: JsVal,
   strict strict: Bool,
 ) -> Store

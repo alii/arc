@@ -2059,7 +2059,7 @@ pub type Realm {
     // fields above are abi (arc_rt_layout.hrl), append only
     shared_array_buffer: BuiltinPair,
     id: Int,
-    lexical_globals: Dict(String, LexicalGlobal),
+    lexical_globals: PropMap(LexicalGlobal),
     suppressed_error: BuiltinPair,
     fn_shared: FnShared,
   )
@@ -2130,7 +2130,7 @@ pub fn unset_realm() -> Realm {
     global_object: h,
     shared_array_buffer: p,
     id: -1,
-    lexical_globals: dict.new(),
+    lexical_globals: prop_map.new(),
     suppressed_error: p,
     fn_shared: FnShared(
       proto: option.None,
