@@ -378,7 +378,9 @@ fn finish_top_level(
     local_names,
     is_strict: out.is_strict,
     code_kind:,
-    use_registers: option.is_none(local_names),
+    // a module that awaits parks with raw locals, like any coroutine frame
+    use_registers: option.is_none(local_names)
+      && !list.contains(out.code, opcode.IrFinal(opcode.Await)),
   )
 }
 

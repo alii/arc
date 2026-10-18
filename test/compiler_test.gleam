@@ -7096,6 +7096,19 @@ pub fn module_function_declaration_test() -> Nil {
   )
 }
 
+pub fn module_variables_survive_a_top_level_await_test() -> Nil {
+  let assert Ok(#(Ok(_), _)) =
+    run_module(
+      "var c = 0;
+       for (var i = 0; i < 3; i++) c += 1;
+       await 0;
+       if (c !== 3 || i !== 3) throw new Error('after one await: ' + c + ' ' + i);
+       for (var j = 0; j < 3; j++) { c += await 1; }
+       if (c !== 6 || j !== 3) throw new Error('after awaits in a loop: ' + c + ' ' + j);",
+    )
+  Nil
+}
+
 pub fn module_export_named_declaration_test() -> Nil {
   assert_module_normal("export let x = 42; x", KNum(JFloat(42.0)))
 }
