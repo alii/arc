@@ -689,6 +689,15 @@ m(['a']).then((v) => console.log(f(['x']), g({ s: 'y' }), h(['z']), k(['a', 2]),
   )
 }
 
+pub fn switch_with_a_body_per_case_diff_test() {
+  diff(
+    "function f(r) { var t = {}; switch (r) { case 1: t.a = r; break; case 2: t.b = r; break } return t; }
+function g(a) { var t = {}; for (let r of a) { switch (r) { case 1: t.a = r; break; case 2: t.b = r; break } } return t; }
+console.log(JSON.stringify([f(1), f(2), f(3), g([1, 2, 3])]));",
+    "[{\"a\":1},{\"b\":2},{},{\"a\":1,\"b\":2}]\n",
+  )
+}
+
 pub fn class_basics_diff_test() {
   diff(
     "class A { constructor(x){ this.x = x } get(){ return this.x } static s(){ return 's' } get g(){ return this.x*2 } set g(v){ this.x = v } }\nvar a = new A(3);\nconsole.log(a.get(), A.s(), a.g, typeof A, A.name, A.length, a instanceof A, Object.getPrototypeOf(a) === A.prototype);\na.g = 10; console.log(a.x, a.get());\nconsole.log(Object.keys(A.prototype).length, Object.getOwnPropertyNames(A.prototype).join(), JSON.stringify(Object.getOwnPropertyDescriptor(A,'prototype')));\nconsole.log(A.prototype.get.name, A.s.name, Object.getOwnPropertyDescriptor(A.prototype,'g').get.name, A.prototype.get.length);\ntry { A() } catch (e) { console.log(e.constructor.name) }\ntry { new a.get() } catch (e) { console.log(e.constructor.name) }\nclass B {}\nconsole.log(new B() instanceof B, B.name, B.length, typeof B.prototype.constructor, B.prototype.constructor === B);",
