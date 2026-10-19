@@ -153,7 +153,8 @@ type SegmentTail {
   FinallyEnd(try_id: Int)
   SplitAt(kind: SplitKind, arg: Option(ast.Expression), resume_state: Int)
   CondBranch(cond: HeadValue, then_state: Int, else_state: Int)
-  ForUpdate(update: Option(ast.Expression), head: Int)
+  // own_names: the head declares lets, which each turn gets its own copy of
+  ForUpdate(update: Option(ast.Expression), head: Int, own_names: Bool)
   ForOfSetup(right: ast.Expression, iter_key: String, head: Int)
   ForOfStep(left: ast.ForInit, iter_key: String, body_state: Int, after: Int)
   // for-in keeps its remaining keys in the iter slot
@@ -189,6 +190,9 @@ type ArmSpec {
     entry_kind: ArmEntry,
     entry_cursor: ArmCursor,
     resume: Option(ResumeWith),
+    // the block this arm starts by entering: its names are set up and its
+    // function declarations made before the fragment runs
+    enters_block: Option(List(ast.StmtWithLine)),
     body_fragment: List(ast.StmtWithLine),
     tail: SegmentTail,
     machine_frames: List(MachineFrame),
@@ -827,6 +831,7 @@ type SplitPlanner {
     open_cursor: ArmCursor,
     open_frames: List(MachineFrame),
     open_resume: Option(ResumeWith),
+    open_block: Option(List(ast.StmtWithLine)),
   )
 }
 
@@ -865,6 +870,7 @@ fn finish_arm(
       entry_kind: p.open_entry,
       entry_cursor: p.open_cursor,
       resume: p.open_resume,
+      enters_block: p.open_block,
       body_fragment: list.reverse(p.pending_stmts_rev),
       tail:,
       machine_frames: p.open_frames,
@@ -880,6 +886,7 @@ fn finish_arm(
     open_cursor: p.cur,
     open_frames: p.machine_frames,
     open_resume: None,
+    open_block: None,
   )
 }
 
@@ -1522,7 +1529,12 @@ fn plan_for(
   update: Option(ast.Expression),
   body: ast.Statement,
 ) -> SplitPlanner {
-  in_child_scope_if(p, ast_util.for_classic_init_is_lex(init), fn(p) {
+  let own_names = ast_util.for_classic_init_is_lex(init)
+  in_child_scope_if(p, own_names, fn(p) {
+    let p = case own_names {
+      True -> SplitPlanner(..p, open_block: Some([]))
+      False -> p
+    }
     let p = case init {
       None -> p
       Some(fi) -> {
@@ -1590,7 +1602,7 @@ fn plan_for(
           #(FromResumedValue, p) -> #(None, p)
         }
     }
-    finish_arm(p, ForUpdate(update:, head:), after, JumpEntry)
+    finish_arm(p, ForUpdate(update:, head:, own_names:), after, JumpEntry)
   })
 }
 
@@ -1821,7 +1833,26 @@ fn plan_labeled(
 }
 
 fn plan_block(p: SplitPlanner, ss: List(ast.StmtWithLine)) -> SplitPlanner {
-  in_child_scope_if(p, ast_util.block_has_declarations(ss), plan_stmts(_, ss))
+  use <- bool.lazy_guard(!ast_util.block_has_declarations(ss), fn() {
+    plan_stmts(p, ss)
+  })
+  use p <- in_child_scope(p)
+  // the arm open here starts at the block's first statement. It makes the
+  // block's function declarations there, so they leave the cursor together
+  let p = SplitPlanner(..p, open_block: Some(ss))
+  let is_fn_decl = fn(sl: ast.StmtWithLine) {
+    case ast_util.peel_labels(sl.statement) {
+      ast.FunctionDeclaration(..) -> True
+      _ -> False
+    }
+  }
+  let p =
+    list.fold(list.filter(ss, is_fn_decl), p, fn(p, _) { plan_nested_fn(p) })
+  use p, sl <- list.fold(ss, p)
+  case is_fn_decl(sl) {
+    True -> push_pending_stmt(p, sl)
+    False -> plan_stmt(p, sl)
+  }
 }
 
 fn plan_catch(p: SplitPlanner, h: ast.CatchClause) -> SplitPlanner {
@@ -2014,6 +2045,7 @@ fn analyze_splits(
       open_cursor: cur0,
       open_frames: [],
       open_resume: None,
+      open_block: None,
     )
   // the prologue has made the body's own function declarations already, so
   // cur0 is past them
@@ -3164,11 +3196,15 @@ fn emit_arm_body(e: Emitter, ctx: MachineContext, arm: ArmSpec) -> EmitResult {
         let k_tail = fn(e_leaf: Emitter) {
           emit_seg_tail(e_leaf, ctx, arm.tail)
         }
-        use #(frag, e2) <- result.map(e.dispatch.emit_stmts(
-          e,
-          arm.body_fragment,
-          k_tail,
-        ))
+        let fragment = e.dispatch.emit_stmts(_, arm.body_fragment, k_tail)
+        use #(frag, e2) <- result.map(case arm.enters_block {
+          None -> fragment(e)
+          Some(block) -> {
+            use e <- func.binding_prologue(e, e.cur_scope)
+            use e <- func.hoist_fn_decls(e, block)
+            fragment(e)
+          }
+        })
         case arm.resume {
           Some(ResumeBind(..)) | Some(ResumeCatch(_, Some(_))) -> #(
             state.splice_let(prelude, pre_n, frag),
@@ -3273,7 +3309,8 @@ fn emit_seg_tail(
         }),
       )
     }
-    ForUpdate(update, head) -> {
+    ForUpdate(update, head, own_names) -> {
+      use e <- fresh_boxes(e, own_names)
       use #(upd_tree, e) <- result.try(emit_opt_expr(e, update, e.consts.undef))
       let #(tmp, e) = state.fresh_var(e)
       let jump = jump_state_leaf(e, ctx, head, dict.new())
@@ -3299,6 +3336,22 @@ fn emit_seg_tail(
     SwitchDispatch(discriminant, tests, after) ->
       emit_switch_dispatch(e, ctx, discriminant, tests, after)
   }
+}
+
+// §14.7.4.2 the next turn's copies of the current scope's boxed names
+fn fresh_boxes(e: Emitter, wanted: Bool, k: state.Next) -> EmitResult {
+  use <- bool.lazy_guard(!wanted, fn() { k(e) })
+  let boxed =
+    dict.values(scope.get(e.scope_tree, e.cur_scope).bindings)
+    |> list.filter(fn(b) { b.boxed })
+    |> list.sort(fn(a, b) { int.compare(a.slot, b.slot) })
+  use e, b, next <- cps.each(e, boxed, then: k)
+  let old = ir.Var(state.get_slot_var(e, b.slot))
+  use v, e <- cps.host(e, "box_get", [old])
+  use box, e <- cps.host(e, "box_new", [v])
+  let #(n, e) = state.fresh_slot_var(e, b.slot)
+  use body <- state.map_tree(next(state.set_slot_var(e, b.slot, n)))
+  ir.Let([n], ir.Values([box]), body)
 }
 
 fn emit_opt_expr(
@@ -3470,8 +3523,13 @@ fn named_key_tuple(s: String) -> ir.Expr {
 fn for_lhs_bind(e: Emitter, left: ast.ForInit, v: ir.Value) -> EmitResult {
   let via = fn(pat, mode) { e.dispatch.emit_destructure(e, pat, v, mode) }
   case left {
-    ast.ForInitDeclaration(kind:, declarations: [d]) ->
-      via(d.id, bind_mode_of(kind))
+    ast.ForInitDeclaration(kind: ast.Var, declarations: [d]) ->
+      via(d.id, state.BindVar)
+    // each turn of the loop has its own copy of the head's names
+    ast.ForInitDeclaration(kind:, declarations: [d]) -> {
+      use e <- func.binding_prologue(e, e.cur_scope)
+      e.dispatch.emit_destructure(e, d.id, v, bind_mode_of(kind))
+    }
     ast.ForInitDeclaration(..) ->
       Error(state.EarlySyntaxError("for-of/in: multiple declarators"))
     ast.ForInitPattern(p) -> via(p, state.BindAssign)

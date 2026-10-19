@@ -635,6 +635,47 @@ d().then((v) => { out.push(v, ...g()); console.log(out.join(' ')); });",
   )
 }
 
+pub fn block_that_spans_an_await_sets_up_its_names_diff_test() {
+  diff(
+    "var out = [];
+const id = (...a) => a;
+async function W1() { { out.push(id(await 1, () => 'arrow')[1]()); function u() { return 'u'; } out.push(u(), (() => 'second')()); } }
+async function W2() { { out.push(u()); await 1; function u() { return 'u2'; } out.push((() => 'after')()); } }
+async function W3() { if (out) { let y = await 2; function u() { return 'u3' + y; } return () => u() + 'ret'; } }
+async function W4() { for (const k of [1, 2]) { await k; function u() { return 'u4' + k; } out.push(u(), (() => 'x' + k)()); } }
+function* G() { { yield (() => 'g1')(); function u() { return 'gu'; } yield u(); yield (() => 'g2')(); } }
+(async () => { await W1(); await W2(); out.push((await W3())()); await W4(); out.push(...G()); console.log(out.join(' ')); })().catch((e) => console.log('FAILED', String(e), out.join(' ')));",
+    "arrow u second u2 after u32ret u41 x1 u42 x2 g1 gu g2\n",
+  )
+}
+
+pub fn captured_loop_names_in_coroutines_diff_test() {
+  diff(
+    "var out = [];
+async function A() { var fs = []; for (let k of [1, 2]) { await k; fs.push(() => k); k += 10; } out.push(fs.map((f) => f()).join()); }
+async function B() { var fs = []; for (let k of [1, 2]) { fs.push(() => k); await k; k += 10; } out.push(fs.map((f) => f()).join()); }
+async function C() { for (const k of [1, 2]) { await k; function u() { return 'u' + k; } out.push(u()); } }
+async function D() { var fs = []; for (const k in { a: 1, b: 2 }) { await 0; fs.push(() => k); } out.push(fs.map((f) => f()).join()); }
+async function E() { var fs = []; for (let i = 0; i < 3; i++) { await i; fs.push(() => i); } out.push(fs.map((f) => f()).join()); }
+async function F() { var fs = []; for await (let k of [1, 2]) { fs.push(() => k); k += 5; } out.push(fs.map((f) => f()).join()); }
+async function G() { var fs = []; for (const [a, { b }] of [[1, { b: 2 }], [3, { b: 4 }]]) { await 0; fs.push(() => a + b); } out.push(fs.map((f) => f()).join()); }
+function* H() { for (let k of [1, 2]) { yield () => k; k += 1; } }
+(async () => { await A(); await B(); await C(); await D(); await E(); await F(); await G(); out.push([...H()].map((f) => f()).join()); console.log(out.join(' ')); })().catch((e) => console.log('FAILED', String(e), out.join(' ')));",
+    "11,12 11,12 u1 u2 a,b 0,1,2 6,7 3,7 2,3\n",
+  )
+}
+
+pub fn early_use_in_a_block_that_spans_a_yield_diff_test() {
+  diff(
+    "function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+function* a() { { s = 2; yield 1; let s; } }
+function* b() { { yield 1; s = 2; let s; } }
+function* c() { { let s = 1; yield s; s = 2; yield s; } }
+console.log(t(() => [...a()]), t(() => [...b()]), t(() => [...c()]));",
+    "ReferenceError ReferenceError 1,2\n",
+  )
+}
+
 pub fn class_basics_diff_test() {
   diff(
     "class A { constructor(x){ this.x = x } get(){ return this.x } static s(){ return 's' } get g(){ return this.x*2 } set g(v){ this.x = v } }\nvar a = new A(3);\nconsole.log(a.get(), A.s(), a.g, typeof A, A.name, A.length, a instanceof A, Object.getPrototypeOf(a) === A.prototype);\na.g = 10; console.log(a.x, a.get());\nconsole.log(Object.keys(A.prototype).length, Object.getOwnPropertyNames(A.prototype).join(), JSON.stringify(Object.getOwnPropertyDescriptor(A,'prototype')));\nconsole.log(A.prototype.get.name, A.s.name, Object.getOwnPropertyDescriptor(A.prototype,'g').get.name, A.prototype.get.length);\ntry { A() } catch (e) { console.log(e.constructor.name) }\ntry { new a.get() } catch (e) { console.log(e.constructor.name) }\nclass B {}\nconsole.log(new B() instanceof B, B.name, B.length, typeof B.prototype.constructor, B.prototype.constructor === B);",
