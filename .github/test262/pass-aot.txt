@@ -6835,6 +6835,7 @@ built-ins/Iterator/prototype/every/next-method-returns-throwing-value.js
 built-ins/Iterator/prototype/every/next-method-throws.js
 built-ins/Iterator/prototype/every/non-callable-predicate.js
 built-ins/Iterator/prototype/every/non-constructible.js
+built-ins/Iterator/prototype/every/predicate-args.js
 built-ins/Iterator/prototype/every/predicate-returns-falsey.js
 built-ins/Iterator/prototype/every/predicate-returns-non-boolean.js
 built-ins/Iterator/prototype/every/predicate-returns-truthy-then-falsey.js
@@ -6867,6 +6868,7 @@ built-ins/Iterator/prototype/filter/next-method-returns-throwing-value.js
 built-ins/Iterator/prototype/filter/next-method-throws.js
 built-ins/Iterator/prototype/filter/non-callable-predicate.js
 built-ins/Iterator/prototype/filter/non-constructible.js
+built-ins/Iterator/prototype/filter/predicate-args.js
 built-ins/Iterator/prototype/filter/predicate-filters.js
 built-ins/Iterator/prototype/filter/predicate-returns-non-boolean.js
 built-ins/Iterator/prototype/filter/predicate-this.js
@@ -6903,6 +6905,7 @@ built-ins/Iterator/prototype/find/next-method-returns-throwing-value.js
 built-ins/Iterator/prototype/find/next-method-throws.js
 built-ins/Iterator/prototype/find/non-callable-predicate.js
 built-ins/Iterator/prototype/find/non-constructible.js
+built-ins/Iterator/prototype/find/predicate-args.js
 built-ins/Iterator/prototype/find/predicate-returns-falsey-then-truthy.js
 built-ins/Iterator/prototype/find/predicate-returns-falsey.js
 built-ins/Iterator/prototype/find/predicate-returns-non-boolean.js
@@ -6962,6 +6965,7 @@ built-ins/Iterator/prototype/flatMap/underlying-iterator-closed.js
 built-ins/Iterator/prototype/forEach/argument-effect-order.js
 built-ins/Iterator/prototype/forEach/argument-validation-failure-closes-underlying.js
 built-ins/Iterator/prototype/forEach/callable.js
+built-ins/Iterator/prototype/forEach/fn-args.js
 built-ins/Iterator/prototype/forEach/fn-called-for-each-yielded-value.js
 built-ins/Iterator/prototype/forEach/fn-this.js
 built-ins/Iterator/prototype/forEach/fn-throws-then-closing-iterator-also-throws.js
@@ -7092,6 +7096,7 @@ built-ins/Iterator/prototype/reduce/get-next-method-throws.js
 built-ins/Iterator/prototype/reduce/is-function.js
 built-ins/Iterator/prototype/reduce/iterator-already-exhausted-initial-value.js
 built-ins/Iterator/prototype/reduce/iterator-already-exhausted-no-initial-value.js
+built-ins/Iterator/prototype/reduce/iterator-yields-once-initial-value.js
 built-ins/Iterator/prototype/reduce/iterator-yields-once-no-initial-value.js
 built-ins/Iterator/prototype/reduce/length.js
 built-ins/Iterator/prototype/reduce/name.js
@@ -7104,6 +7109,8 @@ built-ins/Iterator/prototype/reduce/non-callable-reducer.js
 built-ins/Iterator/prototype/reduce/non-constructible.js
 built-ins/Iterator/prototype/reduce/prop-desc.js
 built-ins/Iterator/prototype/reduce/proto.js
+built-ins/Iterator/prototype/reduce/reducer-args-initial-value.js
+built-ins/Iterator/prototype/reduce/reducer-args-no-initial-value.js
 built-ins/Iterator/prototype/reduce/reducer-memo-can-be-any-type.js
 built-ins/Iterator/prototype/reduce/reducer-this.js
 built-ins/Iterator/prototype/reduce/reducer-throws-then-closing-iterator-also-throws.js
@@ -7130,6 +7137,7 @@ built-ins/Iterator/prototype/some/next-method-returns-throwing-value.js
 built-ins/Iterator/prototype/some/next-method-throws.js
 built-ins/Iterator/prototype/some/non-callable-predicate.js
 built-ins/Iterator/prototype/some/non-constructible.js
+built-ins/Iterator/prototype/some/predicate-args.js
 built-ins/Iterator/prototype/some/predicate-returns-falsey-then-truthy.js
 built-ins/Iterator/prototype/some/predicate-returns-falsey.js
 built-ins/Iterator/prototype/some/predicate-returns-non-boolean.js
@@ -7253,6 +7261,7 @@ built-ins/Iterator/zip/iterator-zip-iteration-strict-checks-remaining-done.js
 built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-close-i-is-not-zero-abrupt-completion.js
 built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-close-i-is-zero-abrupt-completion.js
 built-ins/Iterator/zip/iterator-zip-iteration-strict-iterator-step-abrupt-completion.js
+built-ins/Iterator/zip/iterator-zip-iteration.js
 built-ins/Iterator/zip/length.js
 built-ins/Iterator/zip/name.js
 built-ins/Iterator/zip/non-constructible.js
@@ -7295,6 +7304,7 @@ built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-checks-remaining-done.
 built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-close-i-is-not-zero-abrupt-completion.js
 built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-close-i-is-zero-abrupt-completion.js
 built-ins/Iterator/zipKeyed/iterator-zip-iteration-strict-iterator-step-abrupt-completion.js
+built-ins/Iterator/zipKeyed/iterator-zip-iteration.js
 built-ins/Iterator/zipKeyed/length.js
 built-ins/Iterator/zipKeyed/name.js
 built-ins/Iterator/zipKeyed/non-constructible.js
@@ -7404,6 +7414,7 @@ built-ins/JSON/parse/text-object-abrupt.js
 built-ins/JSON/parse/text-object.js
 built-ins/JSON/prop-desc.js
 built-ins/JSON/rawJSON/basic.js
+built-ins/JSON/rawJSON/bigint-raw-json-can-be-stringified.js
 built-ins/JSON/rawJSON/builtin.js
 built-ins/JSON/rawJSON/illegal-empty-and-start-end-chars.js
 built-ins/JSON/rawJSON/invalid-JSON-text.js
@@ -24457,7 +24468,9 @@ intl402/DateTimeFormat/prototype/formatRangeToParts/length.js
 intl402/DateTimeFormat/prototype/formatRangeToParts/name.js
 intl402/DateTimeFormat/prototype/formatRangeToParts/prop-desc.js
 intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-format-with-era.js
+intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-ignore-timezone.js
 intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-no-time-clip-weekday.js
+intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-no-time-clip.js
 intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-not-overlapping-options.js
 intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-throws-typeerror-with-dissimilar-types.js
 intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-throws-with-different-calendars.js
@@ -24484,7 +24497,9 @@ intl402/DateTimeFormat/prototype/formatToParts/name.js
 intl402/DateTimeFormat/prototype/formatToParts/offset-timezone-correct.js
 intl402/DateTimeFormat/prototype/formatToParts/return-abrupt-tonumber-date.js
 intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-format-with-era.js
+intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-ignore-timezone.js
 intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-no-time-clip-weekday.js
+intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-no-time-clip.js
 intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-not-overlapping-options.js
 intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-resolved-time-zone.js
 intl402/DateTimeFormat/prototype/formatToParts/temporal-plaindate-formatting-timezonename.js
@@ -25228,6 +25243,7 @@ intl402/NumberFormat/prototype/formatToParts/unit-en-US.js
 intl402/NumberFormat/prototype/formatToParts/unit-ja-JP.js
 intl402/NumberFormat/prototype/formatToParts/unit-ko-KR.js
 intl402/NumberFormat/prototype/formatToParts/unit-zh-TW.js
+intl402/NumberFormat/prototype/formatToParts/unit.js
 intl402/NumberFormat/prototype/formatToParts/value-tonumber.js
 intl402/NumberFormat/prototype/prop-desc.js
 intl402/NumberFormat/prototype/resolvedOptions/basic.js
@@ -28531,6 +28547,8 @@ language/expressions/arrow-function/syntax/arrowparameters-cover-formalparameter
 language/expressions/arrow-function/syntax/arrowparameters-cover-formalparameters-eval.js
 language/expressions/arrow-function/syntax/arrowparameters-cover-formalparameters-yield.js
 language/expressions/arrow-function/syntax/arrowparameters-cover-includes-rest-concisebody-functionbody.js
+language/expressions/arrow-function/syntax/arrowparameters-cover-initialize-1.js
+language/expressions/arrow-function/syntax/arrowparameters-cover-initialize-2.js
 language/expressions/arrow-function/syntax/arrowparameters-cover-lineterminator-concisebody-assignmentexpression.js
 language/expressions/arrow-function/syntax/arrowparameters-cover-lineterminator-concisebody-functionbody.js
 language/expressions/arrow-function/syntax/arrowparameters-cover-rest-concisebody-functionbody.js
@@ -47429,10 +47447,12 @@ language/statements/switch/S12.11_A4_T1.js
 language/statements/switch/scope-lex-async-function.js
 language/statements/switch/scope-lex-async-generator.js
 language/statements/switch/scope-lex-class.js
+language/statements/switch/scope-lex-close-case.js
 language/statements/switch/scope-lex-close-dflt.js
 language/statements/switch/scope-lex-const.js
 language/statements/switch/scope-lex-generator.js
 language/statements/switch/scope-lex-let.js
+language/statements/switch/scope-lex-open-case.js
 language/statements/switch/scope-lex-open-dflt.js
 language/statements/switch/syntax/redeclaration/async-function-name-redeclaration-attempt-with-async-function.js
 language/statements/switch/syntax/redeclaration/async-function-name-redeclaration-attempt-with-async-generator.js
@@ -48317,6 +48337,7 @@ staging/sm/Iterator/from/Iterator.from-name.js
 staging/sm/Iterator/from/call-from-with-different-this.js
 staging/sm/Iterator/from/iterator-not-callable-throws.js
 staging/sm/Iterator/from/modify-next.js
+staging/sm/Iterator/from/modify-return.js
 staging/sm/Iterator/from/o-not-object-throws.js
 staging/sm/Iterator/from/proxy-not-wrapped.js
 staging/sm/Iterator/from/proxy-wrap-next.js
