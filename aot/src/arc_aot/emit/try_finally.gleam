@@ -1,7 +1,7 @@
 import arc/compiler/ast_util
 import arc/compiler/scope.{
-  type Binding, CaptureBinding, ConstBinding, FnNameBinding, LetBinding,
-  ParamBinding, VarBinding,
+  type Binding, type ScopeId, CaptureBinding, ConstBinding, FnNameBinding,
+  LetBinding, ParamBinding, VarBinding,
 }
 import arc/parser/ast
 import arc_aot/emit/cps
@@ -18,15 +18,18 @@ pub fn inline_finally(
   e: Emitter,
   body: List(ast.StmtWithLine),
   saved: state.ScopeSnapshot,
+  child_fns: Option(List(ScopeId)),
   then: Next,
 ) -> EmitResult {
-  // move scope cursor only, slot_vars must survive
+  // move the cursors only, slot_vars must survive
   let here = snapshot_scope(e)
+  let here_child_fns = e.child_fn_cursor
   let e =
     state.Emitter(
       ..e,
       cur_scope: saved.cur_scope,
       scope_cursor: saved.scope_cursor,
+      child_fn_cursor: option.unwrap(child_fns, here_child_fns),
       in_block: saved.in_block,
       frame_stack: drop_through_finally_barrier(e.frame_stack),
     )
@@ -40,6 +43,7 @@ pub fn inline_finally(
       ..e,
       cur_scope: here.cur_scope,
       scope_cursor: here.scope_cursor,
+      child_fn_cursor: here_child_fns,
       in_block: here.in_block,
     )
   use _, e <- cps.let_(e, f_tree)
@@ -64,6 +68,10 @@ fn snapshot_scope(e: Emitter) -> state.ScopeSnapshot {
     in_block: e.in_block,
   )
 }
+
+// whether a function or class is written anywhere in these statements
+@external(erlang, "arc_aot_anf_ffi", "has_function")
+fn has_function(body: List(ast.StmtWithLine)) -> Bool
 
 fn as_block(body: List(ast.StmtWithLine)) -> List(ast.StmtWithLine) {
   [ast.StmtWithLine(0, ast.BlockStatement(body))]
@@ -146,15 +154,29 @@ fn wrap_with_finally(
       scope_cursor: list.drop(e.scope_cursor, scopes_before_fin),
     )
   let #(esc, e) = state.fresh_escape(e, 0)
-  let e = state.push_barrier(e, as_block(finalizer), fin_save, esc)
+  // the finalizer is emitted once per way out, each time from its own first
+  // function. A jump out of the body needs that place before the body has
+  // been walked, so walk the body once for nothing to learn it
+  use child_fns <- result.try(case has_function(finalizer) {
+    False -> Ok(None)
+    True -> {
+      use #(_, walked) <- result.map(
+        build(state.push_barrier(e, [], fin_save, None, esc)),
+      )
+      Some(walked.child_fn_cursor)
+    }
+  })
+  let e = state.push_barrier(e, as_block(finalizer), fin_save, child_fns, esc)
   use #(body_ir, e) <- result.try(build(e))
   let e = state.pop_frame(e)
   let fin_pos = snapshot_scope(e)
+  let fin_child_fns = e.child_fn_cursor
   let #(ex, e) = state.fresh_var(e)
   use #(f_throw, e) <- result.try(emit_finalizer(e, finalizer))
   let throw_handler =
     ir.Let([], f_throw, ir.Throw(e.consts.exn_tag, [ir.Var(ex)]))
   let e = state.leave_scope(e, fin_pos)
+  let e = state.Emitter(..e, child_fn_cursor: fin_child_fns)
   use #(f_normal, e) <- result.try(emit_finalizer(e, finalizer))
   let #(region, e) =
     state.land_escapes(

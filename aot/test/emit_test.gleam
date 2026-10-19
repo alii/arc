@@ -610,6 +610,31 @@ console.log(t(() => { let o = 1; switch (1) { case 0: const c = 5; o = c; break;
   )
 }
 
+pub fn functions_written_in_a_finally_block_diff_test() {
+  diff(
+    "var out = [];
+function a(x) { try { var f = () => 'body' + x; if (x == 1) return f(); out.push(f()); } catch (o) { out.push((() => 'catch')()); } finally { out.push((() => 'fin' + x)()); } return (() => 'after' + x)(); }
+out.push(a(1), a(2));
+function b(x) { for (var i = 0; i < 2; i++) { try { if (i == x) break; if (x == 9) throw 1; out.push((() => 'b' + i)()); } finally { out.push((function () { return 'f' + i; })()); } } return (() => 'end')(); }
+out.push(b(0), b(1), b(5));
+try { b(9) } catch (e) { out.push('threw' + e) }
+function c() { try { try { return (() => 'inner')(); } finally { out.push((() => 'fin1')()); } } finally { out.push((() => 'fin2')()); } }
+out.push(c());
+console.log(out.join(' '));",
+    "fin1 body2 fin2 body1 after2 f0 b0 f0 f1 b0 f0 b1 f1 end end end f0 threw1 fin1 fin2 inner\n",
+  )
+}
+
+pub fn coroutine_with_its_own_function_declaration_diff_test() {
+  diff(
+    "var out = [];
+async function d() { function l() { return 'l'; } if (out) { out.push((() => 'arrow')()); await 4; out.push(l(), (() => 'later')()); } return (() => 'done')(); }
+function* g() { function l() { return 'gl'; } if (out) { yield (() => 'g1')(); yield l(); } yield (() => 'g2')(); }
+d().then((v) => { out.push(v, ...g()); console.log(out.join(' ')); });",
+    "arrow l later done g1 gl g2\n",
+  )
+}
+
 pub fn class_basics_diff_test() {
   diff(
     "class A { constructor(x){ this.x = x } get(){ return this.x } static s(){ return 's' } get g(){ return this.x*2 } set g(v){ this.x = v } }\nvar a = new A(3);\nconsole.log(a.get(), A.s(), a.g, typeof A, A.name, A.length, a instanceof A, Object.getPrototypeOf(a) === A.prototype);\na.g = 10; console.log(a.x, a.get());\nconsole.log(Object.keys(A.prototype).length, Object.getOwnPropertyNames(A.prototype).join(), JSON.stringify(Object.getOwnPropertyDescriptor(A,'prototype')));\nconsole.log(A.prototype.get.name, A.s.name, Object.getOwnPropertyDescriptor(A.prototype,'g').get.name, A.prototype.get.length);\ntry { A() } catch (e) { console.log(e.constructor.name) }\ntry { new a.get() } catch (e) { console.log(e.constructor.name) }\nclass B {}\nconsole.log(new B() instanceof B, B.name, B.length, typeof B.prototype.constructor, B.prototype.constructor === B);",

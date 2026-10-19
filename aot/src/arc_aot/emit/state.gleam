@@ -116,6 +116,9 @@ pub type Frame {
   BarrierFrame(
     body: List(ast.StmtWithLine),
     saved: ScopeSnapshot,
+    // where the finalizer's own functions start in child_fn_cursor, when it
+    // has any
+    child_fns: Option(List(ScopeId)),
     escape: Escape,
   )
 }
@@ -128,6 +131,7 @@ pub type BarrierCleanup {
   FinallyBlock(
     body: List(ast.StmtWithLine),
     saved_scope: ScopeSnapshot,
+    child_fns: Option(List(ScopeId)),
     escape: Escape,
   )
   IterClose(iter_var: String, escape: Escape)
@@ -651,10 +655,11 @@ pub fn push_barrier(
   e: Emitter,
   body: List(ast.StmtWithLine),
   saved: ScopeSnapshot,
+  child_fns: Option(List(ScopeId)),
   escape: Escape,
 ) -> Emitter {
   Emitter(..e, frame_stack: [
-    BarrierFrame(body:, saved:, escape:),
+    BarrierFrame(body:, saved:, child_fns:, escape:),
     ..e.frame_stack
   ])
 }
@@ -775,7 +780,9 @@ pub fn cross_cleanups(frame: Frame) -> List(BarrierCleanup) {
   case frame {
     LoopFrame(iter_close: Some(#(iv, esc)), ..) -> [IterClose(iv, esc)]
     LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> []
-    BarrierFrame(body:, saved:, escape:) -> [FinallyBlock(body, saved, escape)]
+    BarrierFrame(body:, saved:, child_fns:, escape:) -> [
+      FinallyBlock(body, saved, child_fns, escape),
+    ]
   }
 }
 

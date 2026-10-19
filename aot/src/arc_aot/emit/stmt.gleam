@@ -89,11 +89,11 @@ fn leave_scope_carrying(
 fn inline_cleanup(e: Emitter, cleanup: BarrierCleanup, k: Next) -> EmitResult {
   let abrupt = e.consts.false_
   case cleanup {
-    state.FinallyBlock(body:, saved_scope:, escape: esc) -> {
+    state.FinallyBlock(body:, saved_scope:, child_fns:, escape: esc) -> {
       let carried = assigned_unboxed_slots_all(e, [ast.BlockStatement(body)])
       use #(f_tree, e) <- result.try(
         cps.with_done(e, fn(done, e) {
-          use e <- try_finally.inline_finally(e, body, saved_scope)
+          use e <- try_finally.inline_finally(e, body, saved_scope, child_fns)
           done(ir.Values(carried_values(e, carried)), e)
         }),
       )
