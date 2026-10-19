@@ -922,6 +922,7 @@ built-ins/Array/fromAsync/sync-iterable-with-thenable-then-method-err.js
 built-ins/Array/fromAsync/this-constructor-operations.js
 built-ins/Array/fromAsync/this-constructor-with-bad-length-setter.js
 built-ins/Array/fromAsync/this-constructor-with-readonly-elements.js
+built-ins/Array/fromAsync/this-constructor-with-readonly-length.js
 built-ins/Array/fromAsync/this-constructor-with-unsettable-element-closes-async-iterator.js
 built-ins/Array/fromAsync/this-constructor-with-unsettable-element-closes-sync-iterator.js
 built-ins/Array/fromAsync/this-constructor-with-unsettable-element.js
@@ -24161,6 +24162,7 @@ harness/asyncHelpers-asyncTest-returns-undefined.js
 harness/asyncHelpers-asyncTest-then-rejects.js
 harness/asyncHelpers-asyncTest-then-resolves.js
 harness/asyncHelpers-asyncTest-without-async-flag.js
+harness/asyncHelpers-throwsAsync-custom-typeerror.js
 harness/asyncHelpers-throwsAsync-custom.js
 harness/asyncHelpers-throwsAsync-func-never-settles.js
 harness/asyncHelpers-throwsAsync-func-throws-sync.js
@@ -48765,6 +48767,7 @@ staging/sm/TypedArray/at.js
 staging/sm/TypedArray/bug1526838.js
 staging/sm/TypedArray/constructor-ArrayBuffer-species-wrap.js
 staging/sm/TypedArray/constructor-ArrayBuffer-species.js
+staging/sm/TypedArray/constructor-buffer-sequence.js
 staging/sm/TypedArray/constructor-byteoffsets-bounds.js
 staging/sm/TypedArray/constructor-iterator-primitive.js
 staging/sm/TypedArray/constructor-non-detached.js
@@ -48818,6 +48821,7 @@ staging/sm/TypedArray/set-wrapped.js
 staging/sm/TypedArray/set.js
 staging/sm/TypedArray/slice-bitwise-same.js
 staging/sm/TypedArray/slice-conversion.js
+staging/sm/TypedArray/slice-detached.js
 staging/sm/TypedArray/slice-memcpy.js
 staging/sm/TypedArray/slice-species.js
 staging/sm/TypedArray/slice.js
