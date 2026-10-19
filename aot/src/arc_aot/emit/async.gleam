@@ -4501,6 +4501,24 @@ fn hoist_subexprs(
         hoist_class(p, line, super_class, body)
       HoistedExpr(pre, ast.ClassExpression(span, name, super2, body2), p)
     }
+    // what a chain starts from always runs. What follows a ?. may not, so a
+    // split there stays put
+    ast.OptionalMemberExpression(span, obj, prop) ->
+      case member_prop_has_split(prop) {
+        True -> HoistedExpr([], ex, p)
+        False -> {
+          let HoistedExpr(pre, obj2, p) = hoist_expr(p, line, obj)
+          HoistedExpr(pre, ast.OptionalMemberExpression(span, obj2, prop), p)
+        }
+      }
+    ast.OptionalCallExpression(span, callee, args) ->
+      case list.any(args, expr_has_split) {
+        True -> HoistedExpr([], ex, p)
+        False -> {
+          let HoistedExpr(pre, callee2, p) = hoist_expr(p, line, callee)
+          HoistedExpr(pre, ast.OptionalCallExpression(span, callee2, args), p)
+        }
+      }
     _ -> HoistedExpr([], ex, p)
   }
 }

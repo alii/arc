@@ -698,6 +698,20 @@ console.log(JSON.stringify([f(1), f(2), f(3), g([1, 2, 3])]));",
   )
 }
 
+pub fn await_at_the_start_of_an_optional_chain_diff_test() {
+  diff(
+    "var o = { a: 1, f() { return this.a; }, n: null };
+var id = (v) => v;
+async function t() {
+  return [(await o)?.a, (await null)?.a, id(await o)?.a, (await o)?.f(), (await o.n)?.f(), (await id)?.(2), (await o)?.n?.a, (await o)?.a.toFixed(1)].join();
+}
+function* g() { yield (yield 1)?.a; }
+var it = g(); it.next();
+t().then((v) => console.log(v, it.next(o).value));",
+    "1,,1,1,,2,,1.0 1\n",
+  )
+}
+
 pub fn class_basics_diff_test() {
   diff(
     "class A { constructor(x){ this.x = x } get(){ return this.x } static s(){ return 's' } get g(){ return this.x*2 } set g(v){ this.x = v } }\nvar a = new A(3);\nconsole.log(a.get(), A.s(), a.g, typeof A, A.name, A.length, a instanceof A, Object.getPrototypeOf(a) === A.prototype);\na.g = 10; console.log(a.x, a.get());\nconsole.log(Object.keys(A.prototype).length, Object.getOwnPropertyNames(A.prototype).join(), JSON.stringify(Object.getOwnPropertyDescriptor(A,'prototype')));\nconsole.log(A.prototype.get.name, A.s.name, Object.getOwnPropertyDescriptor(A.prototype,'g').get.name, A.prototype.get.length);\ntry { A() } catch (e) { console.log(e.constructor.name) }\ntry { new a.get() } catch (e) { console.log(e.constructor.name) }\nclass B {}\nconsole.log(new B() instanceof B, B.name, B.length, typeof B.prototype.constructor, B.prototype.constructor === B);",
