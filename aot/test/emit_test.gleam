@@ -676,6 +676,19 @@ console.log(t(() => [...a()]), t(() => [...b()]), t(() => [...c()]));",
   )
 }
 
+pub fn arrow_with_patterns_and_an_expression_body_diff_test() {
+  diff(
+    "var n = { a: 1 };
+var f = ([s]) => s;
+var g = ({ s }, t = s) => s + t;
+var h = ([s]) => (() => { let q = s; return q; })();
+var k = ([s, i]) => i !== n[s];
+var m = async ([s]) => s + (await 1);
+m(['a']).then((v) => console.log(f(['x']), g({ s: 'y' }), h(['z']), k(['a', 2]), v));",
+    "x yy z true a1\n",
+  )
+}
+
 pub fn class_basics_diff_test() {
   diff(
     "class A { constructor(x){ this.x = x } get(){ return this.x } static s(){ return 's' } get g(){ return this.x*2 } set g(v){ this.x = v } }\nvar a = new A(3);\nconsole.log(a.get(), A.s(), a.g, typeof A, A.name, A.length, a instanceof A, Object.getPrototypeOf(a) === A.prototype);\na.g = 10; console.log(a.x, a.get());\nconsole.log(Object.keys(A.prototype).length, Object.getOwnPropertyNames(A.prototype).join(), JSON.stringify(Object.getOwnPropertyDescriptor(A,'prototype')));\nconsole.log(A.prototype.get.name, A.s.name, Object.getOwnPropertyDescriptor(A.prototype,'g').get.name, A.prototype.get.length);\ntry { A() } catch (e) { console.log(e.constructor.name) }\ntry { new a.get() } catch (e) { console.log(e.constructor.name) }\nclass B {}\nconsole.log(new B() instanceof B, B.name, B.length, typeof B.prototype.constructor, B.prototype.constructor === B);",

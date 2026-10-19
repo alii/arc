@@ -3860,7 +3860,7 @@ pub fn emit_coroutine_fn(
       func.shape_is_arrow(shape),
       takes_args_list: False,
       params:,
-      stmts:,
+      body:,
       info:,
     )
     let cur0 = capture_cursor(e_pro)

@@ -1285,10 +1285,11 @@ pub fn emit_prologue(
   is_arrow is_arrow: Bool,
   takes_args_list takes_args_list: Bool,
   params params: List(ast.Pattern),
-  stmts stmts: List(ast.StmtWithLine),
+  body body: FnBody,
   info info: FunctionInfo,
   k k: fn(fn(Emitter) -> Emitter, Emitter) -> EmitResult,
 ) -> EmitResult {
+  let stmts = body_stmts(body)
   let #(fixed, rest_param) = ast_util.split_trailing_rest(params)
   let non_simple = !ast_util.all_simple_params(fixed)
   let uses_args =
@@ -1319,13 +1320,14 @@ pub fn emit_prologue(
   use tail, e <- unpack_args(e, fixed, non_simple)
   use e <- bind_rest(e, rest_param, tail, non_simple)
   use e <- init_arguments_if(e, !unmapped)
-  // §10.2.11 step 28, non-simple params get a body scope
-  case non_simple {
-    False -> {
+  // §10.2.11 step 28, non-simple params get a body scope. An arrow's
+  // expression declares nothing, so it has none
+  case non_simple, body {
+    False, _ | True, ExprBody(_) -> {
       use e <- hoist_fn_decls(e, stmts)
       k(fn(ef) { ef }, e)
     }
-    True -> {
+    True, StmtBody(_) -> {
       let #(save, e) = state.enter_scope(e, in_block: False)
       use e <- binding_prologue(e, e.cur_scope)
       let param_names = list.flat_map(params, ast.pattern_bound_names)
@@ -1361,7 +1363,7 @@ fn emit_body(
     sf.is_arrow,
     takes_args_list: True,
     params:,
-    stmts:,
+    body:,
     info:,
   )
   use #(tree, ef) <- result.map(e.dispatch.emit_stmts(e, stmts, ret_undef))
