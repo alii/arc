@@ -2015,9 +2015,14 @@ fn analyze_splits(
       open_frames: [],
       open_resume: None,
     )
-  let p = case body {
-    state.StmtBody(ss) -> plan_stmts(init, ss)
-    state.ExprBody(e) -> plan_stmts(init, func.body_stmts(state.ExprBody(e)))
+  // the prologue has made the body's own function declarations already, so
+  // cur0 is past them
+  let p = {
+    use p, sl <- list.fold(func.body_stmts(body), init)
+    case sl.statement {
+      ast.FunctionDeclaration(..) -> push_pending_stmt(p, sl)
+      _ -> plan_stmt(p, sl)
+    }
   }
   let p = finish_arm(p, BodyEnd, p.next_state, JumpEntry)
   SplitPlan(
