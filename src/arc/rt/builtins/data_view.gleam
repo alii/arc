@@ -166,15 +166,20 @@ fn get_buffer(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_object(view.buffer), st)
 }
 
+// §25.3.4.2 get DataView.prototype.byteLength: +0 when out of bounds
 fn get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_data_view(st, this)
-  #(mk_int(view_size(st, view)), st)
+  #(mk_int(in_bounds_size(st, view) |> option.unwrap(0)), st)
 }
 
+// §25.3.4.3 get DataView.prototype.byteOffset: +0 when out of bounds
 fn get_byte_offset(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_data_view(st, this)
-  let _size = view_size(st, view)
-  #(mk_int(view.byte_offset), st)
+  let offset =
+    in_bounds_size(st, view)
+    |> option.map(fn(_size) { view.byte_offset })
+    |> option.unwrap(0)
+  #(mk_int(offset), st)
 }
 
 // §25.3.1.1 getviewvalue
@@ -298,25 +303,24 @@ fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
 
 fn view_size(st: Agent, view: ViewRecord) -> Int {
   let #(buf_len, _resizable) = live_buffer_info(st, view.buffer)
+  use <- option.lazy_unwrap(size_within(view, buf_len))
+  rt_val.throw_type_error(st, "DataView is outside the bounds of its buffer")
+}
+
+// the view's size, or None when IsViewOutOfBounds (detached included)
+fn in_bounds_size(st: Agent, view: ViewRecord) -> Option(Int) {
+  case buffer.storage(st, view.buffer) {
+    Some(Detached(..)) -> None
+    Some(storage) -> size_within(view, buffer.storage_byte_size(storage))
+    None -> rt_val.throw_type_error(st, "DataView buffer is not an ArrayBuffer")
+  }
+}
+
+fn size_within(view: ViewRecord, buf_len: Int) -> Option(Int) {
   case view.byte_length {
-    Some(len) ->
-      case view.byte_offset + len <= buf_len {
-        True -> len
-        False ->
-          rt_val.throw_type_error(
-            st,
-            "DataView is outside the bounds of its buffer",
-          )
-      }
-    None ->
-      case view.byte_offset <= buf_len {
-        True -> buf_len - view.byte_offset
-        False ->
-          rt_val.throw_type_error(
-            st,
-            "DataView is outside the bounds of its buffer",
-          )
-      }
+    Some(len) if view.byte_offset + len <= buf_len -> Some(len)
+    None if view.byte_offset <= buf_len -> Some(buf_len - view.byte_offset)
+    _ -> None
   }
 }
 
