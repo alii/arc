@@ -276,7 +276,7 @@ pub fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
   }
 }
 
-// §10.2.11 step 28.f.i.2, copy params into body vars
+// §10.2.11 step 28.f.i.2 copies params into body vars
 fn body_param_copies(
   e: Emitter,
   declared_param_names: List(String),
@@ -371,7 +371,7 @@ fn unpack_args_loop(
   case params {
     [] -> k(tail, e)
     [p, ..rest] -> {
-      // hd/tl on [] traps, test empty first
+      // hd/tl on [] traps, so test for empty first
       use empty, e <- cps.let_(e, ir.TermOp(ir.IsEmptyList, [tail]))
       use raw, e <- cps.let_(
         e,
@@ -462,7 +462,7 @@ fn bind_rest(
   }
 }
 
-// §8.6.3 contains arguments, arrows transparent, direct eval poisons
+// §8.6.3 contains arguments. Arrows are transparent and direct eval counts as a use
 
 fn refs_args_opt(oe: Option(ast.Expression)) -> Bool {
   case oe {
@@ -1308,7 +1308,7 @@ pub fn emit_prologue(
   use e <- unpack_frame(e, is_arrow, info)
   use e <- binding_prologue(e, e.fn_scope)
   use e <- init_self_name(e, self_name, info)
-  // §10.2.11 step 22, arguments exists before formals bind
+  // §10.2.11 step 22 creates arguments before the formals bind
   let unmapped = non_simple || rest_param != None
   let init_arguments_if = fn(e, when: Bool, k) {
     case when {
@@ -1320,7 +1320,7 @@ pub fn emit_prologue(
   use tail, e <- unpack_args(e, fixed, non_simple)
   use e <- bind_rest(e, rest_param, tail, non_simple)
   use e <- init_arguments_if(e, !unmapped)
-  // §10.2.11 step 28, non-simple params get a body scope. An arrow's
+  // §10.2.11 step 28 gives non-simple params a body scope. An arrow's
   // expression declares nothing, so it has none
   case non_simple, body {
     False, _ | True, ExprBody(_) -> {

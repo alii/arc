@@ -355,7 +355,7 @@ fn resize(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// §25.1.6.7 slice, shared and unshared
+// §25.1.6.7 slice, for both shared and unshared buffers
 fn buffer_slice(
   st: Agent,
   this: JsVal,

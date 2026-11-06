@@ -38,7 +38,7 @@ pub type SourceModule {
   )
 }
 
-// createdefaultexportsyntheticmodule, value built at link
+// createdefaultexportsyntheticmodule; the value is built at link time
 pub type DefaultExport {
   JsonExport(value: json.JsonValue)
   TextExport(text: String)
@@ -114,14 +114,14 @@ fn parse_and_analyze(
 
 type Walk {
   Walk(
-    // never removed, handles both cycles and diamonds
+    // entries are never removed, which handles both cycles and diamonds
     started: Set(Resolved),
     modules: Dict(Resolved, LoadedModule),
     order: List(Resolved),
   )
 }
 
-// is_host specifiers are leaves, never loaded or parsed
+// is_host specifiers are leaves that are never loaded or parsed
 pub fn load(
   entry_specifier: Resolved,
   entry_source: ModuleSource,
@@ -170,7 +170,7 @@ fn finish(walk: Walk, specifier: Resolved, module: LoadedModule) -> Walk {
   ])
 }
 
-// innermoduleloading: attributes checked before the host resolves
+// innermoduleloading checks attributes before the host resolves
 fn visit_source(
   node: ParsedModule,
   resolve: Resolve,
@@ -214,7 +214,7 @@ fn visit_source(
       #(edges, walk)
     }),
   )
-  // §16.2.1.7.2 checked after resolve so resolve errors win
+  // §16.2.1.7.2: check after resolving so resolve errors win
   use <- bool.guard(
     node.summary.has_source_phase,
     Error(SourcePhaseUnsupported(referrer)),

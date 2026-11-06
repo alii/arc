@@ -8,7 +8,7 @@ function isatty(fd) {
   return Number.isInteger(fd) && fd >= 0 && fd <= 2147483647 && terminals.includes(fd);
 }
 
-// a terminal read from or written to as a stream; nothing here can open one
+// a terminal used as a stream. Nothing here can open one
 function ReadStream() {
   throw new codes.ERR_METHOD_NOT_IMPLEMENTED("tty.ReadStream");
 }

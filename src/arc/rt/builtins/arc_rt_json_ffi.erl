@@ -1,5 +1,5 @@
-%% §25.5.1 json text to json.gleam's JsonValue, by offset into one binary;
-%% plain_stringify may answer json_miss
+%% §25.5.1 json text to json.gleam's JsonValue, by offset into one binary.
+%% plain_stringify may return json_miss
 -module(arc_rt_json_ffi).
 -export([parse_value/2, plain_prop_dict/2, plain_enumerable_keys/1, quote_tree/1,
          plain_stringify/3]).
@@ -76,7 +76,7 @@ quote_esc(Bin, P) ->
 hexc(N) when N < 10 -> $0 + N;
 hexc(N) -> $a + N - 10.
 
-%% own data props from parsed entries; props_miss when two keys want one slot
+%% own data props from parsed entries, or props_miss when two keys want one slot
 plain_prop_dict(Entries, Seq) -> plain_props(Entries, Seq, []).
 
 plain_props([{Name, V} | Rest], Seq, Acc) ->
@@ -145,7 +145,7 @@ value(Bin, P, Src) ->
         _ -> fail(invalid_utf8, P)
     end.
 
-%% a literal that went wrong, fails at the first byte that differs
+%% a literal that went wrong. fail at the first byte that differs
 literal(Bin, P, <<C, Rest/binary>>) ->
     case Bin of
         <<_:P/binary, C, _/binary>> -> literal(Bin, P + 1, Rest);
@@ -367,7 +367,7 @@ object(Bin, P, Src, Acc) ->
             object(Bin, ws(Bin, P4), Src, [{Key, V} | Acc])
     end.
 
-%% §25.5.2 for plain data with no replacer; anything observable answers json_miss
+%% §25.5.2 for plain data with no replacer. anything observable returns json_miss
 plain_stringify(St, V, Gap) ->
     Realm = element(?AGENT_REALM, St),
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),

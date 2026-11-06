@@ -161,8 +161,8 @@ hostname() ->
     {ok, Name} = inet:gethostname(),
     unicode:characters_to_binary(Name).
 
-%% erlang cannot ask who it runs as, so: the owner of the home directory, and
-%% the names the shell left in the environment
+%% erlang can't ask who it runs as, so this uses the owner of the home
+%% directory and the names the shell left in the environment
 user() ->
     Home = case os:getenv("HOME") of false -> "/"; H -> H end,
     {Uid, Gid} = case file:read_file_info(Home) of
@@ -176,7 +176,7 @@ user() ->
     end,
     {user, Uid, Gid, unicode:characters_to_binary(Name), Shell}.
 
-%% the machine's trusted roots as PEM texts; none if they cannot be read
+%% the machine's trusted roots as PEM text, or none if they can't be read
 certificates() ->
     try public_key:cacerts_get() of
         Certs -> [pem(Der) || {cert, Der, _} <- Certs]
@@ -266,8 +266,8 @@ posix(Reason) when is_atom(Reason) ->
     string:uppercase(atom_to_binary(Reason, utf8)).
 
 %% loads every module of this program now, as a release does when it boots.
-%% Left to load on first use, each one costs the process that first calls it
-%% a full garbage collection, which is slow once a big script is in memory
+%% A module loaded on first use costs the process that first calls it a full
+%% garbage collection, which is slow once a big script is in memory
 preload() ->
     Packages = filename:dirname(filename:dirname(filename:dirname(code:which(?MODULE)))),
     Modules = [list_to_atom(filename:basename(Beam, ".beam"))
@@ -275,8 +275,8 @@ preload() ->
     _ = code:ensure_modules_loaded(Modules),
     nil.
 
-%% past the vm's own floor of 46422 words of long-lived off-heap binaries,
-%% which script text and strings soon are, every other collection is a full one
+%% script text and strings soon pass the vm's own floor of 46422 words of
+%% long-lived off-heap binaries, and past it every other collection is full
 roomy_binaries() ->
     erlang:process_flag(min_bin_vheap_size, 8000000),
     nil.

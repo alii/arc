@@ -155,7 +155,7 @@ classify_low_surrogate(_, _) ->
 
 encode_codepoint(CP) when CP =< 16#7F ->
     <<CP>>;
-%% lone surrogate has no utf-8 encoding, becomes u+fffd
+%% a lone surrogate has no utf-8 encoding, so it becomes u+fffd
 encode_codepoint(CP) when CP >= 16#D800, CP =< 16#DFFF ->
     <<16#EF, 16#BF, 16#BD>>;
 encode_codepoint(CP) when CP =< 16#10FFFF ->

@@ -4,9 +4,8 @@ const run = function (n) {
   for (let i = 0; i < 2000; i++) a.push(i);
   let s = 0;
   for (let i = 0; i < n; i++) {
-    // NOTE: params deliberately have unique names — the current tree has a
-    // scope-resolution bug where sibling function exprs with same-named params
-    // inside a for-loop body raise "Duplicate binding in lexical declaration".
+    // params have unique names on purpose. Sibling function expressions with the same
+    // param names in a for-loop body hit a scope bug: "Duplicate binding in lexical declaration".
     s += a.map(function (m) { return m + 1; })
       .filter(function (g) { return g % 2 === 0; })
       .reduce(function (p, q) { return p + q; }, 0);

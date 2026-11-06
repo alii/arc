@@ -1,6 +1,6 @@
 "use strict";
 
-// node's lib/util.js and the files only it uses: deep equality, parseArgs,
+// node's lib/util.js and the files only it uses, for deep equality, parseArgs,
 // MIMEType, debounce, throttle and diff. inspect, format, the type checks,
 // promisify and deprecate come from the shared internals
 
@@ -27,7 +27,7 @@ const shims = {
   primordials: internal.primordials,
   internalBinding: internal.internalBinding,
   fallback: internal.find,
-  // until the stream module is here nothing is a stream
+  // nothing is a stream until the stream module is here
   "internal/streams/utils": () => ({
     isReadableStream: () => false,
     isWritableStream: () => false,
@@ -3302,7 +3302,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -3327,8 +3327,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error("no module " + name + " in this port");
@@ -3336,8 +3336,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

@@ -4,7 +4,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-// §22.1.3.19.1 getsubstitution, tokenized once per replace call
+// §22.1.3.19.1 getsubstitution. the template is tokenised once per replace call
 pub type PlainSegment {
   LiteralSegment(text: String)
   MatchedSegment
@@ -103,7 +103,7 @@ fn tokenize(template: String, emit: Emit(segment)) -> List(segment) {
   }
 }
 
-// code points not graphemes, so "$&" + combining mark still splits
+// split by code point, not grapheme, so "$&" followed by a combining mark still splits
 fn to_code_points(s: String) -> List(String) {
   s
   |> string.to_utf_codepoints

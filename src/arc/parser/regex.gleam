@@ -863,7 +863,7 @@ fn check_range(
   pos: Int,
 ) -> Result(Nil, PatternError) {
   case low, high, ctx.mode {
-    // without u a non-bmp endpoint is a surrogate pair, order unknowable
+    // without u a non-bmp endpoint is a surrogate pair, so we can't check order
     ClassCharacter(value: low_value, ..),
       ClassCharacter(value: high_value, ..),
       Legacy

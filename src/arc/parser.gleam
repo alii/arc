@@ -218,8 +218,8 @@ type Parser {
     last_expr_name: Option(String),
     scopes: scope_builder.ScopeBuilder,
     waiting: Waiting,
-    // where a function starts that is called where it is written: the first
-    // thing inside grouping parens or after a `!`
+    // the start of a function that is called where it is written, which is the
+    // first thing inside grouping parens or after a `!`
     called_now_at: Int,
   )
 }
@@ -227,8 +227,8 @@ type Parser {
 // which plain functions are left for their first calls to compile
 type Waiting {
   NoneWait
-  // all but the short ones, the ones called where they are written, and
-  // the ones that start at these byte offsets
+  // every plain function waits except short ones, ones called where they are
+  // written, and ones that start at these byte offsets
   Wait(compile_now: Set(Int))
 }
 
@@ -389,14 +389,14 @@ fn parser_at(bytes: BitArray, mode: ParseMode, pos: Int, line: Int) -> Parser {
   ))
 }
 
-/// one plain function parsed alone from where it starts in `bytes`, as the
+/// parses one plain function alone from where it starts in `bytes`, as the
 /// only thing under an empty root. A declaration's name is not declared in
-/// that root: around a function compiled alone, outer names are seeds
+/// that root, because a function compiled alone gets outer names as seeds
 pub fn parse_function_at(
   bytes: BitArray,
   mode: ParseMode,
   source: scope.FnSource,
-  // the plain functions written inside it are in turn left for their first calls
+  // leave the plain functions inside it for their first calls
   lazy lazy: Bool,
 ) -> Result(#(ast.FunctionLiteral, scope_builder.ScopeBuilder), ParseError) {
   let p = parser_at(bytes, mode, source.start, source.line)
@@ -404,13 +404,13 @@ pub fn parse_function_at(
     Parser(
       ..p,
       ctx: GrammarContext(..p.ctx, strict: source.strict || mode == Module),
-      // so a class inside it does not take the #names of the class around
-      // it for undeclared
+      // so a class inside it doesn't report the outer class's #names as
+      // undeclared
       class_body_depth: case source.in_class {
         True -> 1
         False -> 0
       },
-      // not the function asked for: only the ones inside it wait
+      // the function asked for never waits, only the ones inside it
       waiting: case lazy {
         True -> Wait(compile_now: set.from_list([source.start]))
         False -> NoneWait
@@ -490,7 +490,7 @@ pub fn parse_function_at(
       let assert ast.ArrowFunctionExpression(params:, body:, is_async:, ..) =
         expression
         as "parser: an arrow function parsed as something else"
-      // a concise body is the statement emit makes of it
+      // turn a concise body into the statement emit makes of it
       let body = case body {
         ast.ArrowBodyBlock(statements) -> statements
         ast.ArrowBodyExpression(value) -> [
@@ -538,10 +538,9 @@ fn arrow_inherits(outer: Parser) -> scope.ArrowInherits {
   )
 }
 
-// the function fn_id names has just been parsed to its last token; `outer`
-// is the parser at its first. Settles whether it waits for its first call,
-// and if it does, forgets what is inside it: true then, and its body is the
-// caller's to drop
+// runs once the fn_id function is parsed to its last token, with `outer` at
+// its first. Decides whether it waits for its first call. If it does, this
+// forgets what is inside it and returns true, and the caller drops its body
 fn close_fn(p: Parser, fn_id: scope.ScopeId, outer: Parser) -> #(Parser, Bool) {
   let scopes = scope_builder.set_fn_end(p.scopes, fn_id, p.prev_end)
   let waits = case p.waiting, scope_builder.fn_info_at(scopes, fn_id).source {
@@ -562,10 +561,10 @@ fn close_fn(p: Parser, fn_id: scope.ScopeId, outer: Parser) -> #(Parser, Bool) {
   #(Parser(..p, scopes:), waits)
 }
 
-// notes where a function starts so it can be parsed again alone. A field
-// initialiser, a static block, a with block or the constructor of a derived
-// class (whose super() runs the field initialisers) hands a function more
-// than the note holds
+// notes where a function starts so it can be parsed again alone. It skips
+// field initialisers, static blocks, with blocks and derived class
+// constructors (whose super() runs the field initialisers), because those
+// hand a function more than the note holds
 fn note_fn_source(inner: Parser, outer: Parser, form: scope.FnForm) -> Parser {
   use <- bool.guard(
     outer.ctx.in_class_field_init
@@ -616,9 +615,9 @@ pub fn parse_script(
   script_body(p)
 }
 
-/// parse_script, marking each plain function to be left for its first call
-/// to compile: all but the short ones, the ones called where they are
-/// written, and the ones whose text starts at a `compile_now` byte offset
+/// like parse_script, but marks plain functions to compile on their first
+/// call. That is all of them except short ones, ones called where they are
+/// written, and ones whose text starts at a `compile_now` byte offset
 pub fn parse_script_lazily(
   source: String,
   compile_now compile_now: Set(Int),
@@ -1231,7 +1230,7 @@ fn params_must_be_unique(ctx: GrammarContext) -> Bool {
   ctx.strict || ctx.in_arrow_params || ctx.in_method || ctx.has_non_simple_param
 }
 
-// gated on the param flags: in_method stays set in the body
+// gated on the param flags because in_method stays set in the body
 fn accumulate_param_name(
   p: Parser,
   name: String,
@@ -1437,7 +1436,7 @@ fn register_function_name(
   use <- bool.guard(!p.ctx.strict && p.ctx.in_single_stmt_pos, Ok(p))
   // §16.1.1 script vs §16.2.1.1 module top-level functions
   case p.ctx.in_block, p.ctx.module_top_level {
-    // no hoisted_vars entry: that is what marks a module function
+    // having no hoisted_vars entry is what marks a module function
     False, True -> register_lexical_name(p, name, scope.VarBinding, name_pos)
     // §14.2.2 lexical; annex b §B.3.2 var-hoist candidate
     True, _ -> {
@@ -1514,7 +1513,7 @@ fn declare_export_if_exporting(
   }
 }
 
-// = commits: errors propagate, no backtrack
+// = commits, so errors propagate without backtracking
 fn parse_pattern_default(
   p: Parser,
   pat: ast.Pattern,
@@ -1896,7 +1895,7 @@ fn parse_for_head(
   }
 }
 
-// head names get their own scope: for(let a;;); let a; is valid
+// head names get their own scope, so for(let a;;); let a; is valid
 fn in_for_head_scope(
   p: Parser,
   parse: fn(Parser) -> Result(#(Parser, ast.Statement), ParseError),
@@ -1975,7 +1974,7 @@ fn parse_for_declaration(
     ast.ForInitDeclaration(kind:, declarations: [
       ast.VariableDeclarator(id: pattern, init: None),
     ])
-  // §14.7.5.9: head binding written each iteration
+  // §14.7.5.9: the head binding is written on each iteration
   let p_in_of = fn() {
     let p = exit_declaration_context(p3, p)
     Parser(..p, scopes: class_scopes.mark_pattern_assigned(p.scopes, pattern))
@@ -2099,7 +2098,7 @@ fn parse_for_expression(
   use #(p2, expr) <- result.try(disallowing_in(p, parse_expression))
   case peek(p2) {
     Semicolon ->
-      // for(;;) init is never a pattern: cover errors due
+      // a for(;;) init is never a pattern, so cover errors are due now
       case p2.ctx.has_cover_initializer, p2.ctx.dup_proto_pos {
         True, _ -> Error(InvalidDestructuringTarget(pos_of(p2)))
         False, Some(pos) -> Error(DuplicateProtoProperty(pos))
@@ -2147,7 +2146,7 @@ fn parse_for_expression(
   }
 }
 
-// , commits to another declarator: propagate errors
+// a , commits to another declarator, so errors propagate
 fn parse_remaining_declarators(
   p: Parser,
   kind: ast.VariableKind,
@@ -2761,7 +2760,7 @@ fn parse_braced_body(
   Ok(#(p4, stmts))
 }
 
-// §10.2.11 step 28 body scope; lockstep with emit, never pruned
+// §10.2.11 step 28 body scope, kept in lockstep with emit and never pruned
 fn parse_function_body(
   p: Parser,
   params: List(ast.Pattern),
@@ -3193,7 +3192,7 @@ fn parse_class_tail(
   // §15.7.14: class scope is pushed before the heritage
   let #(scopes, class_id) = scope_builder.push(p.scopes, scope.ClassBody)
   let p = Parser(..p, scopes:, ctx: GrammarContext(..p.ctx, strict: True))
-  // once extends is consumed errors propagate, no backtrack
+  // once extends is consumed, errors propagate without backtracking
   let has_extends = peek(p) == Extends
   use #(p2, super_class) <- result.try(case has_extends {
     True -> {
@@ -3205,7 +3204,7 @@ fn parse_class_tail(
   let heritage_scopes =
     scope_builder.children_newest_first(p2.scopes, class_id) |> list.reverse
   use p3 <- result.try(expect(p2, LeftBrace))
-  // pre-create init shells; unneeded ones dropped at }
+  // create the init shells up front and drop unneeded ones at }
   let #(scopes, init_id) = scope_builder.push(p3.scopes, scope.Function)
   let scopes = scope_builder.enter(scopes, class_id)
   let #(scopes, static_id) = scope_builder.push(scopes, scope.Function)
@@ -3467,7 +3466,8 @@ fn parse_static_block(
     |> scope_builder.update_current_fn(fn(fi) {
       scope_builder.RawFunctionInfo(..fi, is_arrow: True)
     })
-  // not parse_block_body: no block between arrow scope and body
+  // not parse_block_body, because no block goes between the arrow scope and
+  // the body
   use #(p2, block) <- result.map(parse_braced_body(Parser(..p_body, scopes:)))
   // re-enter class_id so the next element parents correctly
   let p2 =
@@ -3523,7 +3523,7 @@ fn parse_class_method_value(
   is_constructor is_constructor: Bool,
   has_extends has_extends: Bool,
 ) -> Result(#(Parser, ast.FunctionLiteral, scope.ScopeId), ParseError) {
-  // method scope is a direct child of class_id; capture by diff
+  // the method scope is a direct child of class_id, so find it by diffing
   let body_before = scope_builder.children_newest_first(p.scopes, ids.class_id)
   use #(p2, params, body) <- result.map(parse_method_params_body(
     p,
@@ -3532,7 +3532,7 @@ fn parse_class_method_value(
     is_constructor:,
     has_extends:,
   ))
-  // never empty: a method pushed exactly one function scope
+  // never empty, because a method pushed exactly one function scope
   let assert [method_fn_id, ..] =
     class_scopes.class_new_children(p2.scopes, ids.class_id, body_before)
     as "parser: class method body pushed no Function scope"
@@ -3731,7 +3731,7 @@ fn parse_with_statement(
   ))
 }
 
-// raise deferred cover-grammar errors once known not a pattern
+// raise deferred cover-grammar errors once we know this is not a pattern
 fn check_cover_grammar_errors(p: Parser, pos: Int) -> Result(Nil, ParseError) {
   case p.ctx.has_cover_initializer, p.ctx.dup_proto_pos {
     True, _ -> Error(ShorthandDefaultOutsideDestructuring(pos))
@@ -3743,7 +3743,7 @@ fn check_cover_grammar_errors(p: Parser, pos: Int) -> Result(Nil, ParseError) {
 fn parse_expression_statement(
   p: Parser,
 ) -> Result(#(Parser, ast.Statement), ParseError) {
-  // raw text needed for directives
+  // directives need the raw text
   let directive_raw = case peek(p) {
     StringLiteral -> Some(peek_value(p))
     _ -> None
@@ -3751,7 +3751,7 @@ fn parse_expression_statement(
   use #(p2, expr) <- result.try(parse_expression(p))
   use Nil <- result.try(check_cover_grammar_errors(p2, pos_of(p)))
   use p3 <- result.try(eat_semicolon(p2))
-  // directive only if exactly a string literal
+  // it is a directive only if it is exactly a string literal
   let directive = case expr {
     ast.StringLiteral(..) -> directive_raw
     _ -> None
@@ -3810,7 +3810,7 @@ fn parse_assignment_expression(
             | Dot
             | QuestionDot
             | Arrow -> parse_arrow_or_assignment(p)
-            // no LeftBracket: yield [..] is a yield expression
+            // LeftBracket isn't listed because yield [..] is a yield expression
             _ -> parse_yield_expression(p)
           }
       }
@@ -3824,7 +3824,7 @@ fn parse_arrow_or_assignment(
 ) -> Result(#(Parser, ast.Expression), ParseError) {
   case try_arrow_function(p) {
     Ok(#(p2, arrow_expr)) -> Ok(#(p2, arrow_expr))
-    // error after => is committed, never backtrack
+    // an error after => is committed, so never backtrack
     Error(ArrowError(e)) -> Error(e)
     Error(NotAnArrow) -> {
       let name = peek_value(p)
@@ -3974,7 +3974,7 @@ fn is_web_compat_call_target(p: Parser, lhs: ast.Expression) -> Bool {
   }
 }
 
-// ArrowError is committed (after =>): propagate, never backtrack
+// ArrowError is committed (after =>), so propagate it and never backtrack
 type ArrowAttempt {
   NotAnArrow
   ArrowError(ParseError)
@@ -4085,7 +4085,7 @@ fn try_single_ident_arrow(
   finish_arrow(parse_arrow_body(p3, params), outer, is_async:, params:)
 }
 
-// any failure before => means not an arrow: backtrack
+// any failure before => means this is not an arrow, so backtrack
 fn try_paren_arrow(
   outer: Parser,
   p_params: Parser,
@@ -4476,7 +4476,7 @@ fn delete_operand(expr: ast.Expression) -> ast.Expression {
   }
 }
 
-// §15.7.1 AllPrivateIdentifiersValid ref recording
+// records refs for §15.7.1 AllPrivateIdentifiersValid
 fn note_private_ref(p: Parser, name: String) -> Parser {
   case name {
     "#" <> _ -> {
@@ -4515,7 +4515,7 @@ fn reject_private_property_key(
   }
 }
 
-// end of class body step of AllPrivateIdentifiersValid
+// the end-of-class-body step of AllPrivateIdentifiersValid
 fn resolve_private_refs(
   p: Parser,
   outer_depth: Int,
@@ -5116,7 +5116,7 @@ fn parse_template_substitutions(
   }
 }
 
-// window past } is garbage, rescan like a regex
+// the window past } is garbage, so rescan it like a regex
 fn template_continuation(p: Parser) -> Parser {
   let #(token, scan) =
     lexer.scan_template_continuation(
@@ -5128,7 +5128,7 @@ fn template_continuation(p: Parser) -> Parser {
   Parser(..p, tokens: [token], scan:)
 }
 
-// raw quasi text, line terminators normalized (§12.9.6 trv)
+// raw quasi text with line terminators normalised (§12.9.6 trv)
 fn template_span_raw(p: Parser, trailing: Int) -> String {
   bytes.unsafe_slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
   |> string.replace("\r\n", "\n")
@@ -5235,7 +5235,7 @@ fn parse_primary_non_identifier(
   p: Parser,
 ) -> Result(#(Parser, ast.Expression), ParseError) {
   case peek(p) {
-    // hard lexer error token: report its message
+    // a hard lexer error token, so report its message
     Illegal | LexFailure(_) -> Error(illegal_token_error(p))
     Number -> {
       use Nil <- result.try(check_legacy_octal_literal(p))
@@ -5320,7 +5320,7 @@ fn parse_primary_non_identifier(
         True -> parse_function_expression(p, is_async: True)
         False -> identifier_reference(p)
       }
-    // / and /= here start a regex: relex it
+    // / and /= here start a regex, so relex it
     Slash | SlashEqual -> parse_regex_literal(p)
     New -> parse_new_expression(p)
     Yield -> {
@@ -5359,7 +5359,7 @@ fn parse_array_literal(
   let p2 = advance(p)
   // elements are [+In]
   use p2 <- allowing_in(p2)
-  // pattern flags are per literal: reset
+  // pattern flags are per literal, so reset them
   let p2 = Parser(..p2, literal_invalid_as_pattern: False)
   use #(p3, elems) <- result.map(parse_array_elements(p2, []))
   #(
@@ -5371,7 +5371,7 @@ fn parse_array_literal(
   )
 }
 
-// does the element just parsed break the enclosing pattern
+// whether the element just parsed breaks the enclosing pattern
 fn element_breaks_pattern(
   p: Parser,
   start_token: TokenKind,
@@ -5386,7 +5386,7 @@ fn element_breaks_pattern(
   }
 }
 
-// one element, folding its verdict into the literal's flag
+// parses one element and folds its verdict into the literal's flag
 fn parse_cover_element(
   p: Parser,
   invalid_before invalid_before: Bool,
@@ -5419,7 +5419,7 @@ fn parse_array_elements(
         Some(ast.SpreadElement(argument: expr, span: span_from(spread_pos, p3)))
       case peek(p3) {
         Comma -> {
-          // spread not last: fine as expression, invalid as pattern
+          // a spread that isn't last is fine in an expression but not a pattern
           let p4 = Parser(..advance(p3), literal_invalid_as_pattern: True)
           parse_array_elements(p4, [elem, ..acc])
         }
@@ -5449,7 +5449,7 @@ fn parse_object_literal(
   let p2 = advance(p)
   // values are [+In]
   use p2 <- allowing_in(p2)
-  // pattern flags are per literal: reset
+  // pattern flags are per literal, so reset them
   let p2 = Parser(..p2, literal_invalid_as_pattern: False)
   use #(p3, props) <- result.map(
     parse_object_properties(p2, has_proto: False, acc: []),
@@ -5495,7 +5495,7 @@ fn parse_object_properties(
     }
     _ -> {
       use #(p2, prop) <- result.try(parse_object_property(p))
-      // §13.2.5.1 duplicate __proto__, deferred for patterns
+      // §13.2.5.1 duplicate __proto__, deferred in case this is a pattern
       let is_proto = case prop {
         ast.InitProperty(key:, shorthand: False, ..) ->
           ast.static_name(key) == Some("__proto__")
@@ -5685,7 +5685,8 @@ fn parse_function_expression(
   use #(p5, params, body) <- result.map(
     parse_function_params_and_body(p_inner) |> restore_context_fn(p),
   )
-  // §15.2.6 nfe name: own scope, declared after body, first wins
+  // §15.2.6 a named function expression's name has its own scope and is
+  // declared after the body, where the first declaration wins
   let p5 = case name {
     None -> p5
     Some(name) ->
@@ -5744,7 +5745,7 @@ fn parse_regex_literal(
     regex.skip_flags(p.bytes, end_pos)
     |> result.map_error(regexp_syntax_error),
   )
-  // pattern early errors; annex b grammar unless u/v
+  // pattern early errors, using the annex b grammar unless u or v is set
   use Nil <- result.try(
     regex.validate_pattern(p.bytes, body_start, end_pos - 1, flags)
     |> result.map_error(regexp_syntax_error),
@@ -5771,7 +5772,7 @@ fn rescan_from(p: Parser, pos: Int) -> Parser {
   )
 }
 
-// the "x" after from: its cooked value and end position
+// the cooked value and end position of the "x" after from
 type ModuleSpecifier {
   ModuleSpecifier(value: String, end: Int)
 }
@@ -5895,7 +5896,7 @@ fn parse_import_declaration(
 ) -> Result(#(Parser, ast.ModuleItem), ParseError) {
   let span_start = pos_of(p)
   let p2 = advance(p)
-  // import source x from: only when a binding then from follow
+  // import source x from, but only when a binding and then from follow
   let is_source_phase =
     peek(p2) == Identifier
     && peek_value(p2) == "source"
@@ -5904,7 +5905,7 @@ fn parse_import_declaration(
   use <- bool.lazy_guard(is_source_phase, fn() {
     parse_source_phase_import(p2, span_start)
   })
-  // import defer: only when * follows; escapes rejected (§5.1.5)
+  // import defer, but only when * follows; escapes are rejected (§5.1.5)
   let is_defer_phase =
     peek(p2) == Identifier
     && peek_value(p2) == "defer"
@@ -5989,7 +5990,7 @@ fn parse_default_import(
   }
 }
 
-// source phase import; binding not modeled in the ast yet
+// source phase import; the ast doesn't model the binding yet
 fn parse_source_phase_import(
   p: Parser,
   span_start: Int,
@@ -6370,13 +6371,13 @@ fn parse_export_specifier(
   #(advance(p4), ast.ExportSpecifier(local:, exported:, local_span:))
 }
 
-// p is at a body {: apply its directive prologue
+// p is at a body {; apply its directive prologue
 fn apply_body_use_strict(p: Parser) -> Result(Parser, ParseError) {
   use <- bool.guard(peek(p) != LeftBrace, Ok(p))
   let body = look_skip(look_from(p))
   case p.ctx.strict, p.ctx.has_non_simple_param {
     False, _ -> scan_directive_prologue(p, body)
-    // use strict + non-simple params errors even if already strict
+    // use strict with non-simple params is an error even if already strict
     True, True -> {
       use <- bool.guard(
         prologue_has_use_strict(body),
@@ -6686,7 +6687,7 @@ fn peek_had_escape(p: Parser) -> Bool {
   }
 }
 
-// annex b legacy forms strict code forbids; decided by the lexer
+// annex b legacy forms that strict code forbids; the lexer decides them
 fn peek_annex_b_legacy(p: Parser) -> Bool {
   case p.tokens {
     [token.Token(annex_b_legacy: legacy, ..), ..] -> legacy

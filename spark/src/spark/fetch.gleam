@@ -6,11 +6,11 @@ import spark/io.{type Io, DropBody, Fetch, ReadBody}
 import spark/js
 
 /// the web's fetch, with Headers, Request and Response, each a global. The
-/// network is the embedder's: a request is a Fetch want, answered with the
+/// embedder owns the network. A request is a Fetch want, answered with the
 /// status and headers, and the body then comes one ReadBody want at a time,
-/// so a body that never ends costs nothing extra. Redirects, aborting and
-/// unpacking a gzip or deflate body are done in the javascript. FormData is
-/// here too, sent and read as multipart/form-data
+/// so a body that never ends costs nothing extra. The javascript handles
+/// redirects, aborting and unpacking gzip or deflate bodies. FormData is here
+/// too, sent and read as multipart/form-data
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "spark:fetch",
@@ -67,7 +67,7 @@ fn handle(ctx: Context(host), args: List(JsVal), next) {
   }
 }
 
-// name, value, name, value, ... as pairs; what is not text is left out
+// pairs up name, value, name, value, ..., skipping pairs that aren't strings
 fn pairs(flat: List(JsVal)) -> List(#(String, String)) {
   case flat {
     [name, value, ..rest] ->

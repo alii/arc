@@ -72,7 +72,7 @@ fn loop_depths(ops: List(Op)) -> List(Int) {
   list.reverse(rev)
 }
 
-// the general arm behind an UnpackArray, up to where its fast arm jumps
+// the pcs of each UnpackArray's general arm, up to where its fast arm jumps
 fn cold_pcs(code: tuple_array.TupleArray(Op)) -> Set(Int) {
   use cold, op <- list.fold(tuple_array.to_list(code), set.new())
   case op {

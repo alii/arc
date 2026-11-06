@@ -11,7 +11,7 @@ const erlangLanguage = StreamLanguage.define(erlang);
 
 /**
  * Read-only CodeMirror viewer for compiler output. Mounted once; `code`
- * changes are applied as document replacements so a 100KB Erlang dump doesn't
+ * changes are applied as document replacements so a large Erlang dump doesn't
  * re-create the editor (and keeps the scroll position when only whitespace
  * shifts).
  */

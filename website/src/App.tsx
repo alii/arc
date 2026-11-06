@@ -7,7 +7,7 @@ import { Playground } from './playground/Playground';
 import { useMediaQuery } from './use-media-query';
 
 const item = { hidden: { opacity: 0 }, show: { opacity: 1 } };
-// A variant-aware wrapper: motion children only stagger through motion parents.
+// Motion children only stagger through a motion parent, so this column needs variants too.
 const column = { hidden: {}, show: { transition: { staggerChildren: 0.05 } } };
 
 export default function App() {

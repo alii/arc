@@ -254,7 +254,7 @@
 -define(SAME_TEXT(A, B), ?IS_TEXT_OF(element(3, A), B)).
 %% ids as arc_bytecode_key_ffi:named/1 gives them, checked by arc_rt_layout_test
 -define(LENGTH_KEY, {?KEY_NAMED, 1602631505924514, <<"length">>}).
-% as a pattern: its id says it all
+% matches length by id alone, since the id tells it apart
 -define(LENGTH_KEY_BY_ID, {_, 1602631505924514, _}).
 -define(NAME_KEY, {?KEY_NAMED, 24587384214, <<"name">>}).
 -define(PROTOTYPE_KEY, {?KEY_NAMED, 351306839192840528, <<"prototype">>}).
@@ -295,7 +295,7 @@
 -define(VIEW_ENTRIES, entries_view).
 
 %% shapes shared with emitted code
-%% the js exception as raised and caught, fixed by carder rt_exn
+%% the js exception as it is raised and caught, fixed by carder rt_exn
 -define(JS_THROW(St, E), {wasm_exn, 0, [St, E]}).
 %% call frame handed to compiled code
 -define(FRAME(This, Fn, Home, NewTarget), {This, Fn, Home, NewTarget}).

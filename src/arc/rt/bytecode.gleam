@@ -286,7 +286,7 @@ pub type FuncTemplate {
   )
 }
 
-// erlang tuple of captured values, leading run of callee locals
+// an erlang tuple of captured values, starting with a run of callee locals
 pub type EnvTuple
 
 @external(erlang, "erlang", "list_to_tuple")

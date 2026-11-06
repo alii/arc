@@ -1,4 +1,4 @@
-%% no [safe]: only decode bytes this library produced
+%% we don't pass [safe], so only decode bytes this library produced
 -module(arc_rt_snapshot_ffi).
 -export([encode/3, decode/2]).
 

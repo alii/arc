@@ -49,7 +49,7 @@ pub fn three_args_or_undefined(args: List(JsVal)) -> #(JsVal, JsVal, JsVal) {
   }
 }
 
-// threaded list.map, results in input order
+// list.map that threads the agent, with results in input order
 pub fn map_threaded(
   st: Agent,
   items: List(a),

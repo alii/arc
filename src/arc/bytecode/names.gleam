@@ -1,5 +1,5 @@
-//// Property names the engine itself uses, as ready-made keys, so that reading
-//// `length` does not work its number out again every time. The numbers are
+//// Ready-made keys for the property names the engine itself uses, so reading
+//// `length` doesn't work out its number again every time. The numbers are
 //// what `key.named` gives; names_test checks every one.
 
 import arc/bytecode/key.{type PropertyKey, Named}

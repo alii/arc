@@ -404,7 +404,7 @@ put_field(Store, {?HANDLE_TAG, Id}, K, V, Create)
     end;
 put_field(_, _, _, _, _) -> miss.
 
-%% Slot and Text are K's, spelled out since an index key has neither inside it
+%% Slot and Text come from K, passed apart because an index key holds neither
 put_prop(Store, Cells, Id, Cell, K, Slot, Text, V, Create) ->
     {_, Kind, Proto, Props, Sym, Elems, Ext} = Cell,
     case Props of
@@ -552,7 +552,7 @@ chain_takes_write(Store, Cells, Proto, {?KEY_NAMED, _, _} = K) ->
 chain_takes_write(Store, Cells, Proto, {?KEY_INDEX, Idx}) ->
     arc_rt_obj_ffi:chain_takes_index_write(Store, Cells, Proto, Idx).
 
-%% creating an element needs free proto chain, writable length
+%% creating an element needs a free proto chain and a writable length
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, tuple_size(Store) =:= ?STORE_SIZE ->
     Cells = element(?STORE_CELLS, Store),
@@ -643,7 +643,7 @@ fill_hole(Store, Cells, Id, Cell, Proto, Elems, Idx, V) ->
 length_writable(#{?KEY_ID(?LENGTH_KEY) := {<<"length">>, Prop}})
   when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
     element(?DATAPROPERTY_WRITABLE, Prop) =:= true;
-%% some other name is where length would be: let the general path look
+%% some other name sits where length would be, so let the general path look
 length_writable(#{?KEY_ID(?LENGTH_KEY) := _}) -> false;
 length_writable(_) -> true.
 

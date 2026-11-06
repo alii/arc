@@ -187,7 +187,7 @@ pub fn unit_parts_to_string(parts: List(UnitPart)) -> String {
   parts |> list.map(fn(p) { p.value }) |> string.join("")
 }
 
-// icu: shared affixes collapse unless exactly one code point
+// like icu, shared affixes collapse unless they're exactly one code point
 pub fn format_range_combine(
   key: LocaleKey,
   x_parts: List(Part),
@@ -1541,7 +1541,7 @@ pub fn relative_time_parts_en(
   }
   let with_unit = fn(p: Part) { UnitPart(p.type_, p.value, Some(unit)) }
   let literal = fn(text) { UnitPart(PartLiteral, text, None) }
-  // normalize -0.0 so the 0.0 patterns match
+  // normalise -0.0 so the 0.0 patterns match
   let v = case rt_val.is_neg_zero(value) {
     True -> 0.0
     False -> value

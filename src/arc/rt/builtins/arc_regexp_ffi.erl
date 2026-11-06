@@ -425,7 +425,7 @@ is_hex(C) ->
         orelse (C >= $a andalso C =< $f)
         orelse (C >= $A andalso C =< $F).
 
-%% lone surrogates never match, emit an unmatchable stand-in
+%% lone surrogates never match, so emit an unmatchable stand-in
 emit_surrogate(false, Rest, MS, Env, Acc) ->
     tr(Rest, false, MS, Env, [<<"(?!)">> | Acc]);
 emit_surrogate(true, Rest, MS, Env, Acc) ->
@@ -488,7 +488,7 @@ regexp_exec_compiled(Compiled, String, Offset, Sticky) ->
         {error, _} = Err -> Err
     end.
 
-%% byte offsets; mid-char offset is no_match, never badarg
+%% byte offsets. a mid-char offset is no_match, never badarg
 check_offset(String, Offset) when Offset < 0 ->
     check_offset(String, 0);
 check_offset(String, Offset) when Offset > byte_size(String) ->

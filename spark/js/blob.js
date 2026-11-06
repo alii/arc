@@ -1,10 +1,10 @@
 "use strict";
 
-// node's Blob and File: lib/internal/blob.js and lib/internal/file.js. The
-// store they keep their bytes in, c++ in node, is written out below
+// node's Blob and File, from lib/internal/blob.js and lib/internal/file.js.
+// Node keeps their bytes in a c++ store, which we write out below
 
 const internal = require("spark:internal");
-// the web streams hold the webidl helpers these files use
+// these files use the webidl helpers that come with the web streams
 require("node:stream/web");
 
 internal.addLoader(shared, own);
@@ -26,8 +26,8 @@ function joined(parts) {
   return all;
 }
 
-// a blob's bytes, held whole. Node reads them out through a reader that
-// gives a piece and then says it is done
+// holds a blob's bytes in one piece. Node reads them through a reader that
+// gives one piece and then says it's done
 class Stored {
   constructor(bytes) {
     this.bytes = bytes;
@@ -842,7 +842,7 @@ const files = {
 
     module.exports = { Blob, File };
 
-    // for fetch, which sends a blob's bytes without waiting on a stream
+    // fetch uses this to send a blob's bytes without waiting on a stream
     Object.defineProperty(module.exports, "bytesOf", {
       value: (blob) => blob[kHandle].bytes,
       enumerable: false,
@@ -852,7 +852,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -877,8 +877,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error("no module " + name + " in this port");
@@ -886,8 +886,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

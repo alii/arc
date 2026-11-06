@@ -1,4 +1,5 @@
-%% the os tz database; arc's only disk read, opted into through arc/zoneinfo
+%% reads the os tz database. It is arc's only disk read, and you opt into it
+%% through arc/zoneinfo
 -module(arc_zoneinfo_ffi).
 
 -export([load/1, available_ids/0, system_time_zone/0, time_zone_named/1]).
@@ -34,7 +35,7 @@ available_ids() ->
         Root -> [Z || Z <- arc_tz_links_ffi:primary_zones(), is_file(Root, Z)]
     end.
 
-%% tz env var, else /etc/localtime, else /etc/timezone, else utc
+%% tries the TZ env var, then /etc/localtime, then /etc/timezone, then utc
 -spec system_time_zone() -> arc_time_zone_ffi:local_zone().
 system_time_zone() ->
     case detected_zone() of
@@ -51,7 +52,7 @@ detected_zone() ->
                                 fun zone_from_localtime_contents/0]);
             Raw -> zone_from_tz_env(Raw)
         end
-    %% no prim_file or os on atomvm
+    %% atomvm has no prim_file or os
     catch error:undef -> none
     end.
 

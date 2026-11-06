@@ -42,7 +42,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-// the one sign flip: js wants utc minus local
+// the one sign flip, because js wants utc minus local
 fn js_get_timezone_offset_minutes(zone: TimeZone, epoch_ms: Int) -> Int {
   0 - zone_offset_at_utc_ms(zone, epoch_ms)
 }
@@ -698,7 +698,7 @@ fn date_set_field(
   use h, tv <- require_time_value(st, this, name)
   let supplied = list.take(args, settable_max_args(first))
   let #(new_nums, st) = args_to_nums(st, supplied)
-  // none is a nan base: return nan without writing back
+  // none is a nan base, so return nan without writing back
   case compute_set_field(tv, first, new_nums, basis) {
     None -> #(mk_number(JNan), st)
     Some(result) -> {

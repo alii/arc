@@ -1,8 +1,8 @@
 "use strict";
 
-// node's lib/internal/url.js and lib/url.js over a native parser. Not here:
-// URLPattern, URL.createObjectURL and URL.revokeObjectURL, and the warning
-// url.parse gives
+// node's lib/internal/url.js and lib/url.js over a native parser. We don't
+// have URLPattern, URL.createObjectURL or URL.revokeObjectURL, and url.parse
+// gives no warning
 
 const {
   typeError,
@@ -127,7 +127,7 @@ function percentDecode(input) {
   return length === j ? output : output.subarray(0, j);
 }
 
-// called with `new` in the code below, as node's error classes are
+// the code below calls these with `new`, like node's error classes
 function ERR_ARG_NOT_ITERABLE(name) {
   return typeError("ERR_ARG_NOT_ITERABLE", `${name} must be iterable`);
 }
@@ -211,7 +211,7 @@ function ERR_MISSING_ARGS(...args) {
 const kHostnameAction = 2;
 const kPathnameAction = 6;
 
-// what a file path has escaped before it becomes a url path
+// escapes what a file path needs escaped before it becomes a url path
 function escapeUnsafeChars(text, windows) {
   let out = "";
   for (const ch of text) {
@@ -268,8 +268,8 @@ function escapeUnsafeChars(text, windows) {
   return out;
 }
 
-// node's native url binding, over the parser. A parse or an update leaves the
-// positions of the url's parts in urlComponents
+// node's native url binding, built on the parser. A parse or an update leaves
+// the positions of the url's parts in urlComponents
 const bindingUrl = {
   urlComponents: [0, 0, 0, 0, 0, 0, 0, 0, 1],
 
@@ -310,7 +310,8 @@ const bindingUrl = {
     return this.publish(result);
   },
 
-  // a url as text with parts left out, and the host as unicode on request
+  // writes a url as text with the chosen parts left out, and the host as
+  // unicode if asked
   format(href, fragment, unicode, search, auth) {
     let result = native.parse(href, undefined);
     const drop = (action) => {

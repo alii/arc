@@ -25,7 +25,7 @@ function getCACertificates(type = "default") {
   }
 }
 
-// connections are not here yet; each of these says so when called
+// we can't make connections yet, so each of these says so when called
 function missing(name) {
   return function () {
     throw new codes.ERR_METHOD_NOT_IMPLEMENTED(`tls.${name}`);

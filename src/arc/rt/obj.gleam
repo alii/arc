@@ -1107,10 +1107,9 @@ fn set_own_shaped(
   }
 }
 
-// a literal's shape, one step from the empty shape however many keys it has:
-// the step is filed under its keys joined by a byte no property name holds.
-// the compilers only ask for keys with distinct ids.
-// also called by name from arc_rt_obj_ic_ffi
+// a literal's shape is one step from the empty shape however many keys it has,
+// filed under its keys joined by a byte no property name holds. The compilers
+// only ask for keys with distinct ids. Also called by name from arc_rt_obj_ic_ffi
 pub fn literal_shape(
   st: Agent,
   keys: List(PropertyKey),

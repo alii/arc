@@ -24,7 +24,7 @@ const kTypes = [
   "symbol",
 ];
 
-// libuv's message and, where linux and macos agree on it, the errno
+// libuv's message for each code, and its errno where linux and macos agree
 const systemErrors = {
   EACCES: ["permission denied", -13],
   EAGAIN: ["resource temporarily unavailable"],
@@ -48,8 +48,8 @@ const systemErrors = {
   ETXTBSY: ["text file is busy", -26],
 };
 
-// as node makes its coded errors: a plain error of the base class, with the
-// code on it and a toString that shows the code
+// makes a coded error the way node does: a plain error of the base class with
+// the code on it and a toString that shows the code
 function coded(Base, code, message) {
   const made = new Base(message);
   Object.defineProperty(made, "toString", {
@@ -216,7 +216,7 @@ function invalidArgValue(name, value, reason = "is invalid") {
   );
 }
 
-// a failed want as node reports a failed syscall
+// reports a failed want the way node reports a failed syscall
 function systemError(code, syscall, path) {
   const known = systemErrors[code];
   let message = `${code}: ${known ? known[0] : "unknown error"}, ${syscall}`;
@@ -333,7 +333,7 @@ function genericNodeError(message, errorProperties) {
 
 const kEnhanceStackBeforeInspector = Symbol("kEnhanceStackBeforeInspector");
 
-// objects that structuredClone must refuse, as node marks its URL
+// objects that structuredClone must refuse. Node marks its URL this way
 const uncloneable = new WeakSet();
 
 function markUncloneable(object) {
@@ -344,8 +344,8 @@ function isUncloneable(object) {
   return uncloneable.has(object);
 }
 
-// node's error classes by code, for code ported from node that says
-// `new ERR_X(...)`; each returns the error, which `new` then hands back
+// node's error classes by code, for ported code that says `new ERR_X(...)`.
+// Each returns the error, which `new` then hands back
 const codes = {
   ERR_INVALID_ARG_TYPE: function (name, expected, actual) {
     return invalidArgType(name, expected, actual);

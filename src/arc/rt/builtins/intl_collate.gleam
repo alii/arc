@@ -9,7 +9,7 @@ import gleam/order
 import gleam/result
 import gleam/string
 
-// ecma-402 §10.3.3, simplified root-locale uca
+// ecma-402 §10.3.3 using a simplified root-locale uca
 pub fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
   let sensitivity = c.sensitivity
   let numeric = c.numeric

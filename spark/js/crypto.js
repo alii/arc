@@ -1,7 +1,7 @@
 "use strict";
 
-// node's digests and random bytes: lib/internal/crypto/hash.js, random.js and
-// util.js, with the handles they drive, c++ in node, written out below
+// node's digests and random bytes, from lib/internal/crypto/hash.js, random.js
+// and util.js. The handles they drive are c++ in node, so we write them out below
 
 const internal = require("spark:internal");
 const loop = require("spark:loop");
@@ -23,7 +23,7 @@ function missing(name) {
   };
 }
 
-// an encoding node does not know is read as utf8, as node's own code reads it
+// like node, read a string as utf8 if node doesn't know its encoding
 function bytesOf(data, encoding) {
   if (typeof data === "string") {
     return Buffer.from(data, Buffer.isEncoding(encoding) ? encoding : "utf8");
@@ -43,14 +43,14 @@ function joined(chunks) {
   return all;
 }
 
-// and one it does not know for the digest gives the bytes
+// gives the bytes as a Buffer if node doesn't know the digest's encoding
 function encoded(bytes, encoding) {
   const buffer = Buffer.from(bytes);
   return Buffer.isEncoding(encoding) ? buffer.toString(encoding) : buffer;
 }
 
-// a digest in progress. It keeps what it was given and works the digest out
-// at the end, in one call that leaves nothing behind
+// a digest in progress. It keeps every chunk it's given and works out the
+// digest at the end, in one call that leaves nothing behind
 class Hash {
   #name;
   #length;
@@ -199,7 +199,7 @@ const shims = {
       return Buffer.from(buffer, byteOffset, length);
     },
   }),
-  // a key is text or bytes here; node's key objects are not
+  // a key here is text or bytes, because we don't have node's key objects
   "internal/crypto/keys": () => ({
     prepareSecretKey(key, encoding) {
       const { codes } = internal.load("internal/errors");
@@ -2569,7 +2569,7 @@ const files = {
       if (isArrayBufferView(value)) {
         return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       }
-      // worded as node's c++ words it, which does not say what it was given
+      // matches the wording of node's c++ error, which doesn't say what it got
       const error = new TypeError(
         `The "${name}" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.`,
       );
@@ -2577,7 +2577,7 @@ const files = {
       throw error;
     }
 
-    // every byte is looked at, whatever the earlier ones were
+    // compares every byte, even after a difference, so timing gives nothing away
     function timingSafeEqual(buf1, buf2) {
       const left = bytesOf(buf1, "buf1");
       const right = bytesOf(buf2, "buf2");
@@ -2602,7 +2602,7 @@ const files = {
       return fillRandomValues(array);
     }
 
-    // the web's digest names, and node's for the same thing
+    // maps the web's digest names to node's
     const webDigests = {
       __proto__: null,
       "SHA-1": "sha1",
@@ -2679,7 +2679,7 @@ const files = {
       getRandomValues,
       webcrypto,
       subtle,
-      // the web's global, which is the same object as webcrypto
+      // the web's crypto global is the same object as webcrypto
       crypto: webcrypto,
     };
 
@@ -2694,7 +2694,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -2719,8 +2719,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error("no module " + name + " in this port");
@@ -2728,8 +2728,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

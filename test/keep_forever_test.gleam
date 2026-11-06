@@ -6,7 +6,7 @@ import rt_helpers
 
 const threshold = 256
 
-// a small young generation, so a few thousand objects mean several full gcs
+// uses a small young generation so a few thousand objects mean several full gcs
 fn small_engine() -> Engine(Nil) {
   let eng = engine.new() |> engine.with_host_hooks(rt_helpers.quiet_hooks())
   let #(Nil, eng) =

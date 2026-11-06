@@ -52,8 +52,8 @@ function useWidth(ref: React.RefObject<HTMLElement | null>, initial: number): nu
 	return width;
 }
 
-// Fill and line are iris pulled toward the page so they sit in the theme:
-// the fill more (darker), the line only slightly.
+// Fill and line mix iris toward the page colours so they sit in the theme.
+// The fill is mixed further, so it's darker than the line.
 const fillStop =
 	'[stop-color:color-mix(in_oklch,var(--color-rpd-iris)_65%,var(--color-rpd-text))] dark:[stop-color:color-mix(in_oklch,var(--color-rp-iris)_55%,var(--color-rp-base))]';
 const lineStroke =

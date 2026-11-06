@@ -129,7 +129,7 @@ pub fn guarded3(
   guard_state(guard3(f, state.agent, a, b), state)
 }
 
-// guarded2, but the agent is handed on, so a step that makes several calls
+// like guarded2, but hands the agent on, so a step that makes several calls
 // builds its State once at the end
 pub fn then2(
   state: State,

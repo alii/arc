@@ -166,13 +166,13 @@ fn get_buffer(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_object(view.buffer), st)
 }
 
-// §25.3.4.2 get DataView.prototype.byteLength: +0 when out of bounds
+// §25.3.4.2 get DataView.prototype.byteLength, which is +0 when out of bounds
 fn get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_data_view(st, this)
   #(mk_int(in_bounds_size(st, view) |> option.unwrap(0)), st)
 }
 
-// §25.3.4.3 get DataView.prototype.byteOffset: +0 when out of bounds
+// §25.3.4.3 get DataView.prototype.byteOffset, which is +0 when out of bounds
 fn get_byte_offset(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_data_view(st, this)
   let offset =

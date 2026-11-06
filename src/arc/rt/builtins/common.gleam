@@ -1,4 +1,4 @@
-// alloc and install kit for builtin objects
+// helpers to allocate and install builtin objects
 
 import arc/bytecode/key.{named}
 import arc/bytecode/names
@@ -400,7 +400,7 @@ pub fn add_species_accessor(
   add_symbol_property(st, ctor_h, types.symbol_species, prop)
 }
 
-// species lookup on pair still yields its ctor without user code
+// true when a species lookup on pair still yields its ctor without running user code
 pub fn species_intact(st: Agent, pair: BuiltinPair) -> Bool {
   let BuiltinPair(prototype:, constructor:) = pair
   case

@@ -1,6 +1,6 @@
 %% rt/prop_map: an object's own string-keyed properties.
 %%
-%% #{Slot => {Text, Value}}. A name's slot is its key's id, a small integer,
+%% They're stored as #{Slot => {Text, Value}}. A name's slot is its key's id, a small integer,
 %% which the vm finds in a map far faster than it finds a text. Two names can
 %% share an id. The second to arrive goes to the next free slot four further on
 %% (the two low bits of an id say what kind it is), as {Text, Value, Id}, three

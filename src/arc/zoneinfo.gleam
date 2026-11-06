@@ -1,9 +1,9 @@
-// os tz database; reached only through HostHooks
+// the os tz database, which arc only reaches through HostHooks
 
 import arc/time_zone.{type Rules, type TimeZone, type TzError}
 import gleam/option.{type Option}
 
-// tz env var, else /etc/localtime, else /etc/timezone, else utc
+// tries the TZ env var, then /etc/localtime, then /etc/timezone, then utc
 @external(erlang, "arc_zoneinfo_ffi", "system_time_zone")
 pub fn system_time_zone() -> TimeZone
 

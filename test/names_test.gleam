@@ -17,7 +17,7 @@ pub fn the_number_depends_on_the_text_alone_test() {
   assert a != b && c != d
 }
 
-// so that one map can hold both kinds
+// keeping the two apart lets one map hold both kinds
 pub fn a_private_name_never_shares_a_number_with_a_name_test() {
   let assert Named(id: plain, ..) = key.named("x")
   let assert Private(id: hidden, ..) = key.private("x")
@@ -25,7 +25,7 @@ pub fn a_private_name_never_shares_a_number_with_a_name_test() {
   assert hidden == plain + 1
 }
 
-// a small integer on a 64-bit vm, which is what makes it quick to look up
+// 59 bits keeps an id a small integer on a 64-bit vm, so it's quick to look up
 pub fn numbers_fit_in_59_bits_test() {
   list.each(
     ["", "a", "length", "aVeryLongPropertyNameIndeed_0123456789"],

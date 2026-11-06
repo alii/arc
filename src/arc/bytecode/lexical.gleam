@@ -142,7 +142,7 @@ pub fn refs_get(refs: LexicalRefs, ref: LexicalRef) -> Bool {
   }
 }
 
-// consecutive slots from `from` for each kept ref, in setup_frame order
+// numbers each kept ref with consecutive slots from `from`, in setup_frame order
 pub fn number_refs(
   from from: Int,
   keep keep: fn(LexicalRef) -> Bool,

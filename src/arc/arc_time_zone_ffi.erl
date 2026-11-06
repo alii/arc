@@ -1,4 +1,5 @@
-%% every offset here is local minus utc, in seconds; no io, see arc_zoneinfo_ffi
+%% every offset here is local minus utc in seconds. This module does no io;
+%% arc_zoneinfo_ffi does that
 -module(arc_time_zone_ffi).
 
 -export([known_identifier/1, canonical_id/1, rules_offset_at/2, rules_next_transition/2,
@@ -75,7 +76,7 @@ zone_offset_at_local_ms(Zone, LocalMs) when is_integer(LocalMs) ->
     After = zone_offset(Zone, LocalSec + 86400),
     to_minutes(local_offset(Zone, LocalSec, Before, After)).
 
-%% ambiguous or skipped wall times use the offset before
+%% ambiguous or skipped wall times use the earlier offset
 local_offset(Zone, LocalSec, Before, After) ->
     case zone_offset(Zone, LocalSec - Before) =:= Before of
         true -> Before;

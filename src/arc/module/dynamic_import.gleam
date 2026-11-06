@@ -1,4 +1,4 @@
-// §13.3.10 import calls, failures reject the promise
+// §13.3.10 import calls, where a failure rejects the promise
 
 import arc/bytecode/error_kind.{SyntaxError, TypeError}
 import arc/bytecode/names
@@ -289,7 +289,7 @@ fn enqueue_import_job(
   }
 }
 
-// hold capability as roots, imported bodies collect mid-job
+// root the capability because imported bodies can collect garbage mid-job
 fn enqueue_host_job(
   st: Agent,
   capability: List(JsVal),

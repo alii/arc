@@ -1,5 +1,5 @@
-//// continuation-passing vocabulary: let_ binds, host calls a js host op,
-//// continuations take values first, emitter last
+//// continuation-passing helpers. let_ binds a value and host calls a js host op.
+//// continuations take their values first and the emitter last
 
 import arc_aot/emit/state.{
   type EmitResult, type Emitter, type Next, type NextWith,

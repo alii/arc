@@ -213,7 +213,7 @@ fn parse_month_code_grammar(
   }
 }
 
-// digit check first, int.parse would accept signs
+// check for digits first because int.parse accepts signs
 fn two_decimal_digits(s: String) -> Result(Int, Nil) {
   case string.to_graphemes(s) {
     [a, b] ->
@@ -1046,7 +1046,7 @@ fn find_reference_date(
     True -> Error(Nil)
     False ->
       case temporal_calendar.month_for_code(cal, year, mc) {
-        // never valid in any year, stop instead of looping
+        // the month is never valid in any year, so stop instead of looping
         Error(temporal_calendar.NeverValid) -> Error(Nil)
         Error(temporal_calendar.NotInThisYear(_)) ->
           find_reference_date(cal, mc, day, year - 1, tries - 1)

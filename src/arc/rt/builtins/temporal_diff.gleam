@@ -130,7 +130,7 @@ fn count_months_between(d1: IsoDate, d2: IsoDate, sign: Int) -> Int {
 }
 
 fn adjust_months(d1: IsoDate, d2: IsoDate, candidate: Int, sign: Int) -> Int {
-  // compares with unconstrained day, jan 29 + 1 month is "feb 29"
+  // compare with the unconstrained day, so jan 29 + 1 month is "feb 29"
   let #(y, m) = balance_year_month(d1.year, d1.month + candidate)
   let cmp = compare_triple(#(y, m, d1.day), #(d2.year, d2.month, d2.day))
   case cmp * sign > 0 {
@@ -177,7 +177,7 @@ pub type Window {
   Window(count: Int, start_ns: Int, end_ns: Int, shifted: Bool)
 }
 
-// the count whose [count, count + step] bounds enclose dest, sliding once if not
+// finds the count whose [count, count + step] bounds enclose dest, sliding once if they don't
 pub fn find_enclosing_window(
   sign: Int,
   count: Int,
@@ -437,7 +437,7 @@ pub fn zoned_diff_round_time(
   use start_ns <- result.try(get_epoch_ns_for(tz, start_date, a_t, Compatible))
   let time_rem = b_ns - start_ns
   case smallest == Nanosecond && inc == 1 {
-    // skip next-day bound, it can be out of range
+    // skip the next-day bound because it can be out of range
     True -> {
       let time_part = balance_time_ns(time_rem, Hour)
       Ok(Duration(..time_part, years:, months:, weeks:, days:))

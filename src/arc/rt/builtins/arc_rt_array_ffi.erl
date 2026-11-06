@@ -1,4 +1,4 @@
-%% array kernels; exports may answer miss
+%% array kernels. an export may return miss
 -module(arc_rt_array_ffi).
 -export([index_range_plain/5, scan_forward/5, scan_backward/4, push/3, pop/2,
          scan_whole_array/4]).
@@ -120,7 +120,7 @@ scan_backward(Els, Search, Idx, Eq) ->
 eq(strict, A, B) -> arc_rt_val_ffi:strict_eq(A, B);
 eq(same_value_zero, A, B) -> arc_rt_val_ffi:same_value_zero(A, B).
 
-%% plain extensible array with no own props, free proto chain
+%% only for a plain extensible array with no own props and a free proto chain
 push(St, {?HANDLE_TAG, Id}, Args) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),

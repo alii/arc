@@ -97,7 +97,7 @@ fn int_arg(
   host.validate_integer(ctx, val, "index", -no_limit, no_limit, cont)
 }
 
-/// Buffer, atob and btoa. The byte work is native; the rest is node's own
+/// Buffer, atob and btoa. The byte work is native and the rest is node's own
 /// javascript
 pub fn builtin() -> Builtin(host) {
   Builtin(
@@ -165,7 +165,7 @@ pub fn builtin() -> Builtin(host) {
           let #(buffer, ctx) = host.array_buffer(ctx, swap(bytes, bits))
           #(Ok(buffer), ctx)
         }),
-        // the decoded string, -1 for a bad length, -2 for a bad character
+        // returns the decoded string, -1 for a bad length or -2 for a bad character
         HostMethod("atob", 1, fn(ctx, args, _this) {
           use text, ctx <- host.validate_string(
             ctx,

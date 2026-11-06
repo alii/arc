@@ -1,10 +1,10 @@
 "use strict";
 
-// fetch, Headers, Request and Response, written to the fetch standard and
-// worded the way node words its errors. The network is the embedder's: one
-// want for a response's status and headers, then one for each piece of its
-// body, so a body that never ends (a stream of events) costs nothing extra.
-// Redirects, aborting and unpacking a compressed body are done here
+// fetch, Headers, Request and Response, written to the fetch standard with
+// errors worded the way node words them. The embedder does the networking. We
+// send it one want for a response's status and headers, then one for each
+// piece of the body, so a body that never ends (a stream of events) costs
+// nothing extra. Redirects, aborting and decompressing happen here
 
 const { AbortController } = require("spark:dom_events");
 const { TextEncoder, TextDecoder } = require("spark:encoding");
@@ -20,7 +20,7 @@ const {
 } = require("node:stream/web");
 
 const kInspect = Symbol.for("nodejs.util.inspect.custom");
-// passed to a constructor to make an object that is filled in afterwards
+// pass this to a constructor to make an object we fill in afterwards
 const kMake = Symbol("make");
 const encoder = new TextEncoder();
 
@@ -52,7 +52,7 @@ function byteString(value) {
 
 const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
-// lists these names when the object's keys are asked for, in this order
+// makes these names enumerable, listed in this order
 function enumerable(prototype, names) {
   for (const name of names) {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
@@ -73,7 +73,7 @@ function validValue(value) {
 }
 
 class Headers {
-  // [lower-case name, value] in the order they were added
+  // [lower-case name, value] pairs in the order they were added
   #list = [];
   #guard = "none";
 
@@ -108,7 +108,7 @@ class Headers {
         }
         return;
       }
-      // every key the object has itself, listed or not, as node takes them
+      // like node, take every own key, enumerable or not
       for (const key of Reflect.ownKeys(init)) {
         if (typeof key === "symbol") {
           throw new TypeError(
@@ -201,7 +201,8 @@ class Headers {
     }
   }
 
-  // by name, a name's values joined with ", "; set-cookie is never joined
+  // sorted by name, with each name's values joined by ", ". We never join
+  // set-cookie
   #sorted() {
     const names = [...new Set(this.#list.map((entry) => entry[0]))].sort();
     const pairs = [];
@@ -311,13 +312,13 @@ function iteratorOver(items) {
 
 // ---- FormData
 
-// text with any half of a surrogate pair replaced, as the web's strings are
+// replaces any lone surrogate, as the web does with its strings
 function scalar(value) {
   return `${value}`.toWellFormed();
 }
 
 class FormData {
-  // [name, text or File] in the order they were added
+  // [name, text or File] pairs in the order they were added
   #entries = [];
 
   constructor(form = undefined) {
@@ -481,8 +482,8 @@ function formIteratorOver(items) {
   return iterator;
 }
 
-// a form as the bytes of a multipart/form-data body, and the content type
-// that names the line between its parts
+// encodes a form as a multipart/form-data body, with the content type that
+// names the boundary between its parts
 function multipart(form) {
   const boundary = `----formdata-undici-0${`${Math.floor(Math.random() * 1e11)}`.padStart(11, "0")}`;
   const prefix = `--${boundary}\r\nContent-Disposition: form-data`;
@@ -531,7 +532,7 @@ function indexOfBytes(bytes, needle, from) {
   return -1;
 }
 
-// the form a body holds, going by its content type
+// parses a body as a form, going by its content type
 function parsedForm(bytes, contentType) {
   const failed = () => new TypeError("Failed to parse body as FormData.");
   const type = (contentType ?? "").trim();
@@ -555,7 +556,7 @@ function parsedForm(bytes, contentType) {
   if (at === -1) throw failed();
   for (;;) {
     at += line.length;
-    // the last line between parts ends with two dashes
+    // the last boundary ends with two dashes
     if (bytes[at] === 0x2d && bytes[at + 1] === 0x2d) break;
     if (bytes[at] !== 0x0d || bytes[at + 1] !== 0x0a) throw failed();
     at += 2;
@@ -604,8 +605,8 @@ function streamOf(bytes) {
   });
 }
 
-// what a request or response is given as its body: the stream to read it
-// from, the bytes when they are known up front, and the content type it implies
+// turns what a request or response is given as its body into the stream to
+// read it from, the bytes if we know them up front, and the implied content type
 function extractBody(object) {
   if (object instanceof ReadableStream) {
     if (isDisturbed(object) || object.locked) {
@@ -682,8 +683,8 @@ function textStream(body) {
   return stream.pipeThrough(new TextDecoderStream());
 }
 
-// a content type as the web writes one out: the kind in lower case, then each
-// parameter after a semicolon with no space; nothing if it is not a type
+// writes a content type out as the web does: the type in lower case, then
+// each parameter after a semicolon with no space. Gives "" if it isn't a type
 function mimeOf(contentType) {
   if (contentType === null || contentType === undefined) return "";
   const [essence, ...parameters] = contentType.split(";");
@@ -1131,7 +1132,7 @@ class Request {
       );
     }
 
-    // a signal of its own, which follows the one given
+    // the request gets its own signal, which follows the one given
     const controller = new AbortController();
     this.#signal = controller.signal;
     if (signal != null) {
@@ -1174,7 +1175,7 @@ class Request {
           "Cannot construct a Request with a Request object that has already been used.",
         );
       }
-      // the body moves to this request; the one it came from is left used
+      // the body moves to this request and leaves the old one used
       const passed = inputBody.stream.pipeThrough(new TransformStream());
       this.#body = { stream: passed, source: inputBody.source, type: inputBody.type };
     }
@@ -1387,7 +1388,7 @@ enumerable(Request.prototype, [
   "bytes",
   "textStream",
 ]);
-// node has this name on the prototype, holding nothing
+// node has this name on the prototype, set to undefined
 Object.defineProperty(Request.prototype, "attribute", {
   value: undefined,
   writable: false,
@@ -1412,7 +1413,7 @@ function failed(message, properties) {
   return new TypeError("fetch failed", { cause });
 }
 
-// a `data:` url is answered here; nothing is asked of the embedder
+// answers a `data:` url here without asking the embedder
 function dataResponse(url) {
   const text = url.href.slice(5);
   const comma = text.indexOf(",");
@@ -1431,12 +1432,12 @@ function dataResponse(url) {
   return Response.from(200, "OK", [["content-type", type]], streamOf(bytes), [url.href]);
 }
 
-// tells the embedder a body will be read no further; nothing waits on it
+// tells the embedder we won't read any more of a body, without waiting for it
 function drop(handle) {
   native.dropBody(handle).then(undefined, () => {});
 }
 
-// the body of a response, pulled from the embedder one piece at a time
+// pulls a response's body from the embedder one piece at a time
 function networkBody(handle, signal) {
   let finished = false;
   let cancel;
@@ -1454,8 +1455,8 @@ function networkBody(handle, signal) {
       };
       signal.addEventListener("abort", cancel, { once: true });
     },
-    // an empty piece is not the end, and enqueuing nothing would leave a
-    // reader waiting with no pull to come, so ask again
+    // an empty piece isn't the end. Enqueuing nothing would leave a reader
+    // waiting for a pull that never comes, so we ask again
     async pull(controller) {
       for (;;) {
         let piece;
@@ -1498,7 +1499,7 @@ function networkBody(handle, signal) {
   return stream;
 }
 
-// a body sent packed is handed over unpacked, as the headers say it was packed
+// decompresses a body as its content-encoding headers say
 function unpacked(stream, pairs) {
   const packings = pairs
     .filter((pair) => pair[0].toLowerCase() === "content-encoding")
@@ -1511,7 +1512,7 @@ function unpacked(stream, pairs) {
     } else if (packing === "deflate") {
       stream = stream.pipeThrough(new DecompressionStream("deflate"));
     } else {
-      // a packing not known here: the bytes are passed on as they came
+      // we don't know this encoding, so pass the bytes on as they are
       return stream;
     }
   }

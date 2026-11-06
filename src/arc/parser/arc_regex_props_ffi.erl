@@ -151,7 +151,7 @@ string_list(Name) ->
             end
     end.
 
-%% complement excludes surrogates, pcre2 rejects them in utf mode
+%% the complement leaves out surrogates because pcre2 rejects them in utf mode
 expand(Key, Negated, InClass, PcreSupported, Fallback) ->
     case arc_regex_uni17_ffi:ranges(Key) of
         none when PcreSupported -> {ok, Fallback};

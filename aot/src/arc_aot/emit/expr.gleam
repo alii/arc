@@ -34,7 +34,7 @@ pub fn consts() -> Build(state.IrConsts) {
   fn(e: Emitter, k) { k(e.consts, e) }
 }
 
-// never panic: emit a runtime throw, yield undef so k still runs
+// emits a runtime throw instead of panicking, and yields undef so k still runs
 pub fn throw_at_rt(op: String, msg: String) -> Build(ir.Value) {
   use _ <- anf.then(anf.host(op, [ir.ConstBinary(bit_array.from_string(msg))]))
   use consts <- anf.then(consts())
@@ -89,7 +89,7 @@ pub fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
     // named evaluation looks through parens
     ast.ParenthesizedExpression(_, inner) -> emit(inner, named)
 
-    // §13.10.1 #x in obj, lhs is a name not a value
+    // §13.10.1 in `#x in obj` the left side is a private name, not a value
     ast.BinaryExpression(
       operator: ast.In,
       left: ast.Identifier(name: "#" <> rest, ..),
@@ -1170,7 +1170,7 @@ fn emit_template_literal(parts: ast.TemplateParts(String)) -> Build(ir.Value) {
   })
 }
 
-// §13.2.8.4 gettemplateobject, cached per site key
+// §13.2.8.4 gettemplateobject caches one object per site key
 fn emit_template_object(
   site: Int,
   quasis: List(ast.TemplateQuasi),
@@ -1205,7 +1205,7 @@ fn read_slot(slot: Int, boxed boxed: Bool) -> Build(ir.Value) {
   }
 }
 
-// top-level reads never fold, may run before the var line
+// top-level reads never fold because they may run before the var line
 fn const_global(e: Emitter, name: String) -> Option(ir.Value) {
   case e.fn_scope == scope.root_scope_id {
     True -> None
@@ -1324,7 +1324,7 @@ pub fn derived_return_value(v: ir.Value) -> Build(ir.Value) {
   anf.let_if(is_undef, lexical_value(lexical.ThisRef), anf.pure(v))
 }
 
-// §10.2.4 bindthisvalue, throws if already initialized
+// §10.2.4 bindthisvalue throws if this is already initialised
 fn set_lexical_this(v: ir.Value) -> Build(Nil) {
   use e <- anf.then(ask)
   case resolve_lexical(e, lexical.ThisRef) {
@@ -1339,7 +1339,7 @@ fn set_lexical_this(v: ir.Value) -> Build(Nil) {
 fn this_check_init(slot: Int, boxed boxed: Bool) -> Build(Nil) {
   use consts <- anf.then(consts())
   use cur <- anf.then(read_slot(slot, boxed))
-  // term identity, the sentinel is not a js value
+  // compare by term identity because the sentinel is not a js value
   use is_tdz <- anf.then(anf.let_(ir.NumTerm(ir.NEq, cur, consts.tdz)))
   use _ <- anf.then(anf.let_if(
     is_tdz,
@@ -1486,7 +1486,7 @@ pub type PropWriteRun {
   PropWriteRun(object: ast.Expression, first: PropWrite, rest: List(PropWrite))
 }
 
-// later values must be reorder-safe so reordering is unobservable
+// every value after the first must be safe to reorder, so nobody can tell
 pub fn prop_write_run(
   e: Emitter,
   ss: List(ast.StmtWithLine),
@@ -1766,7 +1766,7 @@ fn emit_call_with_direct_callee(
   this: ir.Value,
   args: CallArgs,
 ) -> Build(ir.Value) {
-  // pos values already let-bound, safe to cons per arm
+  // pos values are already let-bound, so each arm can cons them safely
   let cons_args = case args {
     Consed(v) -> anf.pure(v)
     Positional(pos) -> anf.cons_list(pos)
@@ -1937,7 +1937,7 @@ fn emit_super_call(args: List(ast.Expression)) -> Build(ir.Value) {
   anf.pure(inst)
 }
 
-// §13.3.9.1 optional chain, a nullish link breaks with undefined
+// §13.3.9.1 a nullish link ends the optional chain with undefined
 
 fn emit_chain_root(ex: ast.Expression) -> Build(ir.Value) {
   use consts <- anf.then(consts())
@@ -2049,7 +2049,7 @@ fn emit_typeof_ident(name: String) -> Build(ir.Value) {
   }
 }
 
-// §13.5.1.2 delete name, sloppy
+// §13.5.1.2 delete of a plain name, which is sloppy-mode only
 fn emit_delete_ident(name: String) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case state.resolve(e, name) {
@@ -2250,7 +2250,7 @@ fn emit_math_builtin_call(
 ) -> Build(ir.Value) {
   use pos <- anf.then(anf.seq(list.map(args, expr)))
   use v <- anf.then(anf.host(op, pos))
-  // compare against miss atom, js_nan/js_inf are atoms too
+  // compare against the miss atom because js_nan and js_inf are atoms too
   use is_miss <- anf.then(anf.let_(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
   anf.let_if(
     is_miss,
@@ -2442,7 +2442,7 @@ pub fn emit_target_put(
   }
 }
 
-// §6.2.5.6 unresolvable: strict throws, sloppy creates global
+// §6.2.5.6 writing an unresolvable name throws in strict mode and creates a global in sloppy
 pub fn global_set_op(strict: Bool) -> String {
   case strict {
     True -> "global_set_strict"
@@ -2617,7 +2617,7 @@ fn emit_array_general(
 
 fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
   case p {
-    // annex b __proto__: sets prototype, must precede init arm
+    // annex b `__proto__: v` sets the prototype, so this arm must come before the init arm
     ast.InitProperty(
       key: ast.IdentifierName(name: "__proto__", ..),
       value:,
@@ -2756,7 +2756,7 @@ type PlainMember {
   PlainMember(key: ast.PropertyName, value: ast.Expression, name: String)
 }
 
-// object unobservable until the literal completes
+// nothing can observe the object until the literal completes
 fn plain_members(
   ps: List(ast.Property),
   acc: List(PlainMember),
@@ -3050,7 +3050,7 @@ fn emit_assignment(
     _ -> None
   }
   case ast_util.unwrap_parens(left) {
-    // annex b: f() = v evaluates call, throws before rhs
+    // annex b: f() = v evaluates the call and throws before the rhs
     ast.CallExpression(..) as call -> {
       use _ <- anf.then(expr(call))
       throw_at_rt(
@@ -3105,7 +3105,7 @@ pub fn emit_destructuring_assign(
       anf.then(emit_identifier_put(name, src), fn(_) { anf.pure(Nil) })
     ast.AssignmentExpression(_, ast.Assign, inner_left, default_expr) -> {
       use consts <- anf.then(consts())
-      // gate on raw left, parens defeat isidentifierref
+      // gate on the raw left side because parens defeat isidentifierref
       let named = case inner_left {
         ast.Identifier(name:, ..) -> Some(name)
         _ -> None

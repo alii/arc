@@ -371,7 +371,7 @@ for_of_next(St, R) ->
             end
     end.
 
-%% the intrinsic prototype a materialized iterator for this record would get
+%% the intrinsic prototype a materialised iterator for this record would get
 array_iter_proto(St, R) ->
     element(iter_proto_ix(St, R), element(?AGENT_REALM, St)).
 

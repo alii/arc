@@ -1,4 +1,4 @@
-// json syntax error text, worded like v8
+// json syntax error text, worded like v8's
 
 import gleam/bit_array
 import gleam/int

@@ -43,7 +43,7 @@ pub type ModuleSummary {
   )
 }
 
-// declaration order = compiler capture slot order
+// in declaration order, which is the compiler's capture slot order
 pub fn binding_local_names(
   imports: List(#(a, List(ImportBinding))),
 ) -> List(String) {
@@ -144,7 +144,8 @@ fn request_of_entry(entry: ExportEntry) -> Result(ModuleRequest, Nil) {
   }
 }
 
-// dedup by modulerequestsequal; first eager request wins phase and position
+// dedups by modulerequestsequal; the first eager request sets phase and
+// position
 fn merge_requests(requested: List(ModuleRequest)) -> List(ModuleRequest) {
   let merged: List(ModuleRequest) = []
   list.fold(requested, merged, fn(merged, request) {

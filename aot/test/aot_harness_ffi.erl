@@ -13,7 +13,7 @@ env_is_truthy(Name) ->
 
 to_dynamic(X) -> X.
 
-%% xorshift64*, float in [0,1)
+%% xorshift64* that returns a float in [0,1)
 seed_random(Seed) ->
     erlang:put(aot_rand, Seed band 16#FFFFFFFFFFFFFFFF),
     nil.

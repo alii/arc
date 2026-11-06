@@ -1,6 +1,6 @@
 %% Superset of AtomVM's estdlib string.erl plus the OTP-25+ functions
 %% gleam_stdlib.erl calls. Everything operates on binaries since that's all
-%% Gleam passes in. ASCII-only case folding — good enough for the playground.
+%% Gleam passes in. Case folding is ASCII-only, which is enough for the playground.
 -module(string).
 -export([to_upper/1, to_lower/1, uppercase/1, lowercase/1,
          split/2, split/3, trim/1, trim/2, trim/3, find/2, find/3,
@@ -23,7 +23,7 @@ lowercase(B) when is_binary(B) -> << <<(lower(C))/utf8>> || <<C/utf8>> <= B >>;
 lowercase(L) -> to_lower(L).
 
 split(S, P) -> split(S, P, leading).
-%% Charlists (arc's number formatting hands float_to_list output through here).
+%% Charlists come through here from arc's number formatting, which uses float_to_list.
 split(L, P, Where) when is_list(L) -> split_list(L, to_list(P), Where);
 split(S, P, leading) when is_binary(S) -> binary:split(S, to_bin(P));
 split(S, P, all) when is_binary(S) -> binary:split(S, to_bin(P), [global]);
@@ -40,8 +40,8 @@ trim(B, leading) when is_binary(B) -> ltrim(B);
 trim(B, trailing) when is_binary(B) -> rtrim(B);
 trim(B, both) when is_binary(B) -> rtrim(ltrim(B)).
 
-%% trim/3: strip any of Chars from the given end(s). Lists directly; binaries
-%% via a list round-trip (Chars here are always ASCII in practice).
+%% trim/3 strips any of Chars from the given ends. Binaries go through a list
+%% round trip, and in practice Chars is always ASCII.
 trim(L, Dir, Chars) when is_list(L) -> trim_list(L, Dir, to_list(Chars));
 trim(B, Dir, Chars) when is_binary(B) ->
     unicode:characters_to_binary(trim_list(unicode:characters_to_list(B), Dir, to_list(Chars))).

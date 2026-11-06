@@ -95,7 +95,7 @@ class Timeout {
     Timeout.#cancel(timer);
   }
 
-  // the earliest live entry, with stale ones dropped
+  // drops stale entries and returns the earliest live one
   static peek() {
     while (heap.length > 0) {
       const entry = heap[0];
@@ -183,7 +183,7 @@ class Immediate {
     if (immediate.#refed) refCount--;
   }
 
-  // false when it was cleared while queued
+  // returns false if it was cleared while queued
   static fire(immediate) {
     if (!immediate.#queued) return false;
     Immediate.destroy(immediate);

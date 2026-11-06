@@ -27,7 +27,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 
 // a record is a bare IteratorRecord where its holder tracks done itself,
-// else a null-proto object: iterator, next, done
+// else a null-proto object with iterator, next and done
 pub type IterHint {
   Sync
   Async

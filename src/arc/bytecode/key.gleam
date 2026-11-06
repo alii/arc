@@ -19,8 +19,8 @@ pub type PropertyKey {
   Private(id: Int, text: String)
 }
 
-/// what a map of properties files the key under: its id, or for an index a
-/// negative number, which no id is
+/// the number a property map files the key under. That's its id, or for an
+/// index a negative number, which no id ever is
 pub fn id(key: PropertyKey) -> Int {
   case key {
     Named(id:, ..) | Private(id:, ..) -> id
@@ -32,7 +32,7 @@ pub fn named(name: String) -> PropertyKey {
   Named(hash(name) * 2, name)
 }
 
-// odd, so that a #name and a name never share an id
+// private ids are odd so a #name and a name never share an id
 pub fn private(text: String) -> PropertyKey {
   Private(hash(text) * 2 + 1, text)
 }

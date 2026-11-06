@@ -45,8 +45,8 @@ nibble(C) when C >= $a, C =< $f -> C - $a + 10;
 nibble(C) when C >= $A, C =< $F -> C - $A + 10;
 nibble(_) -> -1.
 
-%% node's forgiving decode: either alphabet, anything else skipped, stops at
-%% the first '='. Bits holds Count pending sextets
+%% node's forgiving decode. It takes either alphabet, skips anything else and
+%% stops at the first '='. Bits holds Count pending sextets
 unbase64(<<$=, _/binary>>, Bits, Count, Acc) -> flush(Bits, Count, Acc);
 unbase64(<<C, Rest/binary>>, Bits, Count, Acc) ->
     case sextet(C) of
@@ -85,8 +85,8 @@ decode(Bin, hex) -> binary:encode_hex(Bin, lowercase);
 decode(Bin, base64) -> base64:encode(Bin);
 decode(Bin, base64url) -> base64:encode(Bin, #{mode => urlsafe, padding => false}).
 
-%% a lone surrogate cannot be held in a string here, so it reads as U+FFFD;
-%% a last odd byte is dropped
+%% a lone surrogate cannot be held in a string here, so it reads as U+FFFD.
+%% A last odd byte is dropped
 utf16(<<High:16/little, Low:16/little, Rest/binary>>, Acc)
   when High >= 16#D800, High =< 16#DBFF, Low >= 16#DC00, Low =< 16#DFFF ->
     Point = 16#10000 + ((High - 16#D800) bsl 10) + (Low - 16#DC00),

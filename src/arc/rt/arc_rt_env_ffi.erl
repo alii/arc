@@ -1,5 +1,5 @@
-%% what closures capture: a tuple of values, the first Nested of them in a
-%% tuple of their own when the function's code wants them so
+%% closures capture a tuple of values. When the function's code wants it, the
+%% first Nested of them sit in a tuple of their own
 -module(arc_rt_env_ffi).
 -export([nest/2, renest/2, capture/4, capture_with/4]).
 
@@ -16,11 +16,11 @@ drop(N, [_ | Values]) -> drop(N - 1, Values).
 first(0, _) -> [];
 first(N, [V | Values]) -> [V | first(N - 1, Values)].
 
-%% the same for values already in a flat tuple
+%% does the same for values already in a flat tuple
 renest(Env, 0) -> Env;
 renest(Env, Nested) -> nest(tuple_to_list(Env), Nested).
 
-%% the parent's values at Slots. Slots count as if the parent's frame were
+%% picks the parent's values at Slots. Slots count as if the parent's frame were
 %% flat; From is how many of its own captures it keeps nested in slot 0
 capture([], _, _, _) -> {};
 capture([I], 0, L, 0) -> {element(I + 1, L)};
@@ -42,7 +42,7 @@ capture([I, J, K, M], 4, E, L, From, Off) -> {{?AT(I), ?AT(J), ?AT(K), ?AT(M)}};
 capture(Slots, Nested, E, L, From, Off) ->
     nest(values(Slots, E, L, From, Off), Nested).
 
-%% flat, with Last after them
+%% captures flat, with Last after them
 capture_with(Slots, L, 0, Last) ->
     list_to_tuple(values(Slots, none, L, 0, 1) ++ [Last]);
 capture_with(Slots, L, From, Last) ->

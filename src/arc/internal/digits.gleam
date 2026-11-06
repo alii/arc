@@ -2,7 +2,7 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-// not int.base_parse, that accepts a leading sign
+// not int.base_parse, because that accepts a leading sign
 pub fn hex_value_code(code: Int) -> Option(Int) {
   case code {
     _ if code >= 0x30 && code <= 0x39 -> Some(code - 0x30)

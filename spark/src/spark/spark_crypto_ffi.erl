@@ -1,8 +1,8 @@
 -module(spark_crypto_ffi).
 -export([hash/3, hmac/3, names/0]).
 
-%% Length is how many bytes a shake digest should have; other digests have
-%% one length and ignore it
+%% Length is how many bytes a shake digest should have. Other digests have a
+%% fixed length and ignore it
 hash(Name, Data, Length) ->
     case algorithm(string:lowercase(Name)) of
         {ok, Shake} when Shake =:= shake128; Shake =:= shake256 ->
@@ -31,7 +31,7 @@ hmac(Name, Key, Data) ->
 names() ->
     [Name || {Name, _} <- table()].
 
-%% Name is in lower case; the usual ones skip the search
+%% Name is in lower case. The common ones skip the table search
 algorithm(<<"sha256">>) -> {ok, sha256};
 algorithm(<<"sha1">>) -> {ok, sha};
 algorithm(<<"md5">>) -> {ok, md5};

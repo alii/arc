@@ -121,7 +121,7 @@ fn disambiguate_epoch_ns(
         RejectDisambiguation ->
           Error(JsError(RangeError, "no such wall-clock time"))
         Compatible | Earlier | Later -> {
-          // gap: shift by gap size and retry
+          // in a gap, shift by the gap size and retry
           let utc = utc_epoch_ns(d, t)
           let before = tz_offset_ns_at(tz, utc - ns_per_day)
           let after = tz_offset_ns_at(tz, utc + ns_per_day)
@@ -161,7 +161,7 @@ pub fn start_of_day_ns(tz: TemporalZone, d: IsoDate) -> Result(Int, JsError) {
   case possible {
     [first, ..] -> validate_epoch_ns(first)
     [] ->
-      // midnight in a dst gap: day starts when the gap ends
+      // if midnight falls in a dst gap, the day starts when the gap ends
       case tz {
         UtcZone | OffsetZone(_) ->
           Error(JsError(RangeError, "no start of day for skipped midnight"))

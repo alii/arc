@@ -215,7 +215,7 @@ fn set_for_each(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   set_for_each_loop(st, set, 0, cb, this_arg, this)
 }
 
-// live: store is re-read each step
+// the store is re-read each step so iteration stays live
 fn set_for_each_loop(
   st: Agent,
   set: SetHandle,
@@ -565,7 +565,7 @@ fn set_record_has(st: Agent, rec: SetRecord, v: JsVal) -> #(Bool, Agent) {
   #(rt_val.to_boolean(r), st)
 }
 
-// the one place a value enters set data, -0 becomes +0
+// the one place values enter set data, so -0 becomes +0 here
 fn set_data_append(
   store: ordered_entries.OrderedEntries(MapKey, JsVal),
   val: JsVal,

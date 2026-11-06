@@ -253,7 +253,7 @@ fn exported_names_visiting(
   }
 }
 
-// §16.2.1.6.4, both surface as syntaxerror
+// §16.2.1.6.4; both surface as a syntaxerror
 pub type LinkError {
   UnresolvedExport(requested_module: Raw, export_name: String)
   AmbiguousExport(requested_module: Raw, export_name: String)

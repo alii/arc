@@ -128,7 +128,7 @@ pub type TokenKind {
   Eof
   // lenient: unclassifiable but legal inside a regex body
   Illegal
-  // hard error, zero-length, stops the stream
+  // a zero-length hard error that stops the stream
   LexFailure(error: LexError)
 }
 

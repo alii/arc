@@ -9,8 +9,8 @@ fn run(source: String) -> String {
   engine.inspect(eng, value)
 }
 
-// different names that are filed under one number. Nothing a script can see
-// may depend on that
+// these names differ but are filed under one number, and nothing a script can
+// see may depend on that
 pub fn these_names_do_share_a_number_test() {
   let assert Named(id: a, ..) = key.named("miefzxAba")
   let assert Named(id: b, ..) = key.named("dlffym3X_")

@@ -104,7 +104,7 @@ call_via_ic(St, Recv = {?HANDLE_TAG, RId}, K, Site, RSite, N, A, B, C) ->
     case element(?STORE_ICS, Store) of
         #{Site := {?IC_CALL, K, _, Shaped}}
           when element(1, RCell) =:= ?SSHAPEDOBJECT_TAG ->
-            %% shaped ways nest sid then proto id, no tuple key to build
+            %% shaped ways nest sid then proto id, so there is no tuple key to build
             %% a sid that holds the key itself maps to {offset, callee, kind}
             case Shaped of
                 #{element(?SSHAPEDOBJECT_SHAPE_ID, RCell) := Protos} ->
@@ -213,7 +213,7 @@ call_own_slot(St, Cells, RCell, {Off, Fn0, Kind0}, Recv, K, RSite, N, A,
 ways_room(Ways, Site) when map_size(Ways) < ?IC_CALL_WAYS -> Site;
 ways_room(_, _) -> none.
 
-%% fill site: the site to refill after the walk, or none when the ways are full
+%% FillSite is the site to refill after the walk, or none when the ways are full
 ic_miss(St, Recv, RCell, K, FillSite, RSite, N, A, B, C) ->
     after_lookup(call_via_walk(St, Recv, RCell, K, arg_list(N, A, B, C),
                                FillSite),
@@ -525,7 +525,7 @@ new_direct_apply(St, Store, Cells, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEnt
         _ -> {NewThis, St3}
     end.
 
-%% prepare once for natives that call back per element, none takes the frame path
+%% prepares once for natives that call back per element; none means take the frame path
 prepare_compiled_call(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), This)
   when ?IS_PLAIN_FN(Flags) ->
     ThisR = case element(?FNFLAGS_IS_ARROW, Flags)

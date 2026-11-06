@@ -105,7 +105,7 @@ fn builtins(
     fetch.builtin(),
     crypto.builtin(),
     tty.builtin(terminals()),
-    // the cli has no roots of its own to ship, so the machine's stand for both
+    // the cli ships no roots of its own, so the machine's stand in for both
     tls.builtin(
       Certificates(bundled: certificates(), system: certificates(), extra: []),
     ),
@@ -182,7 +182,7 @@ fn pid() -> Int
 @external(erlang, "spark_cli_ffi", "is_tty")
 fn is_tty(stream: Stream) -> Bool
 
-// spark knows nothing about this machine; the cli reads it and hands it over
+// spark knows nothing about this machine, so the cli reads it and hands it over
 fn this_process(
   platform: Platform,
   path: String,
@@ -228,7 +228,7 @@ fn realpath(path: String) -> Result(Answer, Failure)
 @external(erlang, "spark_cli_ffi", "write")
 fn write(stream: Stream, data: BitArray) -> Result(Answer, Failure)
 
-// this is where the cli touches the machine, and the only place
+// this is the only place the cli touches the machine
 fn perform(want: Want) -> Result(Answer, Failure) {
   case want {
     Access(path:, mode:) -> access(path, mode)

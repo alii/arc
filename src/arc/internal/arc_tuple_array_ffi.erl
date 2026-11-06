@@ -13,7 +13,7 @@ get_unchecked(Index, Tuple) ->
 set_unchecked(Index, Value, Tuple) ->
     setelement(Index + 1, Tuple, Value).
 
-%% sanity cap on one allocation, ~80MB
+%% sanity cap on the size of one allocation
 -define(MAX_TUPLE_ALLOC, 10000000).
 
 repeat(Value, Count) when Count =< ?MAX_TUPLE_ALLOC ->

@@ -72,7 +72,7 @@ pub fn init(
       #("byteOffset", TypedArrayN(TypedArrayGetByteOffset)),
       #("length", TypedArrayN(TypedArrayGetLength)),
     ])
-  // values doubles as @@iterator, same function object
+  // @@iterator is the same function object as values
   let #(values_h, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -185,7 +185,7 @@ fn init_ctor(
       3,
       [#("BYTES_PER_ELEMENT", size_prop2)],
     )
-  // proposal-arraybuffer-base64: uint8array only, not %TypedArray%
+  // proposal-arraybuffer-base64 adds these to uint8array only, not %TypedArray%
   let st = case kind {
     NumKind(Uint8Kind) -> {
       let #(uint8_methods, st) =
@@ -292,7 +292,7 @@ pub fn dispatch_construct(
   }
 }
 
-// §23.2.4.2 typedarraycreate; immutable buffer throws (write mode)
+// §23.2.4.2 typedarraycreate. an immutable buffer throws (write mode)
 fn create(st: Agent, ctor: JsVal, len: Int) -> #(JsVal, Handle, Agent) {
   let #(obj, obj_h, st) = create_with_args(st, ctor, [mk_int(len)], Some(len))
   let immutable = case view_of(st, obj_h) {
@@ -482,7 +482,7 @@ fn of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// §23.2.5.1, allocate order per branch is observable
+// §23.2.5.1. the allocation order in each branch is observable
 fn construct(
   st: Agent,
   kind: TypedArrayKind,
@@ -721,7 +721,7 @@ fn from_typed_array(
         },
       )
       let new_data = case kind == src_kind {
-        // bounds proved above, crash rather than zero-fill
+        // bounds are proved above, so crash rather than zero-fill
         True -> {
           let assert Some(bytes) =
             buffer.read_region(st, src_buf, src_off, byte_len)
@@ -1314,7 +1314,7 @@ fn set_from_array_like_loop(
   }
 }
 
-// §23.2.3.30 subarray, same buffer, works when detached
+// §23.2.3.30 subarray shares the buffer and works when detached
 fn proto_subarray(
   st: Agent,
   this: JsVal,
@@ -1377,7 +1377,7 @@ fn subarray_of_view(
   }
 }
 
-// §23.2.3.27 slice, copies into a fresh buffer
+// §23.2.3.27 slice copies into a fresh buffer
 fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_typed_array(st, this)
   let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
@@ -1397,7 +1397,7 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let count = int.max(end - start, 0)
   let #(#(target, target_h), st) = species_create(st, this, kind, count)
   use <- bool.guard(count == 0, #(target, st))
-  // revalidate source, species ctor may have detached or shrunk it
+  // revalidate the source because the species ctor may have detached or shrunk it
   let _source_size = witness_size(st, this)
   case view_of_value(st, target) {
     Some(TypedArrayView(
@@ -1421,7 +1421,7 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
                   0,
                   copy_elems * size,
                 )
-              // same-buffer overlap: ascending byte order is observable
+              // when the buffers overlap, ascending byte order is observable
               let region = case target_buf == buf {
                 True -> seq_copy_region(st, buf, src_byte, target_off, avail)
                 False -> copy_region(st, buf, src_byte, avail)
@@ -1445,7 +1445,7 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ascending byte copy within one buffer, overlap repeats leading bytes
+// copies bytes in ascending order within one buffer, so an overlap repeats leading bytes
 fn seq_copy_region(
   st: Agent,
   buf: Handle,
@@ -1506,7 +1506,7 @@ fn join_parts(
   case i >= view.length {
     True -> acc
     False -> {
-      // live read: separator tostring may have shrunk the buffer
+      // read live because separator tostring may have shrunk the buffer
       let s = case option.map(read_element(st, view.ta, i), classify) {
         Some(KNum(n)) -> rt_val.jsnum_to_string(n)
         Some(KBig(b)) -> int.to_string(b)
@@ -1598,7 +1598,7 @@ fn proto_search_loop(
   }
 }
 
-// lazy: each next revalidates and reads live
+// each next revalidates and reads live
 fn proto_iter(
   st: Agent,
   this: JsVal,
@@ -1614,7 +1614,7 @@ fn proto_iter(
   #(mk_object(iter_h), st)
 }
 
-// reversed, stops at first invalid index (user code shrunk buffer)
+// returns elements reversed and stops at the first invalid index, where user code shrank the buffer
 fn join_collect(
   st: Agent,
   view: TypedArrayWitness,
@@ -1644,7 +1644,7 @@ fn require_cb(st: Agent, args: List(JsVal)) -> #(JsVal, JsVal) {
   }
 }
 
-// bool dropped: only false for immutable buffers, already rejected
+// drops the bool, which is only false for immutable buffers and those are already rejected
 fn set_index(
   st: Agent,
   target_h: Handle,
@@ -1706,7 +1706,7 @@ fn try_witness_size(
   }
 }
 
-// §10.4.5.14 bound: current count of valid indices
+// §10.4.5.14 bound, the current count of valid indices
 fn live_length(st: Agent, this: JsVal) -> Int {
   case view_of_value(st, this) {
     Some(TypedArrayView(buffer: buf, kind:, byte_offset:, length:, ..)) ->
@@ -1983,7 +1983,7 @@ fn proto_copy_within(
   let final = relative_index(e, len)
   let count = int.min(final - from, len - to)
   use <- bool.guard(count <= 0, #(this, st))
-  // revalidate, coercions may detach or shrink a fixed view
+  // revalidate because coercions may detach or shrink a fixed view
   let _byte_size = witness_size(st, this)
   let size = typed_array_bytes.elem_size(kind)
   // tracking view follows a shrink, never a grow
@@ -2084,14 +2084,14 @@ fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     PositiveInfinity -> limits.max_safe_integer
     NegativeInfinity -> -1
   }
-  // conversion before range check, valueof may resize
+  // convert before the range check because valueof may resize
   let #(converted, st) = convert_for_kind(st, kind, value_arg)
   let size = typed_array_bytes.elem_size(kind)
   let valid = actual >= 0 && actual < live_length(st, this)
   use <- bool.lazy_guard(!valid, fn() {
     rt_val.throw_range_error(st, "Invalid typed array index")
   })
-  // snapshot length; value lands only if index inside it
+  // snapshot the length. the value lands only if the index is inside it
   let #(fresh, st) = same_type_create(st, kind, len)
   let FreshTypedArray(value: typed_array_val, buffer: new_buf, ..) = fresh
   let data = copy_region(st, buf, off, len * size)
@@ -2230,7 +2230,7 @@ fn compare_with(st: Agent, cmp: JsVal, x: JsVal, y: JsVal) -> #(Int, Agent) {
   }
 }
 
-// stable merge sort, comparator may run js
+// stable merge sort. the comparator may run js
 fn sort_values(
   st: Agent,
   items: List(JsVal),
@@ -2304,7 +2304,7 @@ fn sorted_snapshot(
 }
 
 fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  // immutable check first; order vs callability check is unobservable
+  // immutable check first. its order against the callability check is unobservable
   let view_w = require_typed_array(st, this)
   require_mutable(st, view_w.buffer)
   let #(view, sorted, st) = sorted_snapshot(st, this, args)
@@ -2314,7 +2314,7 @@ fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     True -> #(this, st)
     False -> {
       let size = typed_array_bytes.elem_size(kind)
-      // clamp to currently valid indices, comparefn may have shrunk buffer
+      // clamp to currently valid indices because comparefn may have shrunk the buffer
       let region = encode_region(kind, size, sorted)
       let avail = int.min(len, live_length(st, this)) * size
       let region = case avail == len * size {

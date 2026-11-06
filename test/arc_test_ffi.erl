@@ -279,7 +279,7 @@ to_list(V) when is_atom(V) -> atom_to_list(V);
 to_list(V) when is_list(V) -> V;
 to_list(V) -> lists:flatten(io_lib:format("~p", [V])).
 
-%% ms
+%% in milliseconds
 timeout_for(Name) ->
     case binary:match(Name, <<"test262/">>) of
         nomatch ->
@@ -294,7 +294,7 @@ timeout_for(Name) ->
             end
     end.
 
-%% words
+%% in words
 max_heap_for(Name) ->
     case binary:match(Name, [<<"test262_run_test">>,
                              <<"nested_starts_are_depth_bounded">>]) of

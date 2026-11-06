@@ -298,7 +298,7 @@ host_done(Rest, Buf, Url, #st{override = Override} = St) ->
 
 port([C | Rest], Buf, Url, St) when ?IS_DIGIT(C) ->
     port(Rest, [C | Buf], Url, St);
-%% a setter that fails here keeps what it had already changed, the host
+%% a setter that fails here keeps the host it already changed
 port(Rest, Buf, Url, #st{override = none} = St) ->
     ends_authority(Rest, special(Url#url.scheme)) orelse throw(failure),
     case Buf of
@@ -610,8 +610,8 @@ forbidden_host(C) ->
 forbidden_domain(C) ->
     C =< 16#20 orelse C =:= $% orelse C =:= 16#7F orelse forbidden_host(C).
 
-%% domain to ascii. A name that is all ascii is only lower-cased, encoded
-%% labels and all, which is what node does; anything else goes through uts 46
+%% domain to ascii. Like node, we only lower-case an all-ascii name, encoded
+%% labels and all. Anything else goes through uts 46
 to_ascii(Domain) ->
     Ascii = case lists:all(fun(C) -> C < 128 end, Domain) of
         true -> [lower(C) || C <- Domain];
@@ -629,7 +629,7 @@ split_dots([C | Rest], Label, Labels) ->
 split_dots([], Label, Labels) ->
     lists:reverse([lists:reverse(Label) | Labels]).
 
-%% uts 46 to-ascii alone, the empty string when the name is not valid
+%% uts 46 to-ascii on its own, returning the empty string for an invalid name
 idna_to_ascii(Domain) ->
     try unicode:characters_to_binary(to_ascii(unicode:characters_to_list(Domain)))
     catch throw:failure -> <<>>

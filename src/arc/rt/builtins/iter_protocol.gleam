@@ -21,7 +21,7 @@ import arc/rt/val.{is_callable} as rt_val
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-// polarity for every/some style consumers
+// which result every/some style consumers look for
 pub type Quantifier {
   Every
   AtLeastOne
@@ -187,7 +187,7 @@ pub fn get_iterator_flattenable(
   }
 }
 
-// §7.4.6 prefix; value is only read by cont
+// §7.4.6 prefix. only cont reads value
 pub fn iterator_step_result(
   st: Agent,
   rec: IteratorRecord,
@@ -290,7 +290,7 @@ fn array_values_iterator(st: Agent, rec: IteratorRecord) -> Option(Handle) {
   }
 }
 
-// plain array elements until a hole or own prop
+// collects plain array elements until a hole or own prop
 fn array_values_to_list(
   st: Agent,
   rec: IteratorRecord,
@@ -652,7 +652,7 @@ pub fn add_entries_with_sink(
   add_entries_with_sink_loop(st, target, rec, add_entry)
 }
 
-// next/done/value throws skip close; entry reads and sink close first
+// throws from next, done or value skip close. throws from entry reads or the sink close first
 fn add_entries_with_sink_loop(
   st: Agent,
   target: JsVal,
@@ -701,7 +701,7 @@ pub fn add_entries_from_iterable(
   st
 }
 
-// set/weakset constructor value drain
+// drains values into a set or weakset constructor
 pub fn add_values_from_iterable(
   st: Agent,
   target: JsVal,

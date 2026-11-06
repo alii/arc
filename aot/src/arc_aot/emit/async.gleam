@@ -1,5 +1,5 @@
-//// regenerator-style state machine transform for async and generator bodies;
-//// coroutine is the js function kind, machine its lowered state machine
+//// turns async and generator bodies into regenerator-style state machines.
+//// a coroutine is the js function kind and a machine is its lowered form
 
 import arc/compiler/ast_util
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
@@ -456,7 +456,7 @@ fn slot_at_loc_idx(layout: LocalLayout, idx: Int) -> Option(Int) {
   }
 }
 
-// compile-time abrupt completion: finally first, packs live locals
+// routes a compile-time abrupt completion to the nearest finally first, packing live locals
 fn route_abrupt(
   e: Emitter,
   ctx: MachineContext,
@@ -2502,7 +2502,7 @@ fn repack_saved_locals_expr_loop(
         Ok(v) ->
           repack_saved_locals_expr_loop(ctx, overrides, i + 1, [v, ..acc], k)
         Error(Nil) -> {
-          // fixed names are safe, callers sit in a fresh let scope
+          // fixed names are safe because callers sit in a fresh let scope
           let name = "_pk" <> int.to_string(i)
           ir.Let(
             [name],
@@ -2520,7 +2520,7 @@ fn repack_saved_locals_expr_loop(
   }
 }
 
-// runtime throw caught by an arm: catch first, packs saved locals
+// routes a runtime throw to the nearest catch first, packing saved locals
 fn route_throw(
   ctx: MachineContext,
   region: Option(TryEntry),
@@ -2703,7 +2703,7 @@ fn emit_delegate_setup(
   run_terminal(b, e)
 }
 
-// §27.5.3.8 yield* delegate arm, dispatches mode itself
+// §27.5.3.8 the yield* delegate arm dispatches on mode itself
 fn emit_delegate_arm(
   e: Emitter,
   ctx: MachineContext,
@@ -2922,7 +2922,7 @@ fn restore_and_seed_loop(
   }
 }
 
-// finally-exit redispatch of a carried completion: catch first, live locals
+// redispatches a completion carried out of a finally, trying catch first, with live locals
 fn dispatch_throw(
   e: Emitter,
   ctx: MachineContext,

@@ -53,7 +53,8 @@ function invalidThis(type) {
   return typeError("ERR_INVALID_THIS", `Value of "this" must be of type ${type}`);
 }
 
-// an error out of a listener never reaches the dispatcher; it is thrown later
+// an error thrown by a listener never reaches the dispatcher. We throw it again
+// on the next tick
 function emitUncaughtException(thrown) {
   loop.nextTick(() => {
     throw thrown;
@@ -293,7 +294,8 @@ Object.defineProperties(CustomEvent.prototype, {
   detail: enumerable,
 });
 
-// listeners held only weakly: kept alive by the object that asked for them
+// weakly held listeners, which stay alive only as long as the object that
+// asked for them
 let weakListenersState;
 let objectToWeakListenerMap;
 function weakListeners() {
@@ -455,7 +457,8 @@ class EventTarget {
       validateAbortSignal(signal, "options.signal");
       if (signal) {
         if (signal.aborted) return;
-        // not prevented by stopImmediatePropagation, and gone when this is
+        // stopImmediatePropagation can't block this abort listener, and it
+        // only lives as long as this target does
         signal.addEventListener(
           "abort",
           () => {
@@ -665,7 +668,8 @@ function makeEventHandler(handler) {
   return eventHandler;
 }
 
-// the `on<name>` attribute, one handler slot kept among the listeners
+// defines the `on<name>` attribute, which keeps one handler slot among the
+// listeners
 function defineEventHandler(emitter, name) {
   const propName = `on${name}`;
   function get() {
@@ -680,7 +684,7 @@ function defineEventHandler(emitter, name) {
     if (typeof this !== "object" || this === null || !(kHandlers in this)) {
       throw invalidThis("EventTarget");
     }
-    // anything that is not callable or an object switches the handler off
+    // anything that isn't a function or an object switches the handler off
     if (
       typeof value !== "function" &&
       (typeof value !== "object" || value === null)
@@ -743,7 +747,8 @@ const dependantSignalsCleanupRegistry = new FinalizationRegistry(
     sourceSignal[kDependantSignals].delete(dependantSignalRef);
   },
 );
-// signals something still listens to, held here so they outlive their makers
+// holds signals that something still listens to, so they outlive whatever
+// made them
 const gcPersistentSignals = new Set();
 const sourceSignalsCleanupRegistry = new FinalizationRegistry(
   ({ sourceSignalRef, composedSignalRef }) => {
@@ -945,8 +950,8 @@ class AbortSignal extends EventTarget {
     if (hasTimeoutSignals && resultSignal[kSourceSignals].size > 0) {
       resultSignal[kTimeout] = true;
     }
-    // keeps the abort state even if the sources are collected before anyone
-    // looks; following holds them weakly, so unused signals can still go
+    // following the sources keeps the abort state even if they're collected
+    // before anyone looks. It holds them weakly, so unused signals can still go
     followCompositeSignal(resultSignal);
     return resultSignal;
   }
@@ -1090,7 +1095,7 @@ module.exports = {
   AbortSignal,
 };
 
-// for the events module; not an export
+// the events module uses these, but they aren't exported
 Object.defineProperty(module.exports, "internals", {
   value: {
     isEventTarget,

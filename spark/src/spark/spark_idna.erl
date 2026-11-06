@@ -1,17 +1,18 @@
-%% uts 46: a domain name to its ascii form, the way the url standard asks
-%% (non-transitional, bidi and joiner checks on, hyphen and length checks off)
+%% uts 46, which turns a domain name into its ascii form the way the url
+%% standard asks (non-transitional, bidi and joiner checks on, hyphen and
+%% length checks off)
 %% https://www.unicode.org/reports/tr46/
 -module(spark_idna).
 -export([to_ascii/1, to_unicode/1]).
 
-%% code points in, ascii code points out; throws `failure`
+%% takes code points and returns ascii code points, or throws `failure`
 to_ascii(Domain) ->
     Labels = [label(Label) || Label <- split(unicode:characters_to_nfc_list(map(Domain)))],
     check_bidi([Unicode || {Unicode, _} <- Labels]),
     lists:append(lists:join(".", [Ascii || {_, Ascii} <- Labels])).
 
-%% an ascii name with each encoded label decoded, where it decodes to a
-%% valid one
+%% decodes each encoded label of an ascii name, where it decodes to a valid
+%% one
 to_unicode(Ascii) ->
     lists:append(lists:join(".", [decoded_or_same(Label) || Label <- split(Ascii)])).
 
@@ -52,7 +53,7 @@ label(Label) ->
         false -> {Label, "xn--" ++ punycode_encode(Label)}
     end.
 
-%% what an encoded label has to decode to: something beyond ascii that
+%% checks that an encoded label decodes to something beyond ascii that
 %% mapping would have left alone
 valid_decoded(Decoded) ->
     Decoded =/= []
@@ -73,8 +74,8 @@ valid([]) -> true;
 valid([First | _] = Label) ->
     lookup(First, spark_idna_tables:marks()) =:= none andalso joiners_fit([], Label).
 
-%% rfc 5892 appendix a: a zero width joiner needs a virama before it; a non-
-%% joiner needs that, or to sit between letters that join across it
+%% rfc 5892 appendix a. A zero width joiner needs a virama before it. A
+%% non-joiner needs one too, or letters on both sides that join across it
 joiners_fit(_Before, []) -> true;
 joiners_fit(Before, [16#200D | After]) ->
     after_virama(Before) andalso joiners_fit([16#200D | Before], After);
@@ -106,9 +107,9 @@ joins_right([C | Rest]) ->
     end;
 joins_right([]) -> false.
 
-%% ---- rfc 5893's bidi rule, held to each label that has right-to-left
-%% characters in it. The rfc holds every label of such a name to it; node
-%% checks label by label, and this follows node
+%% ---- rfc 5893's bidi rule, checked on each label with right-to-left
+%% characters in it. The rfc checks every label of such a name, but node
+%% checks label by label and so do we
 
 check_bidi(Labels) ->
     lists:all(fun(Label) ->

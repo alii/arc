@@ -432,7 +432,7 @@ fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
     JFloat(f) -> {
       let i = rt_val.float_to_int(f)
       let fi = int.to_float(i)
-      // arithmetic compare: term == treats -0.0 != 0.0
+      // compare arithmetically because term == treats -0.0 and 0.0 as different
       case f >=. fi && f <=. fi {
         True -> #(i, st)
         False -> rt_val.throw_range_error(st, "expected an integral number")
@@ -898,7 +898,7 @@ fn parse_duration_time_unit(
               Some(#(Some(v), None, string.drop_start(rest2, string.length(d))))
           }
         Error(Nil) ->
-          // designator mismatch: backtrack so caller tries next unit
+          // on a designator mismatch, backtrack so the caller tries the next unit
           Some(#(None, None, s))
       }
     }

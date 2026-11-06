@@ -589,7 +589,7 @@ pub fn lookup_invariant_callee(
 }
 
 // one ic map per agent, so each module numbers sites from a name-derived base.
-// fnv-1a rather than erlang:phash2, which the atomvm playground lacks
+// it hashes with fnv-1a because the atomvm playground lacks erlang:phash2
 fn site_base(module_name: String) -> Int {
   fnv1a(bit_array.from_string(module_name), 2_166_136_261)
   % 1_073_741_824
@@ -650,7 +650,7 @@ pub fn push_labeled(
   push_frame(e, LabeledBlockFrame(ir_break:, js_label:, carried:))
 }
 
-// not via push_frame: pending_label must survive a barrier
+// skips push_frame because pending_label must survive a barrier
 pub fn push_barrier(
   e: Emitter,
   body: List(ast.StmtWithLine),

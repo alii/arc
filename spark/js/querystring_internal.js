@@ -1,7 +1,7 @@
 "use strict";
 
-// node's lib/internal/querystring.js. One addition: a character beyond
-// U+FFFF arrives as one code point here, not as a surrogate pair
+// node's lib/internal/querystring.js, with one addition. A character beyond
+// U+FFFF arrives here as one code point, not as a surrogate pair
 
 const { uriError } = require("spark:errors");
 

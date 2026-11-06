@@ -2,12 +2,13 @@
 """Generate a test262 conformance line chart from historical data.
 
 Reads .github/test262/history.json (array of {date, pass, fail, skip, tested, percent})
-and produces .github/test262/conformance.png.
+and writes .github/test262/conformance.png and conformance-dark.png.
 
 Usage:
     python3 .github/scripts/generate_chart.py [--add-result results.json]
 
-If --add-result is given, appends today's result to history before generating.
+With --add-result, it adds today's result to the history before drawing,
+replacing any entry already there for today.
 """
 
 import argparse

@@ -257,7 +257,7 @@ fn add_time(time: Time, n: Int) -> Option(Time) {
   }
 }
 
-// a full clock ignores it
+// a full clock ignores the added hours
 fn add_final_time(time: Time, n: Int) -> Time {
   case add_time(time, n) {
     None -> time

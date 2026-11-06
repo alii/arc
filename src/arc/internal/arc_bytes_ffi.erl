@@ -1,4 +1,4 @@
-%% offsets are clamped, never raise; utf-8 not validated
+%% offsets are clamped so nothing raises, and utf-8 is not validated
 -module(arc_bytes_ffi).
 -export([unsafe_slice/3, drop_start/2, next_char_boundary/2]).
 
@@ -13,7 +13,7 @@ drop_start(Bin, Start) ->
     S = min(max(Start, 0), Size),
     binary:part(Bin, S, Size - S).
 
-%% may return past byte_size, callers stop on that
+%% may return a position past byte_size, where callers stop
 next_char_boundary(Bin, Pos) ->
     next_boundary(Bin, max(Pos + 1, 0), byte_size(Bin)).
 

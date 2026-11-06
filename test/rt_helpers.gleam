@@ -25,7 +25,7 @@ pub fn quiet_hooks() -> HostHooks {
   )
 }
 
-// ints widened to floats so a test writes one number spelling
+// widens ints to floats so a test only needs one way to write a number
 pub fn classify(v: JsVal) -> JsValKind {
   case types.classify(v) {
     KNum(JInt(i)) -> KNum(JFloat(int.to_float(i)))

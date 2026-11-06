@@ -26,7 +26,7 @@
 
   registry.set("spark:loop", { hidden: true, module: { exports: loop } });
 
-  // factory is the source already compiled, when the embedder did that ahead
+  // factory is the compiled source, if the embedder compiled it ahead of time
   function register(specifier, source, native, dependencies, hidden, factory) {
     registry.set(specifier, {
       source,
@@ -73,7 +73,7 @@
     return module.exports;
   }
 
-  // what scripts get
+  // the require that scripts get
   function require(specifier) {
     const name = lookup(String(specifier));
     if (name === undefined || registry.get(name).hidden) {
@@ -82,7 +82,7 @@
     return load(name);
   }
 
-  // what a builtin gets: its declared dependencies and nothing else
+  // the require a builtin gets, which only loads its declared dependencies
   function requireWithin(owner, dependencies) {
     return function require(specifier) {
       const name = lookup(String(specifier));
@@ -139,7 +139,7 @@
       Object.defineProperty(globalThis, names[i], {
         value: exports[names[i]],
         writable: true,
-        // as in node: a class is not listed, a function or an object is
+        // like node, list functions and objects but not classes
         enumerable: names[i][0] === names[i][0].toLowerCase(),
         configurable: true,
       });

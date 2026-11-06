@@ -1,4 +1,4 @@
-//// writes src/spark/js.gleam from js/*.js: `gleam run -m embed_js`
+//// writes src/spark/js.gleam from js/*.js. Run it with `gleam run -m embed_js`
 
 import gleam/list
 import gleam/string

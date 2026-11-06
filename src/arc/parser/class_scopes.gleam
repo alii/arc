@@ -234,7 +234,7 @@ fn method_scope_buckets(
   }
 }
 
-// drop an unneeded shell, else flip its children and seed refs
+// drops an unneeded shell, or else flips its children and seeds refs
 fn finalize_field_shell(
   scopes: scope_builder.ScopeBuilder,
   shell_id: scope.ScopeId,

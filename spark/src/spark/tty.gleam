@@ -4,8 +4,9 @@ import gleam/list
 import spark/builtin.{type Builtin, Builtin}
 import spark/js
 
-/// node:tty, so far: isatty. `terminals` is the file descriptors that are
-/// terminals, such as [1, 2]; spark never asks the machine
+/// node:tty, where only isatty works so far. `terminals` lists the file
+/// descriptors that are terminals, such as [1, 2], because spark never asks
+/// the machine
 pub fn builtin(terminals: List(Int)) -> Builtin(host) {
   Builtin(
     specifier: "node:tty",

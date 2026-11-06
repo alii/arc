@@ -1,7 +1,7 @@
 "use strict";
 
-// node's lib/events.js with the three internal files it pulls in. What it
-// asks of the rest of node is answered by `shims` below
+// node's lib/events.js with the three internal files it pulls in. The `shims`
+// below answer what it asks of the rest of node
 
 const errors = require("spark:errors");
 const loop = require("spark:loop");
@@ -10,7 +10,7 @@ const AsyncIteratorPrototype = Object.getPrototypeOf(
   Object.getPrototypeOf(async function* () {}).prototype,
 );
 
-// a module the embedder may not have passed
+// loads a module the embedder may not have passed, or gives undefined
 function optional(specifier) {
   try {
     return require(specifier);
@@ -46,7 +46,7 @@ function identicalSequenceRange(a, b) {
 }
 
 const shims = {
-  // what the files see as `process`
+  // the `process` the files see
   process: () => ({
     nextTick(callback, ...args) {
       loop.nextTick(() => callback(...args));
@@ -65,7 +65,7 @@ const shims = {
     inspect: (value, options) => errors.inspect(value, options),
     identicalSequenceRange,
   }),
-  // without the dom events module there are no event targets to meet
+  // without the dom events module there are no event targets
   "internal/event_target": () => {
     const found = optional("spark:dom_events");
     if (found === undefined) {
@@ -1190,7 +1190,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -1215,8 +1215,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error("no module " + name + " in this port");
@@ -1224,8 +1224,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

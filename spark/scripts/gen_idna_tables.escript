@@ -48,7 +48,8 @@ version(Dir) ->
     {match, [Version]} = re:run(Bin, "# Version: ([0-9.]+)", [{capture, [1], list}]),
     Version.
 
-%% [{Lo, Hi, [Field]}] for every data line, fields trimmed, comments gone
+%% returns [{Lo, Hi, [Field]}] for every data line, with fields trimmed and
+%% comments removed
 rows(Dir, Name) ->
     {ok, Bin} = file:read_file(filename:join(Dir, Name)),
     lists:filtermap(fun row/1, binary:split(Bin, <<"\n">>, [global])).
@@ -77,7 +78,7 @@ bidi(Class) -> binary_to_atom(string:lowercase(Class)).
 
 joining(Type) -> binary_to_atom(string:lowercase(Type)).
 
-%% neighbours with the same value become one range
+%% merges neighbours with the same value into one range
 merge(Rows) -> merge(lists:sort(Rows), []).
 
 merge([{Lo, Hi, What}, {Next, Hi2, What} | Rest], Acc) when Next =:= Hi + 1 ->

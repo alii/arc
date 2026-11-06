@@ -21,7 +21,7 @@ pub fn inline_finally(
   child_fns: Option(List(ScopeId)),
   then: Next,
 ) -> EmitResult {
-  // move the cursors only, slot_vars must survive
+  // move only the cursors because slot_vars must survive
   let here = snapshot_scope(e)
   let here_child_fns = e.child_fn_cursor
   let e =
@@ -154,9 +154,8 @@ fn wrap_with_finally(
       scope_cursor: list.drop(e.scope_cursor, scopes_before_fin),
     )
   let #(esc, e) = state.fresh_escape(e, 0)
-  // the finalizer is emitted once per way out, each time from its own first
-  // function. A jump out of the body needs that place before the body has
-  // been walked, so walk the body once for nothing to learn it
+  // each way out emits the finalizer again from its own first function. A jump out
+  // of the body needs that position early, so a throwaway walk of the body finds it
   use child_fns <- result.try(case has_function(finalizer) {
     False -> Ok(None)
     True -> {

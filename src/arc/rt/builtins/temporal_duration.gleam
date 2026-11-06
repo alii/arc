@@ -691,7 +691,7 @@ fn zoned_calendar_total(
   #(mk_number(JFloat(fractional_total(window, sign, target_ns))), st)
 }
 
-// window shifts one unit when month-end clamping undercounts
+// the window shifts by one unit when month-end clamping undercounts
 fn plain_calendar_total(
   st: Agent,
   relative_date: IsoDate,

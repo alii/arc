@@ -12,8 +12,8 @@ const exports = [
   "resolve", "sep", "toNamespacedPath", "win32",
 ]
 
-/// path, posix or windows flavoured by the platform the process builtin was
-/// given; it also reads the working directory from there
+/// path, posix or windows flavoured to match the platform the process
+/// builtin was given. It reads the working directory from there too
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:path",
@@ -70,8 +70,8 @@ pub fn win32_builtin() -> Builtin(host) {
   )
 }
 
-/// node's normalizeString: drops empty and `.` segments and lets each `..`
-/// take back the segment before it. Nothing leads or trails the result. A
+/// node's normalizeString. It drops empty and `.` segments, lets each `..`
+/// remove the segment before it, and leaves no separator at either end. A
 /// backslash separator means windows, where a slash separates too
 fn normalize_string(
   path: String,

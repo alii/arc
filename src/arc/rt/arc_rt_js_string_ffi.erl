@@ -1,5 +1,5 @@
-%% ascii strings are bare binaries, others {js_str, Utf8, CpLen, Crumbs}
-%% crumbs: byte offsets of codepoints 0, stride, 2 stride .., none when long
+%% ascii strings are bare binaries, others are {js_str, Utf8, CpLen, Crumbs}
+%% crumbs are the byte offsets of codepoints 0, stride, 2 stride .., or none for long strings
 %% TODO(Deviation): indexes by codepoint, js wants utf-16 code units
 -module(arc_rt_js_string_ffi).
 -export([from_text/1, from_texts/1, text/1, length/1, is_str/1,
@@ -43,7 +43,7 @@ build_crumbs(Bin, Off, N, Acc) ->
         {Got, _, _} -> {N + Got, list_to_tuple(lists:reverse(Acc1))}
     end.
 
-%% consume up to N codepoints: {consumed, byte offset after, rest}
+%% consumes up to N codepoints, giving {consumed, byte offset after, rest}
 advance(Bin, N, Off) -> advance(Bin, N, Off, 0).
 advance(<<W1:56, W2:56, W3:56, W4:56, R/binary>>, N, Off, Got)
     when N - Got >= 28, (W1 bor W2 bor W3 bor W4) band ?ASCII_HI_MASK =:= 0 ->

@@ -3,7 +3,7 @@ import gleam/bool
 import gleam/result
 import gleam/string
 
-// cap for methods that materialize o(length) data
+// cap for methods that materialise o(length) data
 pub const max_iteration = 10_000_000
 
 // past this index arrays go sparse

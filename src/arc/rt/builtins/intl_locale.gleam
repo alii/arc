@@ -341,7 +341,7 @@ fn parse_t_fields(
   }
 }
 
-// keys are lowercase lang-script-region-variant, matched as built
+// keys are lowercase lang-script-region-variant and match the tag as built
 fn language_alias(key: String) -> Option(String) {
   case key {
     "art-lojban" -> Some("jbo")

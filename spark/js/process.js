@@ -54,8 +54,8 @@ function stream(fd, isTTY) {
   return out;
 }
 
-// node's process is an EventEmitter two steps up: its own prototype is an
-// object named process, and that one's prototype is EventEmitter's
+// node's process is an EventEmitter two steps up. Its prototype is an object
+// named process, whose own prototype is EventEmitter's
 function process() {}
 Object.setPrototypeOf(process.prototype, EventEmitter.prototype);
 

@@ -22,7 +22,7 @@ fn compile(source: String) -> FuncTemplate {
   compile_except(source, [])
 }
 
-// lazily, but with the functions that start with these words compiled now
+// compiles lazily, except functions starting with these words compile now
 fn compile_except(source: String, compile_now: List(String)) -> FuncTemplate {
   let starts =
     list.map(compile_now, fn(words) {
@@ -36,7 +36,7 @@ fn compile_except(source: String, compile_now: List(String)) -> FuncTemplate {
   template
 }
 
-// the script's value, with every plain function compiled by its first call
+// runs the script for its value, compiling each plain function on its first call
 fn run(source: String) -> Result(JsValKind, JsValKind) {
   let agent = rt_builtins.new_agent(host_hooks.default()) |> entry.link
   let #(completion, agent) = entry.run_script(agent, compile(source))
@@ -51,7 +51,7 @@ fn run(source: String) -> Result(JsValKind, JsValKind) {
   }
 }
 
-// the functions a template makes lazy closures of, as their records have them
+// unpacks the record of each function the template makes a lazy closure of
 fn lazy_functions(template: FuncTemplate) -> List(LazyFunction) {
   use op <- list.filter_map(tuple_array.to_list(template.bytecode))
   case op {
@@ -164,7 +164,7 @@ pub fn a_throw_from_a_lazy_function_is_caught_test() {
     == Ok(KStr("RangeError:late"))
 }
 
-// a function called where it is written would only be parsed twice
+// leaving a function called where it is written would only parse it twice
 pub fn a_function_called_where_it_is_written_is_compiled_at_once_test() {
   let script =
     compile(
@@ -177,8 +177,8 @@ pub fn a_function_called_where_it_is_written_is_compiled_at_once_test() {
     )
   assert list.map(lazy_functions(script), fn(function) { function.name })
     == [Some("later"), Some("arrow")]
-  // three compiled at once, a stub for the function, three more, one for the
-  // arrow
+  // three compiled at once, a stub each for later and arrow, then called_arrow
+  // compiled at once
   let assert [called, called_with_this, wrapped, later, arrow, called_arrow] =
     tuple_array.to_list(script.functions)
   assert !is_stub(called)
@@ -238,12 +238,12 @@ pub fn a_waiting_function_s_insides_are_forgotten_at_once_test() {
   // its body is gone from the tree
   let assert [_, ast.StmtWithLine(statement: waits, ..), ..] = body
   let assert ast.FunctionDeclaration(body: [], ..) = waits
-  // and so is every scope inside it: the script, the two functions, no more
+  // and so is every scope inside it, leaving only the script and the two functions
   assert dict.size(scopes.scopes) == 3
-  // what is kept is what it does to the names around it; tiny's read of its
-  // own a is the other read, newest first
+  // what's kept is what it does to the names around it. The other read is
+  // tiny's read of its own a, and they're listed newest first
   assert list.map(scopes.raw_refs, fn(ref) { ref.name }) == ["a", "outer"]
-  // its write of outer, filed on the function itself, after the script's own
+  // its write of outer is filed on the function itself, after the script's own
   assert list.map(scopes.assign_refs, fn(ref) { #(ref.name, ref.scope) })
     == [#("outer", 1), #("outer", 0)]
 }

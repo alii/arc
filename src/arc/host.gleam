@@ -1,4 +1,4 @@
-// helpers for writing host functions; validators modeled on node's
+// helpers for writing host functions, with validators modelled on node's
 
 import arc/bytecode/error_kind.{type ErrorKind, RangeError, TypeError}
 import arc/bytecode/key
@@ -27,7 +27,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// pins the payload type; a read under another brand is none
+/// fixes the payload type, so a read under another brand gives none
 pub opaque type Brand(host) {
   Brand(id: Int)
 }
@@ -229,7 +229,7 @@ pub type ResumeOutcome {
   StaleTicket
 }
 
-/// root is a private pinned cell, never handed out
+/// root is a private pinned cell that is never handed out
 pub opaque type Ticket {
   Ticket(promise: Handle, root: Handle)
 }
@@ -238,7 +238,7 @@ type TicketRoot {
   TicketRoot(promise: Handle)
 }
 
-/// pending promise plus the ticket to resume it with later
+/// makes a pending promise and the ticket to resume it with later
 pub fn suspend(ctx: Context(host)) -> #(JsVal, Ticket, Context(host)) {
   let #(promise, st) = rt_async.new_promise(ctx.agent)
   let root_cell =
@@ -252,7 +252,7 @@ pub fn suspend(ctx: Context(host)) -> #(JsVal, Ticket, Context(host)) {
   #(mk_object(promise), Ticket(promise:, root:), Context(..ctx, agent: st))
 }
 
-/// queues the settlement as a microtask; drops the ticket root
+/// queues the settlement as a microtask and drops the ticket root
 pub fn resume(
   ctx: Context(host),
   ticket: Ticket,
@@ -280,7 +280,7 @@ pub fn resume(
 type TicketState {
   // root cell still names the promise
   Live
-  // resumed before, promise still on this agent
+  // resumed before, but the promise is still on this agent
   Spent
   Stale
 }
@@ -349,7 +349,8 @@ pub fn object(
   #(mk_object(h), Context(..ctx, agent: st))
 }
 
-// the one place payload types are erased; value unread unless brand matches
+// the one place payload types are erased; nothing reads value unless the
+// brand matches
 type Tagged(host) {
   Tagged(brand: Int, value: host)
 }
@@ -434,7 +435,7 @@ pub fn bytes(ctx: Context(host), val: JsVal) -> Option(BitArray) {
   }
 }
 
-/// opaque embedder object; handles inside value are gc-traced
+/// an opaque embedder object; the gc traces handles inside value
 pub fn alloc_host_object(
   ctx: Context(host),
   value: host,
@@ -460,7 +461,7 @@ pub fn read_host(ctx: Context(host), val: JsVal) -> Option(host) {
 /// mint a rooted native function without installing it
 ///
 /// host functions are never freed, nor is anything their closures hold, so
-/// make them once at startup; one made per request or per message is a leak
+/// make them once at startup. Making one per request or message leaks
 pub fn function(
   ctx: Context(host),
   name: String,
@@ -489,7 +490,7 @@ pub fn define_fn(
   define_global(ctx, name, f)
 }
 
-/// writable, configurable, non-enumerable like builtin globals
+/// writable, configurable and non-enumerable, like builtin globals
 pub fn define_global(
   ctx: Context(host),
   name: String,
@@ -521,9 +522,9 @@ pub fn define_namespace(
   define_global(Context(..ctx, agent: st), name, mk_object(ns))
 }
 
-/// constructible and extendable; instance is re-prototyped to new_target
+/// constructible and extendable; the instance gets new_target's prototype
 ///
-/// never freed, like every host function; make it once at startup
+/// like every host function it is never freed, so make it once at startup
 pub fn class(
   ctx: Context(host),
   name: String,
@@ -551,7 +552,7 @@ pub fn class(
   #(mk_object(pair.constructor), Context(..ctx, agent: st))
 }
 
-// only writer of host_fns, so ids are dense in registration order
+// the only writer of host_fns, so ids are dense in registration order
 fn register(
   st: Agent,
   brand: Brand(host),

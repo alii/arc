@@ -270,7 +270,7 @@ fn proto_from_new_target(
   }
 }
 
-// maps home to the same error kind in realm
+// finds the error prototype in realm of the same kind as home
 fn same_error_proto(st: Agent, home: Handle, realm: Realm) -> Handle {
   let wanted = error_protos(realm)
   [st.realm, ..dict.values(st.realms)]

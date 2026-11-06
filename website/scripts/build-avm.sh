@@ -175,10 +175,10 @@ OTP_STDLIB_SRC="$(erl -noshell -eval 'io:format("~s/src", [code:lib_dir(stdlib)]
 [[ -f "$OTP_STDLIB_SRC/erl_pp.erl" ]] || {
   echo "OTP stdlib sources not found at $OTP_STDLIB_SRC" >&2; exit 1; }
 rm -rf "$OTP_OUT" && mkdir -p "$OTP_OUT/src"
-# `array` too: arc's JS heap store is an OTP `array` (10-ary tuple tree,
-# O(log n) writes). AtomVM has no array module, and a map-backed stand-in is
-# catastrophic there — AtomVM maps are flat, so every heap write copied every
-# cell (measured: ~1ms per JS loop iteration in the playground).
+# `array` too, because arc's JS heap store is an OTP `array` (a 10-ary tuple
+# tree with O(log n) writes). AtomVM has no array module, and a map-backed
+# stand-in is far too slow there: AtomVM maps are flat, so every heap write
+# copied every cell.
 for m in erl_pp erl_anno erl_parse erl_internal array; do
   cp "$OTP_STDLIB_SRC/$m.erl" "$OTP_OUT/src/"
 done

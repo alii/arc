@@ -1,4 +1,4 @@
-%% indexes by codepoint; invalid utf-8 crashes on purpose, no fallback clauses
+%% indexes by codepoint; invalid utf-8 crashes on purpose, so there are no fallback clauses
 %% TODO(Deviation): js indexes by utf-16 code unit
 -module(arc_rt_utf8_ffi).
 -compile({no_auto_import, [length/1]}).

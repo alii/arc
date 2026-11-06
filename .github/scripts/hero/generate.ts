@@ -1,7 +1,7 @@
 /**
- * Render the README hero image — a styled terminal session — in both the
- * Rose Pine (dark) and Rose Pine Dawn (light) themes, matching the website's
- * <HeroCode> component (same colours, same Iosevka Curly font).
+ * Renders the README hero image, a styled terminal session, in the Rose Pine
+ * (dark) and Rose Pine Dawn (light) themes. It uses the same colours and
+ * Iosevka Curly font as the website's <HeroCode> component.
  *
  * Pipeline: build element tree -> satori (SVG) -> resvg (PNG) -> sharp (trim).
  *

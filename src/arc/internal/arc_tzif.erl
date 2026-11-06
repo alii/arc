@@ -14,7 +14,7 @@
 
 -type tz() :: #tz{}.
 
-%% throws on malformed input, caller catches
+%% throws on malformed input, which the caller catches
 -spec parse(binary()) -> tz().
 parse(<<"TZif", Ver:8, _:15/binary, IsUt:32, IsStd:32, Leap:32,
         Timecnt:32, Typecnt:32, Charcnt:32, Rest/binary>>) ->
@@ -25,7 +25,7 @@ parse(<<"TZif", Ver:8, _:15/binary, IsUt:32, IsStd:32, Leap:32,
                 parse_block(Rest, Timecnt, Typecnt, Charcnt, 4),
             make_zone(First, dedupe(First, Trans), none);
         _ ->
-            %% v2/3: skip v1 block, parse 64-bit block and footer
+            %% v2/3: skip the v1 block and parse the 64-bit block and footer
             V1Size = Timecnt * 5 + Typecnt * 6 + Charcnt + Leap * 8
                      + IsStd + IsUt,
             <<_:V1Size/binary, "TZif", _V2:8, _:15/binary,

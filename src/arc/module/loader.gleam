@@ -32,7 +32,7 @@ pub type ModuleSource {
 // HostGetSupportedImportAttributes
 pub const supported_import_attributes = ["type"]
 
-// AllImportAttributesSupported, as the first unsupported key
+// AllImportAttributesSupported, returning the first unsupported key
 pub fn unsupported_attribute(
   attributes: List(ImportAttribute),
 ) -> Option(String) {

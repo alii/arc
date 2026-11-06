@@ -32,14 +32,14 @@ pub type AloneError {
   AloneCompileError(CompileError)
 }
 
-/// compiles the one function `function` describes out of the unit's text,
-/// giving the template the whole-unit compile gives for it. With `lazy`, the
-/// plain functions written inside it are in turn left for their first calls
+/// compiles the one function `function` describes from the unit's text, and
+/// gives the same template a whole-unit compile would. With `lazy`, the plain
+/// functions inside it wait for their own first calls
 pub fn compile_function_alone(
   bytes: BitArray,
   is_module is_module: Bool,
   function function: LazyFunction,
-  // the plain functions written inside it are in turn left for their first calls
+  // compile the plain functions inside it on their first calls
   lazy lazy: Bool,
 ) -> Result(FuncTemplate, AloneError) {
   let LazyFunction(
@@ -66,8 +66,8 @@ pub fn compile_function_alone(
       strict: source.strict,
       root_may_own_lexical: False,
     )
-  // the names it uses are in its text; which of them the parent supplies,
-  // and how, is what the stub kept
+  // its text gives the names it uses, and the stub kept which of them the
+  // parent supplies and how
   let captures =
     list.zip(
       scope_analysis.lone_free_names(scopes, unseeded),
@@ -76,7 +76,7 @@ pub fn compile_function_alone(
     |> list.filter_map(fn(name) {
       option.map(name.1, fn(seed) { #(name.0, seed) }) |> option.to_result(Nil)
     })
-  // the parent's slots are the names', then the lexical refs'
+  // parent_slots lists the names' slots first, then the lexical refs'
   let #(name_slots, lexical_slots) =
     list.split(parent_slots, list.length(captures))
   let opts =
@@ -189,7 +189,8 @@ pub type ExportSeed {
   SeedUninitialized
 }
 
-// imports are boxed captures 0..n-1; exports force-boxed for live bindings
+// imports are boxed captures 0..n-1, and exports are always boxed so their
+// bindings stay live
 pub fn compile_module(
   items: List(ast.ModuleItem),
   scopes: scope_builder.ScopeBuilder,
@@ -246,7 +247,7 @@ fn module_export_seeds(
   |> dict.from_list
 }
 
-// top-level lexicals go to the global record to persist
+// top-level lexicals go in the global record so they persist
 pub fn compile_repl(
   body: List(ast.StmtWithLine),
   scopes: scope_builder.ScopeBuilder,
@@ -259,7 +260,7 @@ pub fn compile_repl(
   )
 }
 
-// indirect eval; introduced globals are deletable (§19.2.1.3)
+// indirect eval, where the globals it introduces can be deleted (§19.2.1.3)
 pub fn compile_eval(
   body: List(ast.StmtWithLine),
   scopes: scope_builder.ScopeBuilder,
@@ -278,7 +279,7 @@ pub fn compile_eval_direct(
   caller: DirectEvalCaller,
 ) -> Result(FuncTemplate, CompileError) {
   let tree = scope_analysis.finalize(scopes, direct_eval_opts(caller, body))
-  // §14.11.1 with is illegal once the caller makes eval strict
+  // §14.11.1 with is illegal when the caller makes the eval strict
   use <- bool.guard(
     caller.is_strict && contains_with(tree),
     Error(emit.EarlySyntaxError("'with' not allowed in strict mode")),
@@ -305,7 +306,7 @@ fn direct_eval_opts(
   // finalize does not scan directives, so check the body too
   let strict = caller.is_strict || ast_util.has_use_strict_directive(body)
   let parent_names = indexed_names(caller.slot_names)
-  // lexical box refs follow the names, one slot per ref the caller has
+  // lexical box refs come after the names, one slot for each ref the caller has
   let lexical_captures = {
     use ref <- lexical.number_refs(from: list.length(caller.slot_names))
     option.is_some(lexical.slot_of(caller.lexical, ref))
@@ -378,7 +379,7 @@ fn finish_top_level(
     local_names,
     is_strict: out.is_strict,
     code_kind:,
-    // a module that awaits parks with raw locals, like any coroutine frame
+    // a module that awaits parks with raw locals, as every coroutine frame does
     use_registers: option.is_none(local_names)
       && !list.contains(out.code, opcode.IrFinal(opcode.Await)),
   )
@@ -454,8 +455,8 @@ fn build_template(
 // fewer captures than this stay spread over the frame's first slots
 const fewest_nested_captures = 2
 
-// a frame is copied whole by every write to a local, and filled in by every
-// call, so captures, which never change, are kept out of it as one tuple
+// every write to a local copies the whole frame and every call fills it in,
+// so captures, which never change, live outside it in one tuple
 fn assemble_nesting(
   code: List(opcode.IrOp),
   constants: List(JsVal),
@@ -463,8 +464,7 @@ fn assemble_nesting(
 ) -> #(assemble.Assembled, Int) {
   let flat = fn() { #(assemble.assemble(code, constants), 0) }
   use <- bool.lazy_guard(captures < fewest_nested_captures, flat)
-  // reads of captures change first, so that none is fused into an op that
-  // wants a slot
+  // rewrite capture reads first so none gets fused into an op that wants a slot
   let assembled =
     list.map(code, fn(ir) {
       case ir {
@@ -563,10 +563,10 @@ fn compile_children(
   list.map(children, compile_child(_, tree, parent_fn_scope))
 }
 
-// the template every closure of a lazy function of one kind starts with. Its
-// whole body is "compile me". A closure of it captures env_size values, the
-// last being its function's record; then come the four lexical slots, so the
-// first call finds the function object there whatever the real layout is
+// closures of a lazy function of one kind start with this template, whose
+// body only compiles itself. Each holds env_size captures, the last being the
+// function's record, then the four lexical slots, so the first call finds the
+// function object there whatever the real layout is
 fn stub_template(child: emit.CompiledChild, env_size: Int) -> FuncTemplate {
   FuncTemplate(
     name: None,

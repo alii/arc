@@ -56,9 +56,9 @@ pub type CompiledChild {
   )
 }
 
-/// a function left for later: the record its closures carry, and how many
-/// values they capture, the record included. Functions alike in everything
-/// else share one child, so there the record is empty
+/// a function left to compile on its first call. Its closures carry `record`,
+/// and `env_size` counts the values they capture, the record included.
+/// Functions that differ only in their record share one child whose record is empty
 pub type LazyChild {
   LazyChild(record: BitArray, env_size: Int)
 }
@@ -231,9 +231,9 @@ pub fn eval_direct(
   emit_top_level_body(e, stmts, script_strict:, vars_to_global: !script_strict)
 }
 
-/// one plain function emitted as the only child of an otherwise empty root.
-/// `name` is the one the code around it gave it, which an anonymous function
-/// only has from there
+/// emits one plain function as the only child of an otherwise empty root.
+/// `name` comes from the code around it, which is the only place an anonymous
+/// function gets one
 pub fn function_alone(
   function: ast.FunctionLiteral,
   tree: scope.ScopeTree,
@@ -751,8 +751,8 @@ fn emit_classic_loop(
       }
     None -> Ok(e)
   })
-  // the test is written before the body, so its scopes come first: emit it
-  // now and place its code after the update
+  // the test comes before the body in source, so emit it now for its scopes
+  // and move its code after the update
   let before_test = e.code
   use e <- result.try(case condition {
     Some(cond) -> {
@@ -1978,7 +1978,7 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Int, Emitter) {
     False -> #(e.references_arguments, e.arguments_escape)
   }
   let e = Emitter(..e, references_arguments:, arguments_escape:)
-  // lazy functions alike in all but their records share one child
+  // lazy functions that differ only in their records share one child
   let #(child, shared) = case child.lazy {
     None -> #(child, None)
     Some(LazyChild(env_size:, ..)) -> {
@@ -2571,7 +2571,7 @@ fn compile_function_body(
       let own = scope.get(parent.scope_tree, fn_id)
       let #(record, captured) =
         waiting_record(parent, fn_id, source, name, params, shape)
-      // name, arity and length are in the record, so stubs differ in little
+      // name, arity and length live in the record, so most stubs are alike
       let child =
         CompiledChild(
           scope_id: root_scope_id,
@@ -2616,8 +2616,8 @@ fn waiting_code_kind(
   }
 }
 
-// the record a closure of the child function fn_id carries when the function
-// waits for its first call, and how many values such a closure captures
+// the record a closure of fn_id carries while fn_id waits for its first call,
+// and how many values that closure captures
 fn waiting_record(
   parent: Emitter,
   fn_id: ScopeId,
@@ -2666,7 +2666,7 @@ fn waiting_record(
   #(record, list.length(parent_slots))
 }
 
-// how a closure of this child, which sits at index, is made
+// the op that makes a closure of the child at index
 fn closure_op(child: CompiledChild, index: Int) -> opcode.Op {
   case child.lazy {
     Some(LazyChild(record:, ..)) -> opcode.MakeLazyClosure(index, record)
@@ -4371,9 +4371,8 @@ fn emit_computed_init_property(
   emit_op(e, opcode.DefineFieldComputed)
 }
 
-// closure first so MakeMethod sees [obj, fn], then key, then swap. The key is
-// written first, so its scopes come first: it is emitted first and its code
-// placed after the closure's
+// the closure runs first so MakeMethod sees [obj, fn], then the key, then swap.
+// We emit the key first because its scopes come first, then move its code after
 fn emit_computed_method_property(
   e: Emitter,
   emit_key: fn(Emitter) -> Result(Emitter, EmitError),
@@ -4610,7 +4609,8 @@ fn emit_for_of_common(
   e |> emit_ir(IrLabel(end)) |> pop_frame |> leave_for_scope(save)
 }
 
-// leaves the record; m.values() and friends skip the call when nothing can tell
+// leaves the iterator record. m.keys(), m.values() and m.entries() skip the
+// call when no code could notice
 fn emit_sync_iterator(
   e: Emitter,
   iterable: ast.Expression,

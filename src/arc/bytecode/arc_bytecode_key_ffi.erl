@@ -1,19 +1,20 @@
-%% the number a property name is filed under: 58 bits worked out from its bytes
+%% works out the 58-bit number a property name is filed under from its bytes
 -module(arc_bytecode_key_ffi).
 -export([hash/1, named/1, private/1]).
 
-%% as key.named and key.private
+%% these build the same keys as key.named and key.private
 named(Bin) -> {named, hash(Bin) * 2, Bin}.
 
 private(Bin) -> {private, hash(Bin) * 2 + 1, Bin}.
 
 -define(MASK, 16#1FFFFFFF).
 
-%% two 29-bit lanes, three bytes a step. Each step multiplies by an odd
-%% constant and folds the top bits back down, since a multiply only carries
-%% upwards. Every product stays under 2^59, so nothing here is ever a bignum
 %% up to seven bytes fit in the number whole, after a leading 1 that keeps their
-%% count: no two such texts share a number. The low bit says which kind it is
+%% count, so no two such texts share a number. The low bit says which kind it is.
+%% Longer texts run through two 29-bit lanes, three bytes a step. Each step
+%% multiplies by an odd constant and folds the top bits back down, because a
+%% multiply only carries upwards. Every product stays under 2^59, so nothing here
+%% is ever a bignum
 hash(Bin) when byte_size(Bin) =< 7 ->
     Bits = bit_size(Bin),
     <<N:Bits>> = Bin,

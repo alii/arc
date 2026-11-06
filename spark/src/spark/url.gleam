@@ -50,7 +50,7 @@ fn idna_to_ascii(domain: String) -> String
 type Reply(host) =
   #(Result(JsVal, JsVal), Context(host))
 
-// node's numbering of the setters
+// maps node's setter numbers to the parts they set
 fn part_arg(
   ctx: Context(host),
   val: JsVal,
@@ -83,7 +83,7 @@ fn base_arg(
   }
 }
 
-// [href, [positions of its parts]], or undefined for no url
+// replies [href, [positions of its parts]], or undefined if it didn't parse
 fn url_reply(
   ctx: Context(host),
   parsed: Result(#(String, List(Int)), Nil),
@@ -108,8 +108,8 @@ fn text_native(
   })
 }
 
-/// URL and URLSearchParams as globals, and the url module. The parsing is
-/// native, to the whatwg url standard; the classes are node's javascript
+/// URL and URLSearchParams as globals, and the url module. Parsing is native
+/// and follows the whatwg url standard. The classes are node's javascript
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:url",

@@ -50,9 +50,9 @@ pub type Outcome {
 pub type FunctionCompile {
   /// all of them when the script loads
   AtLoad
-  /// each on its first call, except the ones the hints name, which are
-  /// compiled when the script loads. Worth it for a large script of which
-  /// little runs: see `learned_hints` for where hints come from
+  /// each on its first call, except the ones the hints name, which compile
+  /// when the script loads. Use it for a large script that runs little of
+  /// its code. `learned_hints` gives you the hints
   OnFirstCall(except: Hints)
 }
 
@@ -70,28 +70,28 @@ pub type EvaluatedModule {
   ModuleThrew(error: JsVal)
 }
 
-/// An engine keeps script text and long strings as off-heap binaries. On the
-/// BEAM, once a process holds more of those than its `min_bin_vheap_size`
-/// (46422 words unless raised), every other collection it does is a full
-/// one. Raise it with `erlang:process_flag` in the process that runs the
-/// engine.
+/// An engine keeps script text and long strings as off-heap binaries. Once a
+/// BEAM process holds more of those than its `min_bin_vheap_size`, every other
+/// collection it does is a full one. Raise it with `erlang:process_flag` in
+/// the process that runs the engine.
 pub fn new() -> Engine(host) {
   from_agent(rt_builtins.new_agent(host_hooks.default()))
 }
 
-/// Keeps everything alive now for good: later garbage collections leave it
-/// alone and walk only what was made since. Call it once the code every user
-/// of this engine shares has been loaded, before handing the engine on.
+/// Keeps everything that is alive now for good, so later garbage collections
+/// leave it alone and walk only what was made since. Call it once the code
+/// every user of this engine shares has been loaded, before handing the engine
+/// on.
 /// Nothing kept is ever freed, and a snapshot does not carry the mark.
 pub fn keep_forever(engine: Engine(host)) -> Engine(host) {
   Engine(..engine, agent: rt_gc.keep_all(engine.agent))
 }
 
 /// Runs a full garbage collection now. The engine collects by itself while
-/// code runs, and now and then that is a full collection, which takes a while.
-/// An embedder that knows the engine has gone quiet can call this, so that the
-/// next one is not due in the middle of later work. Costs nothing when hardly
-/// anything was made since the last full collection.
+/// code runs, and sometimes that is a slow full collection. If you know the
+/// engine has gone quiet, call this so the next full one doesn't land in the
+/// middle of later work. It costs nothing when hardly anything was made since
+/// the last full collection.
 pub fn collect_garbage(engine: Engine(host)) -> Engine(host) {
   case engine.agent.store.meta.minors_since_major {
     0 -> engine
@@ -161,9 +161,9 @@ pub fn host_fn(
   #(f, adopt(engine, ctx))
 }
 
-/// build a constructible class; nothing is installed
+/// build a constructible class without installing it
 ///
-/// never freed, like every host function; make it once at startup
+/// like every host function it is never freed, so make it once at startup
 pub fn host_class(
   engine: Engine(host),
   name: String,
@@ -243,7 +243,7 @@ pub fn eval(
   eval_with(engine, source, rt_async.drain)
 }
 
-/// drain must run microtasks plus any embedder loop
+/// `drain` must run the microtasks and any embedder loop
 pub fn eval_with(
   engine: Engine(host),
   source: String,
@@ -261,8 +261,8 @@ pub fn eval_with(
   settle(engine, completion, st, drain)
 }
 
-/// eval_with, choosing when the script's functions are compiled. The Script
-/// names this evaluation to `learned_hints`
+/// like eval_with, but you choose when the script's functions are compiled.
+/// Pass the returned Script to `learned_hints`
 pub fn eval_script(
   engine: Engine(host),
   source: String,
@@ -294,12 +294,12 @@ pub fn eval_script(
 }
 
 /// The hints `script` was loaded with, plus every function of it this engine
-/// has compiled on a first call since. Loading the same source with them next
-/// time compiles those functions at load, in the engine everything else is
-/// then made from, and leaves the rest for their first calls.
+/// has compiled on a first call since. Load the same source with them next
+/// time and those functions compile at load, in the engine you then make
+/// everything else from. The rest wait for their first calls.
 ///
-/// An engine made from the one that evaluated the script (a deserialized
-/// copy, say) answers for what it compiled itself.
+/// An engine made from the one that evaluated the script, such as a
+/// deserialized copy, reports what it has compiled itself.
 pub fn learned_hints(engine: Engine(host), script: Script) -> Hints {
   let compiled =
     dict.keys(engine.agent.store.meta.lazy_code)
@@ -364,7 +364,7 @@ pub fn eval_module_with(
   }
 }
 
-/// none if missing or still in tdz
+/// none if the export is missing or still in its temporal dead zone
 pub fn read_export(
   engine: Engine(host),
   namespace: Namespace,
@@ -421,7 +421,7 @@ pub fn call_with(
   settle(engine, completion, st, drain)
 }
 
-/// host fns, hooks and host modules are not written
+/// leaves out host fns, hooks and host modules
 pub fn serialize(
   engine: Engine(host),
 ) -> Result(BitArray, snapshot.SnapshotError) {
