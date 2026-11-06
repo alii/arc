@@ -10,7 +10,7 @@ import gleam/string
 // opaque host zone for Date
 pub type TimeZone
 
-// parsed transition data for one zone, host supplied
+// parsed transition data for one zone, supplied by the host
 pub type Rules
 
 pub type TzError {
@@ -33,11 +33,12 @@ pub fn utc_time_zone() -> TimeZone
 @external(erlang, "arc_time_zone_ffi", "time_zone_id")
 pub fn time_zone_id(zone: TimeZone) -> Option(String)
 
-// minutes, local minus utc, at a utc instant
+// the offset in minutes, local minus utc, at a utc instant
 @external(erlang, "arc_time_zone_ffi", "zone_offset_at_utc_ms")
 pub fn zone_offset_at_utc_ms(zone: TimeZone, epoch_ms: Int) -> Int
 
-// §21.4.1.25 localtza isutc=false, takes a wall clock not an instant
+// §21.4.1.25 localtza isutc=false, which takes a wall clock time rather than
+// an instant
 @external(erlang, "arc_time_zone_ffi", "zone_offset_at_local_ms")
 pub fn zone_offset_at_local_ms(zone: TimeZone, local_ms: Int) -> Int
 
@@ -66,7 +67,7 @@ pub fn primary_identifier_of(zone: Zone) -> String {
   primary_identifier(zone.id)
 }
 
-// primary ids out of what the host has data for, sorted, utc always there
+// the sorted primary ids the host has data for, always including utc
 pub fn available_ids(host_ids: List(String)) -> List(String) {
   let zones =
     list.filter(host_ids, fn(z) {
@@ -80,7 +81,7 @@ pub type ZoneLookupError {
   LoadFailed(id: String, error: TzError)
 }
 
-// a known name becomes a zone with its rules, loading each identifier once
+// turns a known name into a zone with its rules, loading each identifier once
 pub fn lookup(
   name: String,
   zones: Dict(String, Zone),
@@ -126,7 +127,7 @@ pub fn next_transition_ns(zone: Zone, epoch_ns: Int) -> Option(Int) {
 
 pub fn previous_transition_ns(zone: Zone, epoch_ns: Int) -> Option(Int) {
   let sec = floor_div(epoch_ns, ns_per_second)
-  // mid-second: the transition at sec itself is before us
+  // between whole seconds, the transition at sec itself is before us
   let arg = case epoch_ns % ns_per_second == 0 {
     True -> sec
     False -> sec + 1

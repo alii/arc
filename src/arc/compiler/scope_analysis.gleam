@@ -55,7 +55,7 @@ fn blank_function_info(
 }
 
 /// the outer names the one function under this root uses, in the order its
-/// captures are laid out in. For a function parsed alone, before it is known
+/// captures are laid out. Use it on a function parsed alone, before we know
 /// which of them the code around it supplies
 pub fn lone_free_names(
   builder: ScopeBuilder,
@@ -68,11 +68,11 @@ pub fn lone_free_names(
 }
 
 /// Forgets everything inside the function `fn_id`, whose parse began at the
-/// reading `before` of the builder and has just ended, keeping only what the
-/// code around it can tell: the outer names it reads and writes, and its use
-/// of this, new.target and the like. The analysis of the code around it comes
-/// out as it would with the function whole. Not for a function that holds a
-/// direct eval.
+/// reading `before` of the builder and has just ended. It keeps only what the
+/// code around it can see: the outer names it reads and writes, and its use of
+/// this, new.target and the like. The code around it then analyses the same
+/// as it would with the function whole. Don't use it on a function that holds
+/// a direct eval.
 pub fn forget_inside(
   builder: ScopeBuilder,
   fn_id: ScopeId,
@@ -641,8 +641,8 @@ fn writes_by_function(
   }
 }
 
-// children first: a function settles the writes whose name it declares and
-// passes the rest outward, exactly as its own writes
+// children first: a function settles the writes to names it declares and
+// passes the rest outward, treating its children's writes like its own
 fn collect_write_facts(
   tree: ScopeTree,
   builder: ScopeBuilder,

@@ -3255,7 +3255,7 @@ fn bound_getter(
   case cached {
     Some(fn_h) -> #(mk_object(fn_h), st)
     None -> {
-      // not rooted: receiver's bound field keeps it alive
+      // not rooted because the receiver's bound field keeps it alive
       let #(fn_h, st) =
         rt_call.native_new(
           st,
@@ -3676,7 +3676,7 @@ fn date_time_format_temporal_state(
 ) -> DateTimeFormatState {
   case t {
     FormattableZoned -> throw_zoned(st)
-    // instant defaults to date and time, ctor only date
+    // an instant defaults to date and time, the ctor to date only
     FormattableInstant(..) ->
       case
         d.explicit != []

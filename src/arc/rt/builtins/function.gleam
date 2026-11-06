@@ -35,7 +35,7 @@ pub fn init(
       #("bind", FunctionN(FunctionBind), 1),
       #("toString", FunctionN(FunctionToString), 0),
     ])
-  // §10.2.4.1 %ThrowTypeError%, frozen
+  // §10.2.4.1 %ThrowTypeError% is frozen
   let #(len_p, st) = rt_store.frozen_property(st, mk_int(0))
   let #(name_p, st) = rt_store.frozen_property(st, mk_string(""))
   let #(thrower_h, st) =
@@ -103,7 +103,7 @@ pub fn init(
       [],
       constructible: True,
     )
-  // function.prototype is itself callable, returns undefined
+  // function.prototype is itself callable and returns undefined
   let st =
     rt_store.cell_update(st, func_proto, fn(cell) {
       case cell {
@@ -206,7 +206,7 @@ pub type DynamicFunctionKind {
   DynamicAsyncGenerator
 }
 
-// §20.2.1.1.1; no self name, and a newline before ) guards line comments
+// §20.2.1.1.1. there's no self name, and a newline before ) guards against line comments
 pub fn create_dynamic_function(
   st: Agent,
   realm: Int,
@@ -324,7 +324,7 @@ fn to_string_type_error(st: Agent) -> a {
   )
 }
 
-// sloppy plain functions get undefined, v8/jsc legacy
+// sloppy plain functions get undefined, matching legacy v8 and jsc behaviour
 fn restricted_function_property(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let is_legacy = case classify(this) {
     KHandle(h) ->

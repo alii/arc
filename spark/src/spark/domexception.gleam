@@ -1,8 +1,8 @@
 import spark/builtin.{type Builtin, Builtin}
 import spark/js
 
-/// the `DOMException` and `QuotaExceededError` globals: the errors web apis
-/// throw, with their legacy codes
+/// the `DOMException` and `QuotaExceededError` globals that web apis throw,
+/// along with DOMException's legacy codes
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "spark:domexception",

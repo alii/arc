@@ -1,5 +1,5 @@
-%% persistent 16-way trie by cell id, {arena, Shift, Root, HotIx, Hot}
-%% shift is 4 * (levels - 1); hot is the last written leaf, its trie copy stale
+%% the arena is {arena, Shift, Root, HotIx, Hot}, a persistent 16-way trie keyed by cell id
+%% shift is 4 * (levels - 1); hot is the last written leaf, and its copy in the trie is stale
 %% get/2 crashes on ids never minted, probe/2 is total
 -module(arc_rt_arena_ffi).
 -export([new/0, get/2, get_option/2, probe/2, set/3, free/2, fold/3,
@@ -63,7 +63,7 @@ probe(I, {arena, Shift, Root, _, _}) when I >= 0, I bsr Shift < ?FANOUT ->
     probe_walk(I, Shift, Root);
 probe(_, _) -> ?FREE.
 
-%% from the node whose children are picked by bits 12 to 15
+%% probes on from the node whose children are picked by bits 12 to 15
 probe12(_, ?FREE) -> ?FREE;
 probe12(I, Node3) ->
     case element(((I bsr 12) band ?MASK) + 1, Node3) of
@@ -192,7 +192,7 @@ free(I, A) ->
         _ -> set(I, ?FREE, A)
     end.
 
-%% frees every id >= W, keeps depth
+%% frees every id >= W but keeps the depth
 truncate(W, A) ->
     {arena, Shift, Root, _, _} = settle(A),
     Root1 = case W bsr Shift < ?FANOUT of
@@ -212,7 +212,7 @@ cut(W, Shift, Node) ->
 cut_from(Ix, Node) when Ix =< ?FANOUT -> cut_from(Ix + 1, setelement(Ix, Node, ?FREE));
 cut_from(_, Node) -> Node.
 
-%% ids below W whose cell differs; =:= settles shared subtrees by identity
+%% ids below W whose cell differs; =:= skips shared subtrees by identity
 diff_below(W, Old, New) ->
     {arena, OldShift, OldRoot, _, _} = settle(Old),
     {arena, NewShift, NewRoot, _, _} = settle(New),

@@ -1,7 +1,7 @@
 "use strict";
 
-// node's lib/zlib.js. The handles it drives, c++ in node, are written out
-// below over natives that keep nothing between calls
+// node's lib/zlib.js. The handles it drives are c++ in node, so we write them
+// out below over natives that keep nothing between calls
 
 const internal = require("spark:internal");
 const loop = require("spark:loop");
@@ -14,17 +14,18 @@ const constants = internal.internalBinding("constants").zlib;
 const owner_symbol = Symbol("owner_symbol");
 const EMPTY = new Uint8Array(0);
 
-// one compression or decompression in progress. Node's javascript hands it
-// input and a buffer for output; what does not fit waits for the next call
+// one compression or decompression in progress. Node's javascript gives it
+// input and a buffer for output, and what doesn't fit waits for the next call
 class Handle {
   #pending = EMPTY;
-  // the last call filled its output buffer, so the next one only collects
+  // set when the last call filled its output buffer, so the next one only
+  // collects
   #draining = false;
   writeState;
   processCallback;
 
-  // every byte of new output this write gives, or undefined after reporting
-  // an error through onerror
+  // returns every byte of new output from this write, or undefined after
+  // reporting an error through onerror
   produce(chunk, flush) {
     throw new Error("not a real handle");
   }
@@ -81,8 +82,8 @@ const formats = {
   [constants.UNZIP]: "either",
 };
 
-// zlib gives a reason with each failure; the natives give only its code, so
-// the reason is worked out from where the data went wrong
+// zlib gives a reason with each failure, but the natives only give the code.
+// So we work out the reason from where the data went wrong
 function reasonFor(code, format, input) {
   if (code === "trailing") return ["incorrect header check", constants.Z_DATA_ERROR, "Z_DATA_ERROR"];
   if (code === "Z_NEED_DICT") return ["Missing dictionary", constants.Z_NEED_DICT, code];
@@ -96,7 +97,7 @@ function reasonFor(code, format, input) {
   else if (format === "deflate" && zlib) first = 2;
   else if (format === "either" && (gzip || zlib)) first = gzip ? 10 : 2;
   else return ["incorrect header check", constants.Z_DATA_ERROR, code];
-  // the kind of the first block is in its first byte
+  // the first block's type is in its first byte
   const message = [
     "invalid stored block lengths",
     "invalid distance too far back",
@@ -115,9 +116,9 @@ class Zlib extends Handle {
   #memLevel;
   #strategy;
   #dictionary;
-  // compressing: every write so far as bytes, flush, bytes, flush, ...
+  // when compressing, every write so far as bytes, flush, bytes, flush, ...
   #writes = [];
-  // decompressing: every byte given so far
+  // when decompressing, every byte given so far
   #input = EMPTY;
   #emitted = 0;
 
@@ -1428,7 +1429,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -1453,8 +1454,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error("no module " + name + " in this port");
@@ -1462,8 +1463,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

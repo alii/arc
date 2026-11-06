@@ -159,9 +159,9 @@ fn made_up_process() -> process.Process {
   )
 }
 
-// a made-up disk: /there exists, /secret is refused, /tree is the small
-// tree below, nothing else exists; wants through the later door are kept
-// until the test answers them
+// a made-up disk where /there exists, /secret is refused, /tree is the small
+// tree below and nothing else exists. Wants sent to `later` are kept until the
+// test answers them
 fn fake_io() -> Io {
   Io(now: fake_answer, later: fn(want, slip) { keep(#(want, slip)) })
 }
@@ -226,8 +226,8 @@ fn fake_answer(want: Want) -> Result(Answer, Failure) {
         Error(failure) -> Error(failure)
       }
     }
-    // a made-up network: one host, a few pages, each body a numbered list of
-    // pieces put by when the page is asked for
+    // a made-up network with one host and a few pages. Asking for a page puts
+    // its body by as numbered pieces
     Fetch(url: "http://made.up/" <> page, method:, headers:, body:) -> {
       note("fetch " <> method <> " /" <> page)
       case page {
@@ -327,11 +327,11 @@ fn fake_answer(want: Want) -> Result(Answer, Failure) {
   }
 }
 
-// where the made-up random source keeps its place between asks
+// the stash key where the made-up random source keeps its place between asks
 const random_seed = 999
 
-// bytes that look random and are the same on every run: each is the top of
-// the next step of a small generator
+// makes bytes that look random but are the same on every run. Each byte comes
+// from the top of the next step of a small generator
 fn scrambled(left: Int, seed: Int, acc: BitArray) -> #(BitArray, Int) {
   case left {
     0 -> #(acc, seed)
@@ -348,8 +348,8 @@ type Made {
   MadeLink(String)
 }
 
-// the same tree as the real one the expected output of the file tests was
-// made from in node
+// the same tree as the real folder that node read to make the file tests'
+// expected output
 fn made_tree() -> List(#(String, Made)) {
   [
     #("/tree", MadeDir),
@@ -374,8 +374,8 @@ fn parts(path: String) -> List(String) {
   string.split(path, "/") |> list.filter(fn(part) { part != "" })
 }
 
-// the path with its symlinks followed, one part at a time; the last part
-// only when `follow_last`
+// follows the path's symlinks one part at a time. It only follows the last
+// part when `follow_last` is set
 fn made_real(
   left: List(String),
   done: String,
@@ -430,8 +430,8 @@ fn made_info(made: Made) -> FileInfo {
   )
 }
 
-// answers every want that went through the later door from the made-up
-// disk, until the script has nothing left to do
+// answers every want sent to `later` with `fake_answer`, until the script has
+// nothing left to do
 fn run_answering(rt: Runtime(Nil)) -> Runtime(Nil) {
   let rt = run_to_end(rt)
   case kept() {
@@ -465,7 +465,8 @@ fn frozen_runtime() -> Runtime(Nil) {
   start_on(engine.new() |> engine.with_host_hooks(hooks), builtins())
 }
 
-// the embedder's loop: spark says how long, the caller does the waiting
+// runs the loop as an embedder would. Spark says how long to wait and the
+// caller does the waiting
 fn run_to_end(rt: Runtime(Nil)) -> Runtime(Nil) {
   case spark.turn(rt) {
     #(Finished, rt) -> rt
@@ -487,7 +488,7 @@ fn run(rt: Runtime(Nil), source: String) -> #(String, Runtime(Nil)) {
   }
 }
 
-// runs the source as commonjs; timers have not run yet
+// runs the source as commonjs, before any timers have run
 fn run_commonjs(rt: Runtime(Nil), source: String) -> Runtime(Nil) {
   let prelude = "globalThis.out = [];\n"
   case spark.eval_commonjs(rt, "/app/main.cjs", prelude <> source) {
@@ -792,7 +793,7 @@ pub fn a_builtin_is_passed_once_test() {
   assert specifier == "node:timers"
 }
 
-// `out`, one entry per line, without the quoting inspect adds
+// reads `out` as one entry per line, without the quotes inspect adds
 fn out_lines(rt: Runtime(Nil)) -> List(String) {
   let assert Ok(#(Returned(joined), _)) = spark.eval(rt, "out.join('\\n')")
   let assert KStr(text) = classify(joined)
@@ -1355,8 +1356,8 @@ pub fn a_builtin_with_its_own_source_works_from_compiled_js_test() {
   assert out_lines(rt) == ["hi", "function"]
 }
 
-// the three scripts below were also run by node 26.11.1 itself, and every
-// expected line is what node printed
+// we also ran the three scripts below in node 26.11.1, and every expected line
+// is what node printed
 
 const dom_exception_script =
   "
@@ -2074,8 +2075,8 @@ for (const line of lines) {
 for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
 "
 
-// 5,000 generated cases; each line is a kind of case, how many there were and
-// a hash of what they printed, all taken from node 26.11.1
+// 5,000 generated cases. Each line gives a kind of case, how many there were
+// and a hash of what node 26.11.1 printed for them
 pub fn buffer_generated_cases_match_node_test() {
   let rt = run_commonjs(node_runtime(), buffer_generated_script)
   assert out_lines(rt)
@@ -2289,9 +2290,8 @@ for (const line of lines) {
 for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
 "
 
-// generated paths through every function of both flavours; each line is a
-// kind of case, how many there were and a hash of what they printed, all
-// taken from node 26.11.1
+// runs generated paths through every function of both flavours. Each line gives
+// a kind of case, how many there were and a hash of what node 26.11.1 printed
 pub fn path_generated_cases_match_node_test() {
   let rt = run_commonjs(node_runtime(), path_generated_script)
   assert out_lines(rt)
@@ -2432,9 +2432,9 @@ for (const line of lines) {
 for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
 "
 
-// generated addresses and block lists; each line is a kind of case, how many
-// there were and a hash of what they printed, all taken from node 26.11.1.
-// Address rules are sorted first: node lists them in hash table order
+// generated addresses and block lists. Each line gives a kind of case, how many
+// there were and a hash of what node 26.11.1 printed. We sort address rules
+// first because node lists them in hash table order
 pub fn net_generated_cases_match_node_test() {
   let rt = run_commonjs(node_runtime(), net_generated_script)
   assert out_lines(rt)
@@ -2496,9 +2496,9 @@ for (const line of lines) {
 for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
 "
 
-// the url standard's own parsing and setter cases through the URL class:
-// every getter, origin, searchParams, canParse and parse. Each line is a
-// kind of case, how many, and a hash of what they printed in node 26.11.1
+// runs the url standard's own parsing and setter cases through every getter of
+// the URL class, plus origin, searchParams, canParse and parse. Each line gives
+// a kind of case, how many there were and a hash of what node 26.11.1 printed
 pub fn url_standard_cases_match_node_test() {
   let rt = run_commonjs(node_runtime(), url_class_script)
   assert out_lines(rt)
@@ -2539,9 +2539,9 @@ for (const line of lines) {
 for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
 "
 
-// domain names through domainToASCII, domainToUnicode and a url's hostname:
-// the standard's name tests thinned to a fifth, and generated names that mix
-// right-to-left letters, digits, marks and joiners. Checked the same way
+// runs domain names through domainToASCII, domainToUnicode and a url's
+// hostname, checked the same way. We use a fifth of the standard's name tests,
+// plus generated names that mix right-to-left letters, digits, marks and joiners
 pub fn international_names_match_node_test() {
   let rt = run_commonjs(node_runtime(), url_names_script)
   assert out_lines(rt)
@@ -2681,8 +2681,8 @@ for (const line of lines) {
 for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
 "
 
-// URLSearchParams, the url module, the old url.parse family and querystring,
-// checked the same way
+// checks URLSearchParams, the url module, the old url.parse family and
+// querystring the same way
 pub fn url_module_and_querystring_match_node_test() {
   let rt = run_commonjs(node_runtime(), url_api_script)
   assert out_lines(rt)
@@ -2890,9 +2890,9 @@ for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.cou
 
 "
 
-// 250 generated runs of listener operations, the events api, and its async
-// helpers with abort signals and event targets. Each line is a kind of case,
-// how many, and a hash of what they printed in node 26.11.1
+// 250 generated runs of listener operations, plus the events api and its async
+// helpers with abort signals and event targets. Each line gives a kind of case,
+// how many there were and a hash of what node 26.11.1 printed
 pub fn events_match_node_test() {
   let rt = run_to_end(run_commonjs(node_runtime(), events_script))
   assert out_lines(rt)
@@ -3008,8 +3008,8 @@ for (const line of lines) {
 for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
 "
 
-// 500 generated inputs fed in chunks of one to four bytes, in every
-// encoding, checking each piece and how much the decoder holds back
+// feeds 500 generated inputs in chunks of one to four bytes, in every encoding,
+// and checks each piece and how much the decoder holds back
 pub fn string_decoder_matches_node_test() {
   let rt = run_commonjs(node_runtime(), string_decoder_script)
   assert out_lines(rt)
@@ -3176,11 +3176,11 @@ for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.cou
 
 "
 
-// 300 generated values through util.inspect with generated options, 100
-// generated pairs through isDeepStrictEqual, and the rest of util's api:
-// format, the type checks, promisify, callbackify, deprecate, inherits,
-// parseArgs, MIMEType, styleText. Each line is a kind of case, how many, and
-// a hash of what they printed in node 26.11.1
+// runs 300 generated values through util.inspect with generated options and
+// 100 generated pairs through isDeepStrictEqual, then the rest of util's api
+// (format, the type checks, promisify, callbackify, deprecate, inherits,
+// parseArgs, MIMEType and styleText). Each line gives a kind of case, how many
+// there were and a hash of what node 26.11.1 printed
 pub fn util_matches_node_test() {
   let rt = run_to_end(run_commonjs(node_runtime(), util_script))
   assert out_lines(rt)
@@ -3465,11 +3465,11 @@ globalThis.out.push(\"finished\");
 
 "
 
-// 220 generated pipelines (sizes, object mode, encodings, when each callback
-// fires, where it fails), 80 generated paused reads, 80 generated runs of
-// write, cork, end and destroy, and about 90 api and behaviour cases, run one
-// at a time. Each line is a kind of case, how many, and a hash of the events
-// and state they logged in node 26.11.1
+// runs one at a time: 220 generated pipelines (sizes, object mode, encodings,
+// when each callback fires and where it fails), 80 generated paused reads, 80
+// generated runs of write, cork, end and destroy, and about 90 api and
+// behaviour cases. Each line gives a kind of case, how many there were and a
+// hash of the events and state they logged in node 26.11.1
 pub fn streams_match_node_test() {
   let rt = run_to_end(run_commonjs(node_runtime(), stream_script))
   assert out_lines(rt)
@@ -3552,9 +3552,9 @@ Promise.all(later).then((settled) => { for (const l of settled) lines.push(l); f
 
 "
 
-// process is an EventEmitter the way node's is: by its prototype's
-// prototype, under a prototype named process. Each line is what node
-// 26.11.1 printed
+// process is an EventEmitter the way node's is, through its prototype's
+// prototype, which sits under a prototype named process. Each line is what
+// node 26.11.1 printed
 pub fn process_is_an_event_emitter_test() {
   let rt = run_to_end(run_commonjs(node_runtime(), process_emitter_script))
   assert out_lines(rt)
@@ -3685,11 +3685,11 @@ for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.cou
 
 "
 
-// 300 generated values (nested arrays, objects, maps and sets holding dates,
-// regexps, buffers, views, errors, shared and circular references) cloned
-// and checked to be deep copies, then one case for each kind, each refusal
-// and each transfer rule. Each line is a kind of case, how many, and a hash
-// of what they printed in node 26.11.1
+// clones 300 generated values (nested arrays, objects, maps and sets holding
+// dates, regexps, buffers, views, errors, shared and circular references) and
+// checks they're deep copies, then runs one case for each kind, each refusal
+// and each transfer rule. Each line gives a kind of case, how many there were
+// and a hash of what node 26.11.1 printed
 pub fn structured_clone_matches_node_test() {
   let rt = run_commonjs(node_runtime(), structured_clone_script)
   assert out_lines(rt)
@@ -3870,11 +3870,11 @@ globalThis.out.push(\"finished\");
 
 "
 
-// stat, lstat, readlink, readdir and readFile in their sync, callback and
-// promise forms over the made-up tree: every path in it, missing ones, paths
-// through links and through files, each option and each refusal. Each line
-// is a kind of case, how many, and a hash of what they printed in node
-// 26.11.1 reading a real folder of the same shape
+// runs stat, lstat, readlink, readdir and readFile in their sync, callback and
+// promise forms over the made-up tree. It covers every path in it, missing
+// ones, paths through links and through files, each option and each refusal.
+// Each line gives a kind of case, how many there were and a hash of what node
+// 26.11.1 printed when reading a real folder of the same shape
 pub fn fs_reads_match_node_test() {
   let rt = run_answering(run_commonjs(node_runtime(), fs_reads_script))
   assert out_lines(rt)
@@ -4033,11 +4033,12 @@ globalThis.out.push(\"finished\");
 
 "
 
-// 150 generated round trips through deflate, gzip, raw deflate and zstd with
-// generated options; bytes node 26.11.1 compressed, read back; input cut
-// short, wrong, or followed by junk; each option's refusal; the callback
-// forms; and the streams, written in pieces with flushes. Each line is a
-// kind of case, how many, and a hash of what they printed in node
+// runs 150 generated round trips through deflate, gzip, raw deflate and zstd
+// with generated options. It also reads back bytes node 26.11.1 compressed,
+// and checks input that's cut short, wrong or followed by junk, each option's
+// refusal, the callback forms, and the streams written in pieces with flushes.
+// Each line gives a kind of case, how many there were and a hash of what node
+// printed
 pub fn zlib_matches_node_test() {
   let rt = run_to_end(run_commonjs(node_runtime(), zlib_script))
   assert out_lines(rt)
@@ -4280,12 +4281,12 @@ globalThis.out.push(\"finished\"); })();
 
 "
 
-// 150 generated plans of a source and a reader (enqueue, wait, close, error
-// against read, cancel, release, tee), 80 generated plans of writes into a
-// sink with backpressure and failures, and about 50 single cases: byte
-// streams, pipeTo and its options, transforms, tee, the text and compression
-// streams, the node stream adapters. Each line is a kind of case, how many,
-// and a hash of what they printed in node 26.11.1
+// runs 150 generated plans of a source and a reader (enqueue, wait, close and
+// error against read, cancel, release and tee), 80 generated plans of writes
+// into a sink with backpressure and failures, and about 50 single cases. Those
+// cover byte streams, pipeTo and its options, transforms, tee, the text and
+// compression streams and the node stream adapters. Each line gives a kind of
+// case, how many there were and a hash of what node 26.11.1 printed
 pub fn web_streams_match_node_test() {
   let rt =
     run_to_end(run_commonjs(node_runtime(), web_streams_match_node_script))
@@ -4399,11 +4400,11 @@ globalThis.out.push(\"finished\"); })();
 
 "
 
-// 100 generated runs of operations on a Headers, then one case each for how
-// Headers, Response and Request are made, read, cloned and refused, and for
-// what fetch does without a network (bad urls, schemes, ports, data: urls,
-// a signal already aborted). Each line is a kind of case, how many, and a
-// hash of what they printed in node 26.11.1
+// runs 100 generated sequences of operations on a Headers. Then it runs one
+// case each for how Headers, Response and Request are made, read, cloned and
+// refused, and for what fetch does without a network (bad urls, schemes, ports,
+// data: urls, a signal already aborted). Each line gives a kind of case, how
+// many there were and a hash of what node 26.11.1 printed
 pub fn fetch_matches_node_test() {
   let rt = run_to_end(run_commonjs(node_runtime(), fetch_matches_node_script))
   assert out_lines(rt)
@@ -4481,7 +4482,7 @@ pub fn fetch_matches_node_test() {
     ]
 }
 
-// the made-up network in `fake_answer`: nothing here opens a connection
+// uses the made-up network in `fake_answer`, so nothing here opens a connection
 pub fn a_fetch_is_wants_the_embedder_answers_test() {
   let rt =
     run_answering(run_commonjs(
@@ -4523,7 +4524,8 @@ pub fn a_fetch_is_wants_the_embedder_answers_test() {
       "TypeError fetch failed ECONNRESET",
       "TypeError fetch failed ECONNREFUSED",
     ]
-  // what the embedder was asked for, and which bodies it was told to let go
+  // checks what the embedder was asked for, and which bodies it was told to
+  // let go
   assert list.filter(notes(), fn(note) {
       string.starts_with(note, "fetch ") || string.starts_with(note, "drop ")
     })
@@ -4591,12 +4593,12 @@ globalThis.out.push(\"finished\"); })();
 
 "
 
-// 120 generated digests and 60 generated hmacs over every algorithm, in
-// pieces and in each encoding; then one case each for what is refused, the
-// one-shot hash, timingSafeEqual, the shapes of what the random calls give
-// (the bytes here come from a made-up source, the same on every run), the
-// web crypto global, and a hash used as a stream. Each line is a kind of
-// case, how many, and a hash of what they printed in node 26.11.1
+// runs 120 generated digests and 60 generated hmacs over every algorithm, in
+// pieces and in each encoding. Then it runs one case each for what's refused,
+// the one-shot hash, timingSafeEqual, the shapes of what the random calls give
+// (from a made-up source that's the same on every run), the web crypto global,
+// and a hash used as a stream. Each line gives a kind of case, how many there
+// were and a hash of what node 26.11.1 printed
 pub fn crypto_matches_node_test() {
   let rt = run_to_end(run_commonjs(node_runtime(), crypto_matches_node_script))
   assert out_lines(rt)
@@ -4683,9 +4685,9 @@ globalThis.out.push(\"finished\"); })();
 "
 
 // one case each for how a Blob, a File and a FormData are made, read, sliced
-// and refused, and for bodies made of them: a blob or a form given to a
-// Response or Request, a form read back out of one. Each line is a kind of
-// case, how many, and a hash of what they printed in node 26.11.1
+// and refused, and for bodies made of them, such as a blob or form given to a
+// Response or Request, or a form read back out of one. Each line gives a kind
+// of case, how many there were and a hash of what node 26.11.1 printed
 pub fn blob_file_formdata_match_node_test() {
   let rt =
     run_to_end(run_commonjs(
@@ -4719,13 +4721,13 @@ pub fn a_script_s_functions_can_wait_for_their_first_calls_test() {
     assert classify(value) == KStr("/a/b")
     #(
       engine.learned_hints(spark.engine(rt), script),
-      // how many functions were compiled on a first call
+      // counts the functions compiled on their first call
       dict.size(engine.agent(spark.engine(rt)).store.meta.lazy_code),
     )
   }
   let #(learned, late) = load(hints.none())
   assert late == 1
-  // what that run compiled late is compiled at load by the next, which has
+  // the next run compiles at load what the last one compiled late, so it has
   // nothing more to learn
   assert load(learned) == #(learned, 0)
 }

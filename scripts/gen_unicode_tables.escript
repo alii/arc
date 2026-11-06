@@ -8,7 +8,7 @@
 %% Input is scripts/unicode/arc_regex_uni17_packed.erl, the hex-packed module
 %% generated from the test262 property-escapes corpus. That file stays the
 %% source of truth; this script only unpacks it once at build time so nothing
-%% has to decode or memoize at run time. The scf domain (codepoints whose
+%% has to decode or memoise at run time. The scf domain (codepoints whose
 %% simple case fold differs from themselves) is derived here as well, from
 %% Changes_When_Casefolded and arc_regex_charset:scf/1.
 %%

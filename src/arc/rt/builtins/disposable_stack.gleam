@@ -431,7 +431,7 @@ fn get_method(
 
 pub type DisposeMethod {
   DirectDispose(method: Handle)
-  // async fallback to @@dispose: result discarded, awaits undefined
+  // when async falls back to @@dispose, the result is discarded and we await undefined
   SyncFallbackDispose(method: Handle)
 }
 
@@ -630,7 +630,7 @@ fn dispose_async_loop(
         // awaited so an async ondispose rejection propagates
         DisposeCallback(callback:, args:) ->
           call_then_await(callback, mk_undefined(), args)
-        // sync throw becomes a rejected promise, folded after a hop
+        // a sync throw becomes a rejected promise, folded in after a hop
         AsyncFallbackDispose(value: v, method:) ->
           case rt_call.try_call(st, method, v, []) {
             #(NormalCompletion(_discarded), st) ->

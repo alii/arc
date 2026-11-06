@@ -2,9 +2,9 @@ import spark/builtin.{type Builtin, Builtin}
 import spark/io.{type Io}
 import spark/js
 
-/// the web's Blob and File, each a global. They are node's own javascript;
-/// the bytes are held whole in memory. A blob backed by a file on disk is
-/// not here
+/// the web's Blob and File as globals, using node's own javascript. A blob
+/// holds all its bytes in memory, and blobs backed by a file on disk aren't
+/// supported
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "spark:blob",

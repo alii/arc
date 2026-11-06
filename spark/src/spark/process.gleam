@@ -25,11 +25,11 @@ pub type Process {
   )
 }
 
-/// node:process, so far: env, argv, cwd, platform, arch, pid, version,
-/// versions, uptime (from the engine's clock hook), nextTick, and
-/// stdout/stderr with write, which asks through the Write want. It is an
-/// EventEmitter as node's is, so the events module must be passed with it;
-/// nothing here emits an event of its own yet
+/// node:process, which so far has env, argv, cwd, platform, arch, pid,
+/// version, versions, uptime (from the engine's clock hook), nextTick, and
+/// stdout and stderr with write, which asks through the Write want. Like
+/// node's, it's an EventEmitter, so you must pass the events module with it.
+/// Nothing here emits an event of its own yet
 pub fn builtin(process: Process) -> Builtin(host) {
   Builtin(
     specifier: "node:process",

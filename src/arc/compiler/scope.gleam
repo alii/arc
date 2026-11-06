@@ -90,8 +90,8 @@ pub type FnForm {
   FnDeclaration
   FnExpression
   FnArrow(inherits: ArrowInherits)
-  /// a method of an object literal or a class, from its parameters on; never
-  /// a class constructor
+  /// a method of an object literal or a class, with its text starting at the
+  /// parameters. A class constructor is never one
   FnMethod(params: MethodParams, is_generator: Bool, is_async: Bool)
 }
 
@@ -119,7 +119,7 @@ pub type ArrowInherits {
 }
 
 /// where a function's text starts and what its parse took from the code
-/// around it, which is all that parsing it again alone needs
+/// around it. That is all we need to parse it again on its own
 pub type FnSource {
   FnSource(
     start: Int,

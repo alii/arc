@@ -187,7 +187,7 @@ function slowCases(enc) {
   }
 }
 
-// what node's native slice functions do with their start and end
+// reads a slice's start or end the way node's native slice functions do
 function sliceIndex(value, fallback) {
   if (value === undefined) return fallback;
   const index = Math.trunc(Number(value)) || 0;
@@ -214,8 +214,8 @@ const hexSlice = slicer("hex");
 const ucs2Slice = slicer("utf16le");
 const utf8Slice = slicer("utf8");
 
-// writes what fits of the string, never part of a character, and says how
-// many bytes that was
+// writes as much of the string as fits without splitting a character, and
+// returns how many bytes that was
 function writeBytes(buf, string, encoding, offset, length) {
   if (typeof string !== "string") {
     throw typeError("ERR_INVALID_ARG_TYPE", "argument must be a string");
@@ -226,7 +226,7 @@ function writeBytes(buf, string, encoding, offset, length) {
   return bytes.length;
 }
 
-// node's native write functions: base64, base64url, hex and ucs2
+// node's native write functions for base64, base64url, hex and ucs2
 function writer(encoding) {
   return function write(buf, string, offset, length) {
     if (typeof string !== "string") {
@@ -245,7 +245,7 @@ const base64urlWrite = writer("base64url");
 const hexWrite = writer("hex");
 const ucs2Write = writer("utf16le");
 
-// lib/internal/buffer.js: ascii, latin1 and utf8
+// the ascii, latin1 and utf8 writers from lib/internal/buffer.js
 function checkedWriter(encoding) {
   return function write(buf, string, offset = 0, length) {
     offset = Number(offset);
@@ -328,7 +328,8 @@ function _copy(source, target, targetStart, sourceStart, nb) {
   return nb;
 }
 
-// -1 for a value with no bytes, -2 for a range outside the buffer
+// returns -1 when the value has no bytes and -2 when the range is outside the
+// buffer
 function bindingFill(buf, value, offset, end, encoding) {
   if (offset > end || end > typedArrayByteLength.call(buf)) return -2;
   const fillLength = end - offset;
@@ -791,8 +792,8 @@ function base64ByteLength(str, bytes) {
   return (bytes * 3) >>> 2;
 }
 
-// a string as the bytes to look for; none of them are utf-16 text, where a
-// match has to sit on a unit edge
+// searches for a string's encoded bytes. We don't use it for utf-16, where a
+// match has to start on a code unit boundary
 function searchEncoded(encoding) {
   return (buf, val, byteOffset, dir, end) =>
     indexOfBuffer(
@@ -1022,7 +1023,7 @@ Buffer.prototype.equals = function equals(otherBuffer) {
 
 let INSPECT_MAX_BYTES = 50;
 
-// own properties beyond the bytes are not listed, that needs util.inspect
+// doesn't list own properties beyond the bytes, because that needs util.inspect
 Buffer.prototype[customInspectSymbol] = function inspect(recurseTimes, ctx) {
   const max = INSPECT_MAX_BYTES;
   const actualMax = Math.min(max, this.length);
@@ -1365,7 +1366,7 @@ Buffer.prototype.swap64 = function swap64() {
 
 Buffer.prototype.toLocaleString = Buffer.prototype.toString;
 
-// node's lib/internal/buffer.js: reading and writing numbers
+// reading and writing numbers, from node's lib/internal/buffer.js
 
 const float32Array = new Float32Array(1);
 const uInt8Float32Array = new Uint8Array(float32Array.buffer);

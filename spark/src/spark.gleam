@@ -28,9 +28,9 @@ import spark/js
 
 /// an engine plus a registry of builtin modules
 ///
-/// sans-io: nothing here waits, sleeps, or touches files, sockets or the
-/// mailbox; scripts reach the outside only through the `Io` passed to start,
-/// and the embedder's loop drives timers with `turn`
+/// spark is sans-io, so nothing here waits, sleeps, or touches files, sockets
+/// or the mailbox. Scripts reach the outside only through the `Io` passed to
+/// start, and the embedder's loop drives timers with `turn`
 pub opaque type Runtime(host) {
   Runtime(
     engine: Engine(host),
@@ -81,7 +81,8 @@ pub opaque type Compiled(host) {
   Compiled(
     engine: Engine(host),
     bootstrap: JsVal,
-    // by source text; a builtin with any other source compiles on first use
+    // keyed by source text. A builtin with any other source compiles on first
+    // use
     factories: Dict(String, JsVal),
   )
 }
@@ -125,7 +126,8 @@ const shipped_sources = [
   js.crypto,
 ]
 
-/// compiles the js of every builtin spark ships; installs and runs nothing
+/// compiles the js of every builtin spark ships, without installing or
+/// running any of it
 pub fn compile(eng: Engine(host)) -> Result(Compiled(host), StartError) {
   use compiled <- result.try(compile_bootstrap(eng))
   use compiled, source <- list.try_fold(shipped_sources, compiled)
@@ -145,7 +147,7 @@ fn compile_bootstrap(eng: Engine(host)) -> Result(Compiled(host), StartError) {
   Compiled(engine: eng, bootstrap:, factories: dict.new())
 }
 
-// source is one function expression; the function is kept alive in the engine
+// source is one function expression, and the engine keeps the function alive
 fn compile_function(
   eng: Engine(host),
   source: String,
@@ -170,7 +172,7 @@ fn compile_function(
 
 /// an engine plus exactly these builtins, with all their io going through `io`
 ///
-/// a builtin never brings another one with it: a dependency that is not in
+/// a builtin never brings another one with it, so a dependency that isn't in
 /// the list is a MissingDependency error
 pub fn start(
   eng: Engine(host),
@@ -200,7 +202,7 @@ pub fn start_compiled(
   list.try_fold(builtins, rt, install_globals)
 }
 
-// node-shaped errors for the bundled js; only builtins can require it
+// node-style errors for the bundled js. Only builtins can require it
 fn errors_builtin() -> Builtin(host) {
   Builtin(
     specifier: "spark:errors",
@@ -214,7 +216,7 @@ fn errors_builtin() -> Builtin(host) {
 }
 
 // node's own internals (errors, validators, util, inspect) for the modules
-// ported from node; only builtins can require it, and it loads on first use
+// ported from node. Only builtins can require it, and it loads on first use
 fn internal_builtin() -> Builtin(host) {
   Builtin(
     specifier: "spark:internal",
@@ -400,8 +402,8 @@ pub fn keep_forever(rt: Runtime(host)) -> Runtime(host) {
   Runtime(..rt, engine: engine.keep_forever(rt.engine))
 }
 
-/// Runs a full garbage collection now, see `engine.collect_garbage`. For when
-/// nothing is left to do but wait.
+/// Runs a full garbage collection now, see `engine.collect_garbage`. Use it
+/// when there's nothing left to do but wait.
 pub fn collect_garbage(rt: Runtime(host)) -> Runtime(host) {
   Runtime(..rt, engine: engine.collect_garbage(rt.engine))
 }
@@ -412,7 +414,7 @@ pub fn require_function(rt: Runtime(host)) -> JsVal {
 }
 
 /// run every timer and immediate that is due now, with microtasks between
-/// them, then say what to wait for; it never waits itself
+/// them, then say what to wait for. It never waits itself
 pub fn turn(rt: Runtime(host)) -> #(Next, Runtime(host)) {
   let #(ran, rt) = ask(rt, rt.core.step)
   case classify(ran) {
@@ -428,8 +430,8 @@ pub fn turn(rt: Runtime(host)) -> #(Next, Runtime(host)) {
   }
 }
 
-// what ends every call into js: all queued ticks, then all promise jobs,
-// again until a pass runs no tick; node's order
+// runs at the end of every call into js: all queued ticks, then all promise
+// jobs, repeating until a pass runs no tick. This is node's order
 fn drain(rt: Runtime(host)) -> rt_async.Drain {
   let run_tick = rt.core.run_tick
   fn(st) { run_ticks(st, run_tick) }
@@ -512,9 +514,10 @@ pub fn eval(
   #(outcome, Runtime(..rt, engine: eng))
 }
 
-/// eval, choosing when the script's functions are compiled: worth it for a
-/// large script of which little runs. `engine.learned_hints(engine(rt),
-/// script)` then says what to compile at load next time
+/// eval, but you choose when the script's functions are compiled. This helps
+/// a large script where little of the code runs. Afterwards,
+/// `engine.learned_hints(engine(rt), script)` says what to compile at load
+/// next time
 pub fn eval_script(
   rt: Runtime(host),
   source: String,

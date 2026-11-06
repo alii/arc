@@ -148,7 +148,7 @@ class AsyncLocalStorage {
   }
 }
 
-// no async_hooks tracking: hooks never fire and ids stay 0, like bun
+// like bun, we don't track async hooks, so hooks never fire and ids stay 0
 function createHook(hooks) {
   validateObject(hooks, "hookCallbacks");
   return {

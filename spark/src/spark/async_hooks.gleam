@@ -17,7 +17,7 @@ pub fn builtin() -> Builtin(host) {
   )
 }
 
-/// getContext and setContext over the engine's async context
+/// getContext and setContext read and swap the engine's async context
 pub fn context_natives() -> List(HostMethod(host)) {
   [
     HostMethod("getContext", 0, fn(ctx, _args, _this) {

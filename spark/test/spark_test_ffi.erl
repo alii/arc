@@ -41,7 +41,8 @@ kept() ->
     after 0 -> []
     end.
 
-%% things put by for a key, taken back one at a time in the order they went in
+%% puts things by under a key. unstash takes them back one at a time, oldest
+%% first
 stash(Key, Term) ->
     self() ! {spark_test_stash, Key, Term},
     nil.

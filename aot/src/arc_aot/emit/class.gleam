@@ -59,7 +59,7 @@ fn read_class_const(
   }
 }
 
-// §15.7.14 step 27, each computed key evaluated once
+// §15.7.14 step 27 evaluates each computed key once
 fn emit_computed_keys(
   e: Emitter,
   body: List(ast.ClassElement),
@@ -248,7 +248,7 @@ fn default_ctor_body(is_derived: Bool) -> List(ast.StmtWithLine) {
   }
 }
 
-// §15.7.14 class definition evaluation, step order matters
+// §15.7.14 class definition evaluation, where the step order matters
 pub fn emit(
   e: Emitter,
   binding_name: Option(String),
@@ -303,7 +303,7 @@ pub fn emit(
   use e <- emit_methods(e, parts.instance_methods, proto, is_static: False)
   use e <- emit_methods(e, parts.static_methods, ctor, is_static: True)
   use init_fn, e <- emit_field_init_fn(e, parts, proto, init_child_id)
-  // inner name bound after elements but before statics
+  // bind the inner name after elements but before statics
   let with_inner_name = fn(e, then: Next) {
     case binding_name {
       Some(n) -> store_class_const(e, n, ctor, then)

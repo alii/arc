@@ -1,6 +1,6 @@
 "use strict";
 
-// the stream module holds the file; loading it makes it findable
+// the stream module holds this file, so we load it to make the file findable
 require("node:stream");
 const consumers = require("spark:internal").find("stream/consumers");
 

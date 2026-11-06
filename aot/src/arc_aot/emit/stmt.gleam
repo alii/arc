@@ -135,7 +135,7 @@ fn inline_cleanups(
   }
 }
 
-// break or continue
+// emits a break or continue
 fn emit_jump(
   e: Emitter,
   target: Result(#(String, List(BarrierCleanup)), EmitError),
@@ -285,9 +285,8 @@ fn emit_stmt(e: Emitter, s: ast.Statement, k: Next) -> EmitResult {
   }
 }
 
-// a handler must see what its try wrote before throwing, which plain rebinding
-// cannot show it, so those locals sit in boxes for the statement; a loop takes
-// them for all its turns at once
+// a handler must see what its try wrote before the throw, which rebinding can't show,
+// so those locals live in boxes for the statement. A loop boxes them once for all turns
 fn boxing_guarded_writes(
   e: Emitter,
   s: ast.Statement,
@@ -1336,7 +1335,7 @@ fn for_in_of_carried(
   |> list.sort(int.compare)
 }
 
-// §14.7.5.7 fresh iteration env each pass
+// §14.7.5.7 each pass gets a fresh iteration env
 fn per_iteration_env(
   e: Emitter,
   left: ast.ForInit,
@@ -1349,7 +1348,7 @@ fn per_iteration_env(
   }
 }
 
-// an assignment, not a declaration: const throws, let tdz checks
+// this assigns rather than declares, so const throws and let checks tdz
 fn for_lhs_ident_assign(
   e: Emitter,
   name: String,
@@ -1923,7 +1922,7 @@ type CaseEntry {
   )
 }
 
-// fallthrough: case bodies nest inside-out around the dispatch
+// case bodies nest inside-out around the dispatch so they fall through
 fn emit_switch(
   e: Emitter,
   disc: ast.Expression,
@@ -1964,7 +1963,7 @@ fn emit_switch(
     })
     |> option.from_result
   let branch_slots = e.slot_vars
-  // no i32 compare kernel: a non-int discriminant falls to default
+  // there's no i32 compare kernel, so a non-int discriminant falls to default
   let no_match_leaf = fn(e: Emitter) {
     case default_lbl {
       Some(dl) -> ir.Break(dl, carried_values(e, carried))
@@ -2022,7 +2021,7 @@ fn switch_test_chain(
 }
 
 // a case can be entered past the declarations of the ones before it, so each
-// starts from what was initialized before the switch
+// starts from what was initialised before the switch
 fn switch_nest_bodies(
   e: Emitter,
   branch_slots: dict.Dict(Int, String),
@@ -2206,7 +2205,7 @@ fn emit_for_classic(
   }
 }
 
-// sound: init is a number, only upd ++/-- writes it
+// sound because init is a number and only the update's ++/-- writes it
 fn for_counter_known(
   e: Emitter,
   upd: Option(ast.Expression),

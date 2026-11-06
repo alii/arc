@@ -22,7 +22,7 @@ pub fn days_from_year(y: Int) -> Int {
   + floor_div(y - 1601, 400)
 }
 
-// never return 0 here, month scan loops would spin
+// never return 0 here or month scan loops would spin
 pub fn days_in_month(y: Int, m: Int) -> Int {
   case m {
     2 ->

@@ -1,4 +1,4 @@
-%% fallbacks are for atomvm: no [short], precision capped at 57
+%% the fallbacks are for atomvm, which has no [short] and caps precision at 57
 -module(arc_rt_float_ffi).
 -export([shortest_digits/1, scientific/2, split_exponent/1, split_dot/1]).
 
@@ -29,7 +29,7 @@ with_fraction(S) ->
             Mantissa ++ ".0e" ++ integer_to_list(Exp)
     end.
 
-%% digits sans leading/trailing zeros, exponent of the first
+%% the digits without leading or trailing zeros, and the exponent of the first
 shortest_digits(X) ->
     {Mantissa, E0} = split_exponent(shortest(X)),
     {IntPart, FracPart} = split_dot(Mantissa),

@@ -4,7 +4,7 @@ import gleam/list
 import gleam/option.{type Option}
 import gleam/string
 
-// specifier as written in source; never a graph key
+// a specifier as written in source, never used as a graph key
 pub opaque type Raw {
   Raw(String)
 }
@@ -14,7 +14,7 @@ pub type Request {
   Request(specifier: Raw, attributes: List(ast.ImportAttribute))
 }
 
-// canonical module identity: host-resolved path plus import attributes
+// a module's identity, made of its host-resolved path and import attributes
 pub opaque type Resolved {
   Resolved(path: String, attributes: List(ast.ImportAttribute))
 }

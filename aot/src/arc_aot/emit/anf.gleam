@@ -125,7 +125,7 @@ pub fn make_tuple(vs: List(ir.Value)) -> Build(ir.Value) {
   let_(ir.TermOp(ir.MakeTuple, vs))
 }
 
-/// the key of a property whose name is known now, as the object kernels take it
+/// the key of a property whose name is known at compile time, in the form the object kernels take
 pub fn named_key(name: BitArray) -> Build(ir.Value) {
   let assert Ok(name) = bit_array.to_string(name)
     as "anf.named_key: a static property name is not text"
@@ -283,7 +283,7 @@ fn let_if_n(
   }
 }
 
-// §7.4.8 close on throw, the original error wins
+// §7.4.8 closes the iterator on throw and rethrows the original error
 pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
   fn(e: Emitter, k) {
     let sv0 = e.slot_vars
@@ -402,7 +402,7 @@ fn number_guard(v: ir.Value) -> Build(#(ir.Value, Bool)) {
   }
 }
 
-// nested if, not IAnd: IAnd lowers to a cross-module call
+// use a nested if because IAnd lowers to a cross-module call
 fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
   use #(ga, ea) <- then(number_guard(a))
   use #(gb, eb) <- then(number_guard(b))
@@ -644,7 +644,7 @@ fn guarded_cmp_numeric(
   }
 }
 
-// js comparison results are booleans, never leak a raw i32
+// js comparisons return booleans, so never leak a raw i32
 pub fn i32_to_js_bool(v: ir.Value) -> Build(ir.Value) {
   fn(e: Emitter, k) {
     let consts = e.consts
@@ -688,7 +688,7 @@ fn cond_cmp_numeric(
   }
 }
 
-// the one static key canonicalizer, output must be canonical
+// the only static key canonicaliser, so its output must be canonical
 pub fn object_key_lit(pk: ast.PropertyName) -> Build(ir.Value) {
   let inner = case pk {
     ast.IdentifierName(name:, ..) -> wire_named(name)

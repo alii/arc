@@ -218,7 +218,7 @@ fn math_extremum(
       a <=. b && { a <. b || !rt_val.is_neg_zero(b) }
     })
   }
-  // tonumber every arg before folding, observable
+  // tonumber every arg before folding because the order is observable
   let #(nums, st) = coerce_args(st, args)
   let result =
     list.fold(nums, seed, fn(acc, num) {
@@ -364,7 +364,7 @@ fn math_imul(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   use a, b <- math_binary(st, args)
   let a32 = rt_val.num_to_int32(a)
   let b32 = rt_val.num_to_int32(b)
-  // stay in ints, a float would drop low bits
+  // stay in ints because a float would drop low bits
   JInt(rt_val.wrap_int32(a32 * b32))
 }
 
@@ -587,7 +587,7 @@ fn sum_precise_result(acc: PreciseSum) -> JsNum {
   }
 }
 
-// nearest ieee bits for mag × 2^-1074, a carry rolls into the exponent
+// nearest ieee bits for mag × 2^-1074. a carry rolls into the exponent
 fn descaled_bits(mag: Int) -> Int {
   let shift = rt_val.bit_length(mag) - 53
   case shift <= 0 {
@@ -851,7 +851,7 @@ fn num_negate(n: JsNum) -> JsNum {
   }
 }
 
-// overflow-capable math bifs badarith, keep them in the ffi
+// math bifs that can overflow raise badarith, so they stay in the ffi
 
 @external(erlang, "arc_rt_math_ffi", "exp_total")
 fn exp_total(x: Float) -> JsNum

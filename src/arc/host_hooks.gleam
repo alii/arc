@@ -15,7 +15,7 @@ pub type ConsoleLevel {
 /// host capabilities supplied once at engine construction
 pub type HostHooks {
   HostHooks(
-    // §9.7 [[CanBlock]]: may sync Atomics.wait park this process
+    // §9.7 [[CanBlock]]: whether a sync Atomics.wait may park this process
     can_block: Bool,
     monotonic_now: fn() -> Int,
     sleep_ms: fn(Int) -> Nil,
@@ -23,11 +23,11 @@ pub type HostHooks {
     wall_clock_ms: fn() -> Int,
     // local time for Date
     time_zone: TimeZone,
-    // tz database rules for a canonical iana id, asked once per zone
+    // loads tz database rules for a canonical iana id, once per zone
     load_time_zone: fn(String) -> Result(Rules, TzError),
     // canonical ids the host has rules for
     time_zone_ids: fn() -> List(String),
-    // [0, 1) behind Math.random
+    // gives Math.random a number in [0, 1)
     random: fn() -> Float,
     print: fn(ConsoleLevel, String) -> Nil,
   )

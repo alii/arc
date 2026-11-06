@@ -14,9 +14,9 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-/// what a function that has not been compiled yet needs to compile itself,
-/// apart from the unit's text: where it starts in it and what the code around
-/// it hands it. Kept packed (see pack) and carried by each of its closures
+/// what an uncompiled function needs, besides its unit's text, to compile
+/// itself later. It says where the function starts and what the code around it
+/// hands it. Each of its closures carries it packed (see pack)
 pub type LazyFunction {
   LazyFunction(
     source: FnSource,
@@ -27,18 +27,17 @@ pub type LazyFunction {
     arity: Int,
     // §15.1.5 the length property value
     length: Int,
-    // for each outer name it uses, in order, how the parent hands it over:
-    // see pack_free
+    // how the parent hands over each outer name it uses, in order (see pack_free)
     free: BitArray,
-    // an arrow's this, new.target and the like, see pack_lexical
+    // the lexical refs it captures, like an arrow's this (see pack_lexical)
     lexical: Int,
-    // an arrow is the kind of code it is written in
+    // an arrow takes the kind of the code it is written in
     code_kind: CodeKind,
   )
 }
 
-/// the record a closure of a lazy function carries. Where its text starts and
-/// the parent's slots come first, since making a closure reads only those
+/// packs the record each closure of a lazy function carries. The text's start
+/// and the parent's slots go first because making a closure reads only those
 pub fn pack(function: LazyFunction) -> BitArray {
   let LazyFunction(
     source: FnSource(start:, end:, line:, form:, strict:, in_class:),
@@ -106,8 +105,8 @@ pub fn pack(function: LazyFunction) -> BitArray {
   |> bit_array.append(free)
 }
 
-/// where a packed function's text starts, and the parent's slots for what it
-/// captures: all that making a closure of it needs
+/// reads where a packed function's text starts and the parent's slots for its
+/// captures, which is all that making a closure of it needs
 pub fn creation(record: BitArray) -> Result(#(Int, List(Int)), Nil) {
   use #(start, rest) <- result.try(take(record))
   use #(count, rest) <- result.try(take(rest))
@@ -177,8 +176,8 @@ pub fn unpack(record: BitArray) -> Result(LazyFunction, Nil) {
   )
 }
 
-// a whole number, seven bits to a byte, low bits first, top bit set on all
-// but the last byte
+// writes a whole number seven bits to a byte, low bits first, with the top bit
+// set on every byte but the last
 fn put(packed: BitArray, number: Int) -> BitArray {
   case number < 128 {
     True -> <<packed:bits, number>>
@@ -231,8 +230,8 @@ fn numbered_code_kind(number: Int) -> CodeKind {
   }
 }
 
-/// a byte for each outer name: 255 when the parent does not supply it (it is
-/// a global), else the declared kind, doubled, plus one when it is boxed
+/// packs one byte per outer name. A global the parent doesn't supply is 255,
+/// and anything else is its declared kind doubled, plus one when it is boxed
 pub fn pack_free(names: List(Option(CaptureSeed))) -> BitArray {
   use packed, name <- list.fold(names, <<>>)
   case name {
@@ -283,8 +282,8 @@ fn numbered_kind(number: Int) -> BindingKind {
   }
 }
 
-/// which lexical refs are captured, and which of those the parent holds in a
-/// box: bit n for the nth of lexical.all_lexical_refs, bit n + 4 when boxed
+/// packs which lexical refs are captured and which the parent holds in a box.
+/// Bit n is set for the nth of lexical.all_lexical_refs, and bit n + 4 if boxed
 pub fn pack_lexical(captured: fn(LexicalRef) -> Option(Bool)) -> Int {
   use packed, ref, n <- list.index_fold(lexical.all_lexical_refs, 0)
   case captured(ref) {

@@ -1,5 +1,5 @@
-%% dense js element store, unset slots hold js_hole
-%% bare tuple up to ?FLAT_MAX slots, else 16-way trie with hot leaf
+%% a dense js element store where unset slots hold js_hole. It is a bare tuple
+%% up to ?FLAT_MAX slots, and a 16-way trie with a hot leaf beyond that
 %% trie invariant: every leaf below size except the hot one is in the trie
 -module(arc_tree_array_ffi).
 -compile({no_auto_import, [size/1]}).
@@ -83,7 +83,7 @@ set(I, V, T) when I < ?FLAT_MAX ->
 set(I, V, T) when I >= 0 ->
     set(I, V, promote(T)).
 
-%% set where a value already sits, else hole
+%% sets I only where a value already sits, and returns hole otherwise
 overwrite(I, V, {?VEC_TAG, Size, S, N, HotIx, Hot}) when I bsr ?LEVEL_BITS =:= HotIx ->
     case element((I band ?MASK) + 1, Hot) of
         ?HOLE -> hole;
@@ -106,7 +106,7 @@ indexed([], _) -> [].
 
 promote(T) -> build(tuple_to_list(T), tuple_size(T)).
 
-%% missing leaves between old size and the new hot one
+%% adds the missing leaves between the old size and the new hot one
 fill(L, To, S, N) when L < To ->
     {S1, N1} = put_leaf(L bsl ?LEVEL_BITS, ?EMPTY, S, N),
     fill(L + 1, To, S1, N1);
@@ -169,7 +169,7 @@ resize(T, NewSize) when NewSize >= tuple_size(T) -> T;
 resize(T, NewSize) when NewSize >= 0 ->
     list_to_tuple(lists:sublist(tuple_to_list(T), NewSize)).
 
-%% holes from slot K + 1 on
+%% fills every slot from K + 1 on with holes
 clear_from(T, K) when K >= ?FANOUT -> T;
 clear_from(T, K) -> clear_from(setelement(K + 1, T, ?HOLE), K + 1).
 
@@ -263,7 +263,7 @@ leaves_node(_, _, 0, Acc) -> Acc;
 leaves_node(N, S, Ix, Acc) ->
     leaves_node(N, S, Ix - 1, leaves(element(Ix, N), S - ?LEVEL_BITS, Acc)).
 
-%% list longer than ?FLAT_MAX into a settled trie
+%% builds a settled trie from a list longer than ?FLAT_MAX
 build([], _) -> {?VEC_TAG, 0, 0, ?EMPTY, 0, ?EMPTY};
 build(L, N) ->
     {S, Root} = levels(chunks(L, []), 0),
@@ -275,7 +275,7 @@ chunks(L, Acc) ->
     {Chunk, Rest} = take(L, ?FANOUT, []),
     chunks(Rest, [Chunk | Acc]).
 
-%% exactly ?FANOUT items, absent ones are holes
+%% takes exactly ?FANOUT items, padding with holes
 take(Rest, 0, Acc) -> {list_to_tuple(lists:reverse(Acc)), Rest};
 take([], K, Acc) -> take([], K - 1, [?HOLE | Acc]);
 take([X | Rest], K, Acc) -> take(Rest, K - 1, [X | Acc]).

@@ -41,7 +41,7 @@ const small_write_max = 1024
 @external(erlang, "arc_rt_buffer_ffi", "split")
 fn split(bytes: BitArray) -> TreeArray(BitArray)
 
-// the pieces as one binary again, a copy of the whole buffer
+// joins the pieces into one binary again, which copies the whole buffer
 @external(erlang, "arc_rt_buffer_ffi", "join")
 pub fn join(pieces: TreeArray(BitArray)) -> BitArray
 

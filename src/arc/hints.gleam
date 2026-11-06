@@ -21,8 +21,8 @@ pub fn none() -> Hints {
   NoHints
 }
 
-/// the functions of both, when both are for the same source; hints for
-/// another source add nothing to `a`
+/// the functions of both when they are for the same source. Hints for another
+/// source add nothing to `a`
 pub fn merge(a: Hints, b: Hints) -> Hints {
   case a, b {
     NoHints, other | other, NoHints -> other
@@ -66,8 +66,8 @@ pub fn from_bit_array(bits: BitArray) -> Result(Hints, Nil) {
   }
 }
 
-// a whole number, seven bits to a byte, low bits first, top bit set on all
-// but the last byte
+// writes a whole number seven bits to a byte, low bits first, with the top
+// bit set on every byte but the last
 fn put(packed: BitArray, number: Int) -> BitArray {
   case number < 128 {
     True -> <<packed:bits, number>>
@@ -106,7 +106,7 @@ fn crc32(source: String) -> Int
 @external(erlang, "erlang", "byte_size")
 fn byte_size(source: String) -> Int
 
-/// what tells one source from another: its size and a checksum
+/// the size and checksum that tell one source from another
 @internal
 pub fn fingerprint(source: String) -> #(Int, Int) {
   #(byte_size(source), crc32(source))
@@ -119,8 +119,8 @@ pub fn learned(fingerprint: #(Int, Int), starts: Set(Int)) -> Hints {
   Learned(size: fingerprint.0, checksum: fingerprint.1, starts:)
 }
 
-/// where the functions to compile at load start, for the source with this
-/// fingerprint: none when the hints are for another source
+/// where the functions to compile at load start in the source with this
+/// fingerprint, or nothing when the hints are for another source
 @internal
 pub fn starts_for(hints: Hints, fingerprint: #(Int, Int)) -> Set(Int) {
   case hints {

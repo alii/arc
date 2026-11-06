@@ -744,7 +744,7 @@ fn join_elements_snapshot(
                 separator,
                 ["", ..acc],
               )
-            // object tostring may run user code, bail to generic
+            // object tostring may run user code, so bail to the generic path
             KHandle(_) ->
               join_elements_generic(st, this, idx, length, separator, acc)
             _ -> {
@@ -964,7 +964,7 @@ fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use this, h, length, st <- require_array(st, this)
   let arg_count = list.length(args)
   let new_len = length + arg_count
-  // step 5 runs even with no args, observable
+  // step 5 runs even with no args, which is observable
   use <- bool.lazy_guard(arg_count == 0, fn() {
     case classify(this) {
       KHandle(_) | KStr(_) -> #(
@@ -1651,7 +1651,7 @@ pub fn plain_is_array(st: Agent, v: JsVal) -> Option(JsVal) {
   }
 }
 
-// one argument and a plain array without holes: nothing can run user code
+// with one argument and a plain array without holes, nothing can run user code
 fn whole_array_search(
   st: Agent,
   this: JsVal,
@@ -1709,7 +1709,7 @@ fn array_last_index_of(
   use this, _h, length, st <- require_array(st, this)
   use <- bool.guard(length == 0, #(mk_int(-1), st))
   let search = helpers.first_arg_or_undefined(args)
-  // checked by arg count, explicit undefined gives 0
+  // checked by arg count, so an explicit undefined gives 0
   let #(from, st) = case args {
     [_, f, ..] -> rt_val.to_integer_or_infinity(st, f)
     _ -> #(length - 1, st)
@@ -1954,7 +1954,7 @@ fn search_backward_generic(
   }
 }
 
-// skip = hasproperty gated, visit = plain get
+// skip gates each read on hasproperty, visit does a plain get
 pub type HoleMode {
   SkipHoles
   VisitHoles

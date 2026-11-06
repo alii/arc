@@ -1,14 +1,14 @@
 "use strict";
 
-// node's own internals, the files the rest of its library is written
-// against: errors, validators, util, inspect and a few small ones. Other
-// ports reach them through `load`. What these ask of node's native side is
-// answered by `bindings` and `shims` below
+// node's own internals, which the rest of its library is written against:
+// errors, validators, util, inspect and a few small ones. Other ports reach
+// them through `load`. The `bindings` and `shims` below answer what these ask
+// of node's native side
 
 const loop = require("spark:loop");
 const { kind, promiseDetails, proxyDetails, previewEntries } = native;
 
-// a module the embedder may not have passed
+// loads a module the embedder may not have passed, or gives undefined
 function optional(specifier) {
   try {
     return require(specifier);
@@ -17,8 +17,8 @@ function optional(specifier) {
   }
 }
 
-// node's primordials: every builtin under a name that cannot be patched
-// later, methods taking `this` as their first argument
+// node's primordials keep every builtin under a name that can't be patched
+// later. Methods take `this` as their first argument
 function makePrimordials() {
   const primordials = { __proto__: null };
   const uncurryThis = (fn) =>
@@ -100,7 +100,7 @@ function makePrimordials() {
     Object.getPrototypeOf(async function* () {}).prototype,
   );
 
-  // the helpers that take their arguments as one list
+  // these helpers take their arguments as one list
   for (const name of ["Push", "Unshift", "Concat"]) {
     const method = Array.prototype[name.toLowerCase()];
     primordials[`ArrayPrototype${name}Apply`] = (array, items) =>
@@ -118,7 +118,7 @@ function makePrimordials() {
 
   primordials.uncurryThis = uncurryThis;
   primordials.applyBind = (fn) => (thisArg, args) => Reflect.apply(fn, thisArg, args);
-  // nothing here can reach in and patch the builtins, so the plain ones do
+  // nothing here can patch the builtins, so the plain ones are safe
   primordials.SafeMap = Map;
   primordials.SafeSet = Set;
   primordials.SafeWeakMap = WeakMap;
@@ -162,7 +162,7 @@ function makePrimordials() {
 
 const primordials = makePrimordials();
 
-// node's native bindings, as far as the files below ask
+// node's native bindings, as far as the files below need them
 const kinds = (...names) => (value) => names.includes(kind(value));
 
 function isArrayIndex(key) {
@@ -424,7 +424,7 @@ const bindings = {
       if (preview === undefined) return undefined;
       return isIterator ? preview : preview[0];
     },
-    // v8 remembers the class an object was made by; here only "Object" is known
+    // v8 remembers which class made an object, but we only know "Object"
     getConstructorName: () => "Object",
     getExternalValue: () => 0n,
     getSharedArrayBufferGrowable: (buffer) => buffer.growable,
@@ -439,7 +439,7 @@ const bindings = {
       }
     },
     guessHandleType: () => "UNKNOWN",
-    // getters that load a module the first time one of its names is read
+    // defines getters that load a module the first time one of its names is read
     defineLazyProperties(target, id, keys, enumerable = true) {
       const descriptors = { __proto__: null };
       let mod;
@@ -497,12 +497,12 @@ const bindings = {
     UV_ENOTFOUND: -3008,
   }),
   buffer: () => ({
-    // -1, 0 or 1 over the bytes of two views
     copyArrayBuffer(destination, destinationOffset, source, sourceOffset, count) {
       new Uint8Array(destination, destinationOffset, count).set(
         new Uint8Array(source, sourceOffset, count),
       );
     },
+    // compares the bytes of two views and returns -1, 0 or 1
     compare(left, right) {
       const a = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
       const b = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
@@ -530,7 +530,7 @@ const bindings = {
   errors: () => ({ exitCodes: { kNoFailure: 0, kGenericUserError: 1 } }),
 };
 
-// errno to [name, message], libuv's numbering on linux
+// maps errno to [name, message], using libuv's numbering on linux
 const uvErrors = new Map([
   [-7, ["E2BIG", "argument list too long"]],
   [-13, ["EACCES", "permission denied"]],
@@ -578,10 +578,9 @@ const uvErrors = new Map([
   [-4095, ["EOF", "end of file"]],
 ]);
 
-// what each other port holds, so a name asked for here can be found in the
-// port that holds it: its files, and its stand-ins for modules it has no file
-// for. A file anywhere is taken before a stand-in, and this port's own
-// answer before another port's stand-in
+// every other port's files, and its stand-ins for modules it has no file for,
+// so we can find a name in whichever port holds it. We try other ports' files,
+// then this port, then other ports' stand-ins
 const fileLoaders = [];
 const standInLoaders = [];
 
@@ -594,8 +593,8 @@ function missing(error) {
   return String(error?.message).startsWith("no module ");
 }
 
-// a port may answer a name by asking here again; it is not asked twice for
-// the one name
+// a port may answer a name by asking here again, so we don't ask it twice for
+// the same name
 const asking = new Set();
 
 function loadAnywhere(id) {
@@ -631,7 +630,7 @@ function internalBinding(name) {
   return bindings[name]();
 }
 
-// what the files see as `process`: the real one when it was passed
+// the `process` the files see, built on the real one if it was passed
 let seenProcess;
 function processForFiles() {
   if (seenProcess !== undefined) return seenProcess;
@@ -7314,7 +7313,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -7339,8 +7338,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error("no module " + name + " in this port");
@@ -7348,8 +7347,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

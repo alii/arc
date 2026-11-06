@@ -174,13 +174,13 @@ pub type Op {
   PopTry
 
   MakeClosure(func_index: Int)
-  // a closure of a function not compiled yet: the template at stub_index
-  // with the function's packed record as the last thing it captures
+  // makes a closure of a function not compiled yet from the template at
+  // stub_index, with the function's packed record as its last capture
   MakeLazyClosure(stub_index: Int, record: BitArray)
-  // the whole body of a stub: compiles the function its closure's record
-  // names, out of its unit's text, then runs it
+  // is the whole body of a stub. It compiles the function its closure's record
+  // names from its unit's text, then runs it
   CompileSelf
-  // first in a script that leaves functions for later: keeps its text for them
+  // comes first in a script that leaves functions for later and keeps its text
   KeepUnitText(bytes: BitArray, is_module: Bool)
   BoxLocal(index: Int)
   // slots ascending; an uninit box holds tdz, else the slot's value
@@ -189,12 +189,12 @@ pub type Op {
   PutBoxed(index: Int)
   // bindthisvalue for boxed this
   PutBoxedCheckInit(index: Int)
-  // the same on a box the closure captured, by its place among the captures
-  // the frame keeps as one tuple in slot 0
+  // the same ops on a box the closure captured, found by its place among the
+  // captures the frame keeps as one tuple in slot 0
   GetEnvBoxed(index: Int)
   PutEnvBoxed(index: Int)
   PutEnvBoxedCheckInit(index: Int)
-  // such a capture itself
+  // reads such a capture itself
   GetEnv(index: Int)
 
   // build with bin_op, never classify at execution time
@@ -485,9 +485,9 @@ pub fn pinned_slots(op: Op) -> List(Int) {
   }
 }
 
-/// The op for a frame that keeps its first `count` slots, all captures, as one
-/// tuple in slot 0. An error if the op does to a capture what only a slot can
-/// take
+/// Rewrites the op for a frame that keeps its first `count` slots, which are
+/// all captures, as one tuple in slot 0. Returns an error if the op does
+/// something to a capture that only a slot can take.
 pub fn nest_captures(op: Op, count: Int) -> Result(Op, Nil) {
   let moved = fn(slot) { slot - count + 1 }
   case op {

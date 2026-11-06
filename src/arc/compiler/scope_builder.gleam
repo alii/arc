@@ -594,9 +594,9 @@ pub fn children_since(
   list.take(now, list.length(now) - list.length(before))
 }
 
-// puts the children a scope opened after `mid` ahead of the ones it opened
+// moves the children a scope opened after `mid` ahead of the ones it opened
 // between `before` and `mid`, for a construct whose later part runs first.
-// both are earlier readings of children_newest_first
+// `before` and `mid` are earlier readings of children_newest_first
 pub fn later_children_first(
   sb: ScopeBuilder,
   scope_id: ScopeId,
@@ -715,7 +715,6 @@ pub fn set_fn_waits(sb: ScopeBuilder, fn_id: ScopeId) -> ScopeBuilder {
   )
 }
 
-// a use strict directive covers the scope it opens and everything inside
 pub fn mark_entered_midway(sb: ScopeBuilder) -> ScopeBuilder {
   update_current(sb, fn(s) { RawScope(..s, entered_midway: True) })
 }
@@ -723,9 +722,9 @@ pub fn mark_entered_midway(sb: ScopeBuilder) -> ScopeBuilder {
 // how far back declaration_done looks before it gives up
 const furthest_look_back = 128
 
-/// A let or const statement of the current scope has just been parsed to its
-/// end. Notes which of its names nothing in the scope has mentioned yet, its
-/// own initializers included.
+/// Call this when a let or const statement of the current scope has been
+/// parsed to its end. It notes which of its names nothing in the scope has
+/// mentioned yet, counting the statement's own initializers.
 pub fn declaration_done(sb: ScopeBuilder, names: List(String)) -> ScopeBuilder {
   let scope = scope_at(sb, sb.current)
   let since_opened = sb.ref_count - scope.opened_at_ref
@@ -750,6 +749,8 @@ pub fn declaration_done(sb: ScopeBuilder, names: List(String)) -> ScopeBuilder {
   )
 }
 
+// a use strict directive makes the current scope strict, and the scopes
+// inside it inherit that
 pub fn mark_strict(sb: ScopeBuilder) -> ScopeBuilder {
   update_current(sb, fn(s) { RawScope(..s, is_strict: True) })
 }
@@ -904,8 +905,8 @@ pub fn with_depth(sb: ScopeBuilder) -> Int {
   })
 }
 
-/// the reads, writes and guarded writes recorded since `before`, an earlier
-/// reading of this builder
+/// the reads, writes and guarded writes recorded since `before`, which is an
+/// earlier reading of this builder
 pub fn recorded_since(
   sb: ScopeBuilder,
   before: ScopeBuilder,
@@ -918,11 +919,11 @@ pub fn recorded_since(
 }
 
 /// Forgets everything inside the function `fn_id`, whose parse began at the
-/// reading `before` and has just ended, and leaves in its place what the code
-/// around it can tell: the function with no names of its own, reading each of
-/// `free`, writing each of `writes` (with its latest order stamp) and each of
-/// `try_writes` (under the try block given, or one of its own when None), and
-/// using `lexical_refs`.
+/// reading `before` and has just ended. In its place it leaves only what the
+/// code around it can see. The function has no names of its own, reads each
+/// of `free` and uses `lexical_refs`. It writes each of `writes` (with its
+/// latest order stamp) and each of `try_writes` (under the try block given,
+/// or one of its own when None).
 pub fn forget_inside(
   sb: ScopeBuilder,
   fn_id: ScopeId,

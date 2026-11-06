@@ -448,7 +448,7 @@ pub fn entry_namespace_of(st: Agent, linked_bundle: LinkedBundle) -> Handle {
   entry_namespace(st, linked_bundle.linked, linked_bundle.bundle.entry)
 }
 
-// error is the thrown syntaxerror
+// the error is the thrown syntaxerror
 pub fn link_for_evaluation(
   st: Agent,
   bundle: ModuleBundle,
@@ -735,7 +735,7 @@ fn evaluate_with_deps(
   }
 
   case dep_result {
-    // pending tla is not a failure, don't cache
+    // a pending tla is not a failure, so don't cache it
     Error(EvaluationPending(promise: _) as err) -> #(Error(err), evaluation)
     Error(err) -> {
       let #(error_val, st) = case err {
@@ -882,9 +882,9 @@ fn drive_top_level_await(
   drain: Drain,
 ) -> #(BodyOutcome, Agent) {
   let #(promise, st) = rt_async.new_promise(st)
-  // held from gleam across drains
+  // pin it because gleam holds it across drains
   let st = rt_store.pin_root(st, promise)
-  // also marks it handled, the host inspects it below
+  // this also marks it handled, because the host inspects it below
   let st = settle_status_in_reaction(st, spec, promise)
   let #(ctx, st) = rt_store.cell_new(st, SAsyncContext(resume:, promise:))
   let st = rt_async.await(st, ctx, awaited)
@@ -905,7 +905,7 @@ fn drive_top_level_await(
   }
 }
 
-// asyncmoduleexecutionfulfilled/rejected: status settles in that job
+// asyncmoduleexecutionfulfilled/rejected, where the status settles in that job
 fn settle_status_in_reaction(
   st: Agent,
   spec: String,
@@ -945,7 +945,7 @@ fn settle_status_in_reaction(
   )
 }
 
-// pinned: binding boxes are held from gleam
+// pinned because gleam holds binding boxes
 fn alloc_box(st: Agent, val: JsVal) -> #(Handle, Agent) {
   let #(box, st) = rt_store.box_new(st, val)
   #(box, rt_store.pin_root(st, box))
@@ -1157,7 +1157,7 @@ fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
   |> list.unique
 }
 
-// §16.2.1.6.4 step 9: exported functions callable before bodies run
+// §16.2.1.6.4 step 9, so exported functions can be called before bodies run
 fn instantiate_hoisted_functions(
   st: Agent,
   bundle: ModuleBundle,
@@ -1320,7 +1320,7 @@ fn default_export_value(
   }
 }
 
-// proxy whose traps evaluate the module then forward
+// fills a proxy whose traps evaluate the module and then forward
 fn fill_deferred_namespace(
   st: Agent,
   bundle: ModuleBundle,
@@ -1429,7 +1429,7 @@ fn alloc_deferred_trap(
   }
 }
 
-// EnsureDeferredNamespaceEvaluation, raises
+// EnsureDeferredNamespaceEvaluation, which throws into the agent on failure
 fn ensure_deferred_evaluated(
   st: Agent,
   bundle: ModuleBundle,
@@ -1459,7 +1459,7 @@ fn ensure_deferred_evaluated(
   }
 }
 
-// ReadyForSyncExecution, deferred requests included
+// ReadyForSyncExecution, counting deferred requests too
 fn ready_for_sync_execution(
   st: Agent,
   bundle: ModuleBundle,
@@ -1496,7 +1496,7 @@ fn ready_for_sync_execution(
   }
 }
 
-// EvaluateSync, never drains re-entrantly
+// EvaluateSync, which never drains re-entrantly
 fn evaluate_deferred_subgraph(
   st: Agent,
   bundle: ModuleBundle,

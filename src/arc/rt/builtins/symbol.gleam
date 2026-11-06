@@ -188,7 +188,7 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// §20.4.2.2 registered symbols are equal by key, no registry
+// §20.4.2.2 registered symbols are equal by key, so we don't need a registry
 fn symbol_for(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(key, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   #(mk_symbol(RegisteredSymbol(key:)), st)

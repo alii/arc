@@ -33,7 +33,7 @@ trace_on(BenchMod) ->
     _ = [code:ensure_loaded(M) || M <- [BenchMod | mods()]],
     erlang:trace_pattern({'_','_','_'}, false, [call_time, local]),
     erlang:trace_pattern({'_','_','_'}, false, [call_time]),
-    %% bench module global only, local tracing is 100x overhead
+    %% trace only the bench module's global calls because local tracing costs 100x
     _ = [erlang:trace_pattern({M,'_','_'}, true, [call_time, local])
          || M <- mods()],
     _ = erlang:trace_pattern({BenchMod,'_','_'}, true, [call_time]),

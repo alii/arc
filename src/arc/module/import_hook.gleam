@@ -87,9 +87,9 @@ fn eager_import_module(
   load: LoadFn,
 ) -> #(Result(JsVal, JsVal), Agent) {
   case registry.lookup(st, specifier.registry_key(target)) {
-    // error cache wins: a namespace entry may be stale after a throw
+    // the cached error wins because a namespace entry may be stale after a throw
     registry.Failed(error:) -> #(Error(error), st)
-    // parked on tla: same in-flight promise (Evaluate step 4)
+    // parked on tla, so hand back the same in-flight promise (Evaluate step 4)
     registry.Pending(promise:, deferred: _) -> #(Ok(mk_object(promise)), st)
     registry.EvaluationStarted(namespace:, deferred: _) -> #(
       Ok(mk_object(namespace)),
@@ -112,7 +112,7 @@ fn evaluate_module(
   case module.compile_loaded_bundle(target, source, resolve, load) {
     Error(err) -> compile_bundle_rejection(st, err)
     Ok(bundle) -> {
-      // evaluate without draining: we are inside a promise job
+      // evaluate without draining because we are inside a promise job
       let #(res, st) =
         evaluate_bundle_with_registry(st, bundle, rt_async.no_drain)
       case res {
@@ -139,7 +139,7 @@ fn evaluate_module(
   }
 }
 
-// import.defer: link, pre-evaluate async deps, settle via fulfill
+// import.defer links, evaluates async deps early, then settles through fulfill
 fn defer_import_module(
   st: Agent,
   target: Resolved,
@@ -249,7 +249,7 @@ fn evaluate_deferred_async_deps(
   }
 }
 
-// PerformPromiseThen directly, never a then lookup
+// calls PerformPromiseThen directly instead of looking up then
 fn chain_deferred_settlement(
   st: Agent,
   ns: JsVal,
@@ -366,7 +366,7 @@ fn read_registered(
   })
 }
 
-// §16.2.1.5.2 evaluate step 4: entry parked on tla
+// §16.2.1.5.2 evaluate step 4, for an entry parked on tla
 fn pending_module_promise(
   st: Agent,
   resolved: String,
@@ -419,7 +419,8 @@ fn pending_module_promise(
   }
 }
 
-// §16.2.1.8: register before evaluating, roll back bodies that never completed
+// §16.2.1.8: register before evaluating, and roll back bodies that never
+// completed
 pub fn evaluate_bundle_with_registry(
   st: Agent,
   bundle: module.ModuleBundle,
@@ -460,7 +461,7 @@ pub fn evaluate_bundle_with_registry(
             })
           #(Error(module.EvaluationError(value:)), st)
         }
-        // mid tla: registrations stay
+        // registrations stay while tla is pending
         Error(module.EvaluationPending(promise: _))
         | Error(module.NotInBundle(..)) -> #(res, st)
       }

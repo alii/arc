@@ -363,7 +363,7 @@ pub fn chain_has_optional(expr: ast.Expression) -> Bool {
   }
 }
 
-// object.keys(), object.values() or object.entries(), spelled exactly so
+// matches x.keys(), x.values() or x.entries() written exactly like that
 pub fn collection_view(
   expr: ast.Expression,
 ) -> Option(#(ast.Expression, ast.MemberProperty, IterView)) {
@@ -450,7 +450,7 @@ pub type ClassElementBucket {
   StaticElementBucket
 }
 
-// the one partition, parser and emitter share it
+// the parser and the emitter both bucket class elements with this
 pub fn class_element_bucket(el: ast.ClassElement) -> ClassElementBucket {
   case el {
     ast.ClassMethod(kind: ast.ConstructorMethod, ..) -> ConstructorBucket

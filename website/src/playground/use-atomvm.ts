@@ -35,8 +35,8 @@ declare global {
 
 /**
  * Exercises the interpreter's common paths so the BEAM modules they live in
- * are loaded before the user's first run (AtomVM loads modules on first use;
- * a cold run of the fib example measured 4.0s vs 0.95s warm). Sent as
+ * are loaded before the user's first run, because AtomVM loads modules on
+ * first use and a cold run is much slower. Sent as
  * separate calls so a click that lands mid-warm-up waits for one chunk, not
  * all of them. Everything they print is swallowed by the loader.
  */
@@ -202,8 +202,8 @@ export function useAtomVM(onPrint: (line: string) => void) {
 
 		const mod: EmscriptenModule = {
 			arguments: ['/atomvm/arc.avm'],
-			// Aborts before the runtime is up are almost always the environment
-			// (CSP without 'wasm-unsafe-eval', memory limits) — surface them.
+			// Show aborts before the runtime is up, since they're almost always the
+			// environment, such as a CSP without 'wasm-unsafe-eval' or memory limits.
 			onAbort: (what) => {
 				setStatus((current) =>
 					current.kind === 'ready'

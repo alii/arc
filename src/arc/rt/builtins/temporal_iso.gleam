@@ -39,12 +39,12 @@ pub type IsoDate {
   IsoDate(year: Int, month: Int, day: Int)
 }
 
-// [[isodate]] and [[calendar]] slots of plaindate, plainyearmonth, plainmonthday
 // calendar part of a duration before balancing into Duration
 pub type DateDuration {
   DateDuration(years: Int, months: Int, weeks: Int, days: Int)
 }
 
+// [[isodate]] and [[calendar]] slots of plaindate, plainyearmonth, plainmonthday
 pub type IsoDateSlots {
   IsoDateSlots(iso_date: IsoDate, calendar: temporal_calendar.Calendar)
 }
@@ -423,7 +423,7 @@ type MinutesSeconds {
   MinutesSeconds(minute: Int, second: Int, subsecond_ns: Int, has_seconds: Bool)
 }
 
-// minutes then seconds after an hour, extended or basic format
+// parses minutes then seconds after an hour, in extended or basic format
 fn parse_minutes_seconds(s: String) -> #(MinutesSeconds, String) {
   let #(extended, after_sep) = case s {
     ":" <> r -> #(True, r)
@@ -640,7 +640,7 @@ pub fn int_sign(n: Int) -> Int {
   }
 }
 
-// integer-space rounding, erlang float/1 misrounds past 53 bits
+// round in integers because erlang float/1 misrounds past 53 bits
 pub fn round_to_float_precision(n: Int) -> Int {
   case int.absolute_value(n) < pow2_53 {
     True -> n
@@ -655,7 +655,7 @@ pub fn round_to_float_precision(n: Int) -> Int {
   }
 }
 
-// scale into [2^52, 2^53) and round once, no double rounding
+// scale into [2^52, 2^53) and round once to avoid double rounding
 pub fn divide_as_float(a: Int, b: Int) -> Float {
   case b < 0 {
     True -> divide_as_float(0 - a, 0 - b)

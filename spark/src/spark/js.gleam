@@ -29,7 +29,7 @@ pub const bootstrap =
 
   registry.set(\"spark:loop\", { hidden: true, module: { exports: loop } });
 
-  // factory is the source already compiled, when the embedder did that ahead
+  // factory is the compiled source, if the embedder compiled it ahead of time
   function register(specifier, source, native, dependencies, hidden, factory) {
     registry.set(specifier, {
       source,
@@ -76,7 +76,7 @@ pub const bootstrap =
     return module.exports;
   }
 
-  // what scripts get
+  // the require that scripts get
   function require(specifier) {
     const name = lookup(String(specifier));
     if (name === undefined || registry.get(name).hidden) {
@@ -85,7 +85,7 @@ pub const bootstrap =
     return load(name);
   }
 
-  // what a builtin gets: its declared dependencies and nothing else
+  // the require a builtin gets, which only loads its declared dependencies
   function requireWithin(owner, dependencies) {
     return function require(specifier) {
       const name = lookup(String(specifier));
@@ -142,7 +142,7 @@ pub const bootstrap =
       Object.defineProperty(globalThis, names[i], {
         value: exports[names[i]],
         writable: true,
-        // as in node: a class is not listed, a function or an object is
+        // like node, list functions and objects but not classes
         enumerable: names[i][0] === names[i][0].toLowerCase(),
         configurable: true,
       });
@@ -189,7 +189,7 @@ const kTypes = [
   \"symbol\",
 ];
 
-// libuv's message and, where linux and macos agree on it, the errno
+// libuv's message for each code, and its errno where linux and macos agree
 const systemErrors = {
   EACCES: [\"permission denied\", -13],
   EAGAIN: [\"resource temporarily unavailable\"],
@@ -213,8 +213,8 @@ const systemErrors = {
   ETXTBSY: [\"text file is busy\", -26],
 };
 
-// as node makes its coded errors: a plain error of the base class, with the
-// code on it and a toString that shows the code
+// makes a coded error the way node does: a plain error of the base class with
+// the code on it and a toString that shows the code
 function coded(Base, code, message) {
   const made = new Base(message);
   Object.defineProperty(made, \"toString\", {
@@ -381,7 +381,7 @@ function invalidArgValue(name, value, reason = \"is invalid\") {
   );
 }
 
-// a failed want as node reports a failed syscall
+// reports a failed want the way node reports a failed syscall
 function systemError(code, syscall, path) {
   const known = systemErrors[code];
   let message = `${code}: ${known ? known[0] : \"unknown error\"}, ${syscall}`;
@@ -498,7 +498,7 @@ function genericNodeError(message, errorProperties) {
 
 const kEnhanceStackBeforeInspector = Symbol(\"kEnhanceStackBeforeInspector\");
 
-// objects that structuredClone must refuse, as node marks its URL
+// objects that structuredClone must refuse. Node marks its URL this way
 const uncloneable = new WeakSet();
 
 function markUncloneable(object) {
@@ -509,8 +509,8 @@ function isUncloneable(object) {
   return uncloneable.has(object);
 }
 
-// node's error classes by code, for code ported from node that says
-// `new ERR_X(...)`; each returns the error, which `new` then hands back
+// node's error classes by code, for ported code that says `new ERR_X(...)`.
+// Each returns the error, which `new` then hands back
 const codes = {
   ERR_INVALID_ARG_TYPE: function (name, expected, actual) {
     return invalidArgType(name, expected, actual);
@@ -595,15 +595,15 @@ module.exports = {
 pub const internal =
   "\"use strict\";
 
-// node's own internals, the files the rest of its library is written
-// against: errors, validators, util, inspect and a few small ones. Other
-// ports reach them through `load`. What these ask of node's native side is
-// answered by `bindings` and `shims` below
+// node's own internals, which the rest of its library is written against:
+// errors, validators, util, inspect and a few small ones. Other ports reach
+// them through `load`. The `bindings` and `shims` below answer what these ask
+// of node's native side
 
 const loop = require(\"spark:loop\");
 const { kind, promiseDetails, proxyDetails, previewEntries } = native;
 
-// a module the embedder may not have passed
+// loads a module the embedder may not have passed, or gives undefined
 function optional(specifier) {
   try {
     return require(specifier);
@@ -612,8 +612,8 @@ function optional(specifier) {
   }
 }
 
-// node's primordials: every builtin under a name that cannot be patched
-// later, methods taking `this` as their first argument
+// node's primordials keep every builtin under a name that can't be patched
+// later. Methods take `this` as their first argument
 function makePrimordials() {
   const primordials = { __proto__: null };
   const uncurryThis = (fn) =>
@@ -695,7 +695,7 @@ function makePrimordials() {
     Object.getPrototypeOf(async function* () {}).prototype,
   );
 
-  // the helpers that take their arguments as one list
+  // these helpers take their arguments as one list
   for (const name of [\"Push\", \"Unshift\", \"Concat\"]) {
     const method = Array.prototype[name.toLowerCase()];
     primordials[`ArrayPrototype${name}Apply`] = (array, items) =>
@@ -713,7 +713,7 @@ function makePrimordials() {
 
   primordials.uncurryThis = uncurryThis;
   primordials.applyBind = (fn) => (thisArg, args) => Reflect.apply(fn, thisArg, args);
-  // nothing here can reach in and patch the builtins, so the plain ones do
+  // nothing here can patch the builtins, so the plain ones are safe
   primordials.SafeMap = Map;
   primordials.SafeSet = Set;
   primordials.SafeWeakMap = WeakMap;
@@ -757,7 +757,7 @@ function makePrimordials() {
 
 const primordials = makePrimordials();
 
-// node's native bindings, as far as the files below ask
+// node's native bindings, as far as the files below need them
 const kinds = (...names) => (value) => names.includes(kind(value));
 
 function isArrayIndex(key) {
@@ -1019,7 +1019,7 @@ const bindings = {
       if (preview === undefined) return undefined;
       return isIterator ? preview : preview[0];
     },
-    // v8 remembers the class an object was made by; here only \"Object\" is known
+    // v8 remembers which class made an object, but we only know \"Object\"
     getConstructorName: () => \"Object\",
     getExternalValue: () => 0n,
     getSharedArrayBufferGrowable: (buffer) => buffer.growable,
@@ -1034,7 +1034,7 @@ const bindings = {
       }
     },
     guessHandleType: () => \"UNKNOWN\",
-    // getters that load a module the first time one of its names is read
+    // defines getters that load a module the first time one of its names is read
     defineLazyProperties(target, id, keys, enumerable = true) {
       const descriptors = { __proto__: null };
       let mod;
@@ -1092,12 +1092,12 @@ const bindings = {
     UV_ENOTFOUND: -3008,
   }),
   buffer: () => ({
-    // -1, 0 or 1 over the bytes of two views
     copyArrayBuffer(destination, destinationOffset, source, sourceOffset, count) {
       new Uint8Array(destination, destinationOffset, count).set(
         new Uint8Array(source, sourceOffset, count),
       );
     },
+    // compares the bytes of two views and returns -1, 0 or 1
     compare(left, right) {
       const a = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
       const b = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
@@ -1125,7 +1125,7 @@ const bindings = {
   errors: () => ({ exitCodes: { kNoFailure: 0, kGenericUserError: 1 } }),
 };
 
-// errno to [name, message], libuv's numbering on linux
+// maps errno to [name, message], using libuv's numbering on linux
 const uvErrors = new Map([
   [-7, [\"E2BIG\", \"argument list too long\"]],
   [-13, [\"EACCES\", \"permission denied\"]],
@@ -1173,10 +1173,9 @@ const uvErrors = new Map([
   [-4095, [\"EOF\", \"end of file\"]],
 ]);
 
-// what each other port holds, so a name asked for here can be found in the
-// port that holds it: its files, and its stand-ins for modules it has no file
-// for. A file anywhere is taken before a stand-in, and this port's own
-// answer before another port's stand-in
+// every other port's files, and its stand-ins for modules it has no file for,
+// so we can find a name in whichever port holds it. We try other ports' files,
+// then this port, then other ports' stand-ins
 const fileLoaders = [];
 const standInLoaders = [];
 
@@ -1189,8 +1188,8 @@ function missing(error) {
   return String(error?.message).startsWith(\"no module \");
 }
 
-// a port may answer a name by asking here again; it is not asked twice for
-// the one name
+// a port may answer a name by asking here again, so we don't ask it twice for
+// the same name
 const asking = new Set();
 
 function loadAnywhere(id) {
@@ -1226,7 +1225,7 @@ function internalBinding(name) {
   return bindings[name]();
 }
 
-// what the files see as `process`: the real one when it was passed
+// the `process` the files see, built on the real one if it was passed
 let seenProcess;
 function processForFiles() {
   if (seenProcess !== undefined) return seenProcess;
@@ -7909,7 +7908,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -7934,8 +7933,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -7943,8 +7942,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||
@@ -8118,7 +8117,7 @@ class AsyncLocalStorage {
   }
 }
 
-// no async_hooks tracking: hooks never fire and ids stay 0, like bun
+// like bun, we don't track async hooks, so hooks never fire and ids stay 0
 function createHook(hooks) {
   validateObject(hooks, \"hookCallbacks\");
   return {
@@ -8252,7 +8251,7 @@ class Timeout {
     Timeout.#cancel(timer);
   }
 
-  // the earliest live entry, with stale ones dropped
+  // drops stale entries and returns the earliest live one
   static peek() {
     while (heap.length > 0) {
       const entry = heap[0];
@@ -8340,7 +8339,7 @@ class Immediate {
     if (immediate.#refed) refCount--;
   }
 
-  // false when it was cleared while queued
+  // returns false if it was cleared while queued
   static fire(immediate) {
     if (!immediate.#queued) return false;
     Immediate.destroy(immediate);
@@ -8455,7 +8454,7 @@ const {
 } = require(\"spark:errors\");
 const { Buffer } = require(\"node:buffer\");
 
-// a module the embedder may not have passed
+// loads a module the embedder may not have passed, or gives undefined
 function optional(specifier) {
   try {
     return require(specifier);
@@ -8522,7 +8521,8 @@ function isURL(self) {
   );
 }
 
-// a path may be a string, bytes or a file: URL; the embedder is asked with text
+// a path may be a string, bytes or a file: URL, but we always ask the embedder
+// with text
 function getValidatedPath(fileURLOrPath, name = \"path\") {
   let path = fileURLOrPath;
   if (isURL(path)) {
@@ -8574,8 +8574,8 @@ function getOptions(options, defaultOptions = kEmptyObject) {
   return options;
 }
 
-// a name or a path comes from the embedder as text; node hands it on as
-// text, as a Buffer, or as that Buffer read in another encoding
+// the embedder gives names and paths as text. Node hands them on as text, as a
+// Buffer, or as that Buffer read in another encoding
 function inEncoding(text, encoding) {
   if (!encoding || encoding === \"utf8\" || encoding === \"utf-8\") return text;
   const bytes = Buffer.from(text);
@@ -8620,7 +8620,7 @@ function getValidMode(mode) {
   return int;
 }
 
-// a want that failed is thrown or rejected as its error code, a string
+// a failed want is thrown or rejected with its error code as a string
 function failed(thrown, syscall, path) {
   return typeof thrown === \"string\" ? systemError(thrown, syscall, path) : thrown;
 }
@@ -8690,8 +8690,8 @@ function realpathSyncNative(path, options) {
   }
 }
 
-// one question to the embedder, where node walks the path itself; a failure
-// is reported for the whole path with syscall realpath
+// node walks the path itself, but we ask the embedder once. A failure names the
+// whole path, with syscall realpath
 function realpathSync(path, options) {
   options = getOptions(options);
   if (typeof path !== \"string\" && !isURL(path) && !ArrayBuffer.isView(path)) {
@@ -8812,7 +8812,7 @@ function dateFromMs(ms) {
   return new Date(Math.round(Number(ms)));
 }
 
-// each is made on first read and then kept on the object
+// makes each field on first read and then keeps it on the object
 function lazyFields(names, make) {
   const fields = { __proto__: null };
   for (const name of names) {
@@ -8896,7 +8896,7 @@ Stats.prototype._checkModeProperty = function (property) {
   return (this.mode & S_IFMT) === property;
 };
 
-// `fields` is the eighteen numbers the Stat want is answered with
+// `fields` is the eighteen numbers the embedder answers a Stat want with
 function getStatsFromBinding(fields, bigint) {
   if (bigint) {
     const big = fields.map(BigInt);
@@ -8951,8 +8951,8 @@ class Dirent {
 
 // ---- stat and lstat
 
-// with throwIfNoEntry false, a path that is not there is undefined, not an
-// error; for stat that includes a path that runs through a file
+// with throwIfNoEntry false, a missing path gives undefined, not an error. For
+// stat, that includes a path that runs through a file
 function isNoEntry(thrown, follow) {
   return thrown === \"ENOENT\" || (follow && thrown === \"ENOTDIR\");
 }
@@ -9060,7 +9060,7 @@ function readlink(path, options, callback) {
 
 // ---- readdir
 
-// the Readdir want is answered with name, kind, name, kind, ...
+// the embedder answers a Readdir want with name, kind, name, kind, ...
 function listed(flat) {
   const names = [];
   const types = [];
@@ -9122,7 +9122,7 @@ async function leadsToDirectory(path) {
   }
 }
 
-// one directory's entries into the results, and its sub-directories onto the
+// adds one directory's entries to the results, and its sub-directories to the
 // list still to visit
 function collect(walk, i, names, types, options, isDirectoryLink) {
   const dir = walk.dirs[i];
@@ -9215,7 +9215,7 @@ function readdir(path, options, callback) {
 
 // ---- readFile
 
-// only reading is here, so only the flags that read
+// we only support reading, so only the flags that read work
 function checkReadFlag(flag) {
   if (flag === undefined || flag === null || flag === \"r\" || flag === \"rs\" || flag === \"sr\") {
     return;
@@ -9236,8 +9236,8 @@ function readTarget(path) {
   return getValidatedPath(path);
 }
 
-// node opens, then reads: a missing file fails at open, a directory at
-// read. Its sync read names no path in that error; the others do
+// node opens and then reads, so a missing file fails at open and a directory
+// fails at read. Only the sync read leaves the path out of that error
 function readFailed(thrown, path, namesPath) {
   if (thrown === \"EISDIR\") {
     return systemError(\"EISDIR\", \"read\", namesPath ? path : undefined);
@@ -9426,8 +9426,8 @@ function stream(fd, isTTY) {
   return out;
 }
 
-// node's process is an EventEmitter two steps up: its own prototype is an
-// object named process, and that one's prototype is EventEmitter's
+// node's process is an EventEmitter two steps up. Its prototype is an object
+// named process, whose own prototype is EventEmitter's
 function process() {}
 Object.setPrototypeOf(process.prototype, EventEmitter.prototype);
 
@@ -9465,8 +9465,8 @@ pub const os =
 
 const given = native.facts();
 
-// what node reports for os.constants on each platform; the numbers are part
-// of that platform's conventions, nothing here is read from a machine
+// what node reports for os.constants on each platform. The numbers are that
+// platform's conventions, so we don't read any of them from the machine
 const constantsFor = {
   linux: {
     __proto__: null,
@@ -9754,7 +9754,7 @@ function fact(value) {
   return read;
 }
 
-// with the encoding \"buffer\" the texts come as Buffers, which needs the
+// with the encoding \"buffer\" the strings come back as Buffers, which needs the
 // buffer module to have been passed
 function userInfo(options) {
   if (typeof options !== \"object\") options = null;
@@ -9896,7 +9896,7 @@ class TextEncoder {
     return new Uint8Array(native.encode(`${input}`));
   }
 
-  // read counts string positions as this engine indexes them
+  // `read` counts string positions the way this engine indexes strings
   #encodeInto(src, dest) {
     const whole = new Uint8Array(native.encode(src));
     if (whole.length <= dest.length) {
@@ -10182,7 +10182,7 @@ function getMark(name) {
   return ts;
 }
 
-// a detail is copied, which needs the embedder to have given structuredClone
+// copies a detail, which needs the embedder to have given structuredClone
 function cloneDetail(detail) {
   if (detail == null) return null;
   if (typeof globalThis.structuredClone !== \"function\") {
@@ -10720,7 +10720,8 @@ function invalidThis(type) {
   return typeError(\"ERR_INVALID_THIS\", `Value of \"this\" must be of type ${type}`);
 }
 
-// an error out of a listener never reaches the dispatcher; it is thrown later
+// an error thrown by a listener never reaches the dispatcher. We throw it again
+// on the next tick
 function emitUncaughtException(thrown) {
   loop.nextTick(() => {
     throw thrown;
@@ -10960,7 +10961,8 @@ Object.defineProperties(CustomEvent.prototype, {
   detail: enumerable,
 });
 
-// listeners held only weakly: kept alive by the object that asked for them
+// weakly held listeners, which stay alive only as long as the object that
+// asked for them
 let weakListenersState;
 let objectToWeakListenerMap;
 function weakListeners() {
@@ -11122,7 +11124,8 @@ class EventTarget {
       validateAbortSignal(signal, \"options.signal\");
       if (signal) {
         if (signal.aborted) return;
-        // not prevented by stopImmediatePropagation, and gone when this is
+        // stopImmediatePropagation can't block this abort listener, and it
+        // only lives as long as this target does
         signal.addEventListener(
           \"abort\",
           () => {
@@ -11332,7 +11335,8 @@ function makeEventHandler(handler) {
   return eventHandler;
 }
 
-// the `on<name>` attribute, one handler slot kept among the listeners
+// defines the `on<name>` attribute, which keeps one handler slot among the
+// listeners
 function defineEventHandler(emitter, name) {
   const propName = `on${name}`;
   function get() {
@@ -11347,7 +11351,7 @@ function defineEventHandler(emitter, name) {
     if (typeof this !== \"object\" || this === null || !(kHandlers in this)) {
       throw invalidThis(\"EventTarget\");
     }
-    // anything that is not callable or an object switches the handler off
+    // anything that isn't a function or an object switches the handler off
     if (
       typeof value !== \"function\" &&
       (typeof value !== \"object\" || value === null)
@@ -11410,7 +11414,8 @@ const dependantSignalsCleanupRegistry = new FinalizationRegistry(
     sourceSignal[kDependantSignals].delete(dependantSignalRef);
   },
 );
-// signals something still listens to, held here so they outlive their makers
+// holds signals that something still listens to, so they outlive whatever
+// made them
 const gcPersistentSignals = new Set();
 const sourceSignalsCleanupRegistry = new FinalizationRegistry(
   ({ sourceSignalRef, composedSignalRef }) => {
@@ -11612,8 +11617,8 @@ class AbortSignal extends EventTarget {
     if (hasTimeoutSignals && resultSignal[kSourceSignals].size > 0) {
       resultSignal[kTimeout] = true;
     }
-    // keeps the abort state even if the sources are collected before anyone
-    // looks; following holds them weakly, so unused signals can still go
+    // following the sources keeps the abort state even if they're collected
+    // before anyone looks. It holds them weakly, so unused signals can still go
     followCompositeSignal(resultSignal);
     return resultSignal;
   }
@@ -11757,7 +11762,7 @@ module.exports = {
   AbortSignal,
 };
 
-// for the events module; not an export
+// the events module uses these, but they aren't exported
 Object.defineProperty(module.exports, \"internals\", {
   value: {
     isEventTarget,
@@ -11961,7 +11966,7 @@ function slowCases(enc) {
   }
 }
 
-// what node's native slice functions do with their start and end
+// reads a slice's start or end the way node's native slice functions do
 function sliceIndex(value, fallback) {
   if (value === undefined) return fallback;
   const index = Math.trunc(Number(value)) || 0;
@@ -11988,8 +11993,8 @@ const hexSlice = slicer(\"hex\");
 const ucs2Slice = slicer(\"utf16le\");
 const utf8Slice = slicer(\"utf8\");
 
-// writes what fits of the string, never part of a character, and says how
-// many bytes that was
+// writes as much of the string as fits without splitting a character, and
+// returns how many bytes that was
 function writeBytes(buf, string, encoding, offset, length) {
   if (typeof string !== \"string\") {
     throw typeError(\"ERR_INVALID_ARG_TYPE\", \"argument must be a string\");
@@ -12000,7 +12005,7 @@ function writeBytes(buf, string, encoding, offset, length) {
   return bytes.length;
 }
 
-// node's native write functions: base64, base64url, hex and ucs2
+// node's native write functions for base64, base64url, hex and ucs2
 function writer(encoding) {
   return function write(buf, string, offset, length) {
     if (typeof string !== \"string\") {
@@ -12019,7 +12024,7 @@ const base64urlWrite = writer(\"base64url\");
 const hexWrite = writer(\"hex\");
 const ucs2Write = writer(\"utf16le\");
 
-// lib/internal/buffer.js: ascii, latin1 and utf8
+// the ascii, latin1 and utf8 writers from lib/internal/buffer.js
 function checkedWriter(encoding) {
   return function write(buf, string, offset = 0, length) {
     offset = Number(offset);
@@ -12102,7 +12107,8 @@ function _copy(source, target, targetStart, sourceStart, nb) {
   return nb;
 }
 
-// -1 for a value with no bytes, -2 for a range outside the buffer
+// returns -1 when the value has no bytes and -2 when the range is outside the
+// buffer
 function bindingFill(buf, value, offset, end, encoding) {
   if (offset > end || end > typedArrayByteLength.call(buf)) return -2;
   const fillLength = end - offset;
@@ -12565,8 +12571,8 @@ function base64ByteLength(str, bytes) {
   return (bytes * 3) >>> 2;
 }
 
-// a string as the bytes to look for; none of them are utf-16 text, where a
-// match has to sit on a unit edge
+// searches for a string's encoded bytes. We don't use it for utf-16, where a
+// match has to start on a code unit boundary
 function searchEncoded(encoding) {
   return (buf, val, byteOffset, dir, end) =>
     indexOfBuffer(
@@ -12796,7 +12802,7 @@ Buffer.prototype.equals = function equals(otherBuffer) {
 
 let INSPECT_MAX_BYTES = 50;
 
-// own properties beyond the bytes are not listed, that needs util.inspect
+// doesn't list own properties beyond the bytes, because that needs util.inspect
 Buffer.prototype[customInspectSymbol] = function inspect(recurseTimes, ctx) {
   const max = INSPECT_MAX_BYTES;
   const actualMax = Math.min(max, this.length);
@@ -13139,7 +13145,7 @@ Buffer.prototype.swap64 = function swap64() {
 
 Buffer.prototype.toLocaleString = Buffer.prototype.toString;
 
-// node's lib/internal/buffer.js: reading and writing numbers
+// reading and writing numbers, from node's lib/internal/buffer.js
 
 const float32Array = new Float32Array(1);
 const uInt8Float32Array = new Uint8Array(float32Array.buffer);
@@ -15536,9 +15542,9 @@ module.exports = require(\"node:path\").win32;
 pub const net =
   "\"use strict\";
 
-// the parts of node's net module that open nothing: isIP and friends,
-// SocketAddress and BlockList. The address parsing and printing is libuv's
-// inet_pton and inet_ntop; the matching rules are node's own
+// the parts of node's net module that don't open anything: isIP and friends,
+// SocketAddress and BlockList. Addresses are parsed and printed as libuv's
+// inet_pton and inet_ntop, and the matching rules are node's own
 
 const {
   error,
@@ -15590,7 +15596,8 @@ function isIP(s) {
 const AF_INET = 4;
 const AF_INET6 = 6;
 
-// four bytes, or undefined: no leading zeros, exactly four parts
+// returns four bytes, or undefined unless the text is exactly four parts with
+// no leading zeros
 function parseIPv4(text) {
   const bytes = [0];
   let sawDigit = false;
@@ -15626,7 +15633,8 @@ function hexValue(ch) {
   return -1;
 }
 
-// sixteen bytes, or undefined; anything from a '%' on is a zone and ignored
+// returns sixteen bytes, or undefined. We ignore the zone, which is anything
+// from a '%' on
 function parseIPv6(text) {
   const zone = text.indexOf(\"%\");
   if (zone !== -1) text = text.slice(0, zone);
@@ -15762,7 +15770,7 @@ function sameBytes(a, b, count, aFrom = 0, bFrom = 0) {
   return true;
 }
 
-// -1, 0 or 1 over `count` bytes
+// compares `count` bytes and returns -1, 0 or 1
 function orderBytes(a, b, count, aFrom = 0, bFrom = 0) {
   for (let i = 0; i < count; i++) {
     const d = a[aFrom + i] - b[bFrom + i];
@@ -15786,7 +15794,8 @@ function isMatch(a, b) {
   return isMapped(v6.bytes) && sameBytes(v6.bytes, v4.bytes, 4, 12, 0);
 }
 
-// undefined when an ipv4 address meets an ipv6 one that does not wrap one
+// returns undefined when comparing an ipv4 address with an ipv6 one that
+// doesn't wrap an ipv4 address
 function compare(a, b) {
   if (a.family === b.family) {
     return orderBytes(a.bytes, b.bytes, a.bytes.length);
@@ -15932,7 +15941,7 @@ class SocketAddress {
     };
   }
 
-  // node reads the input as a url, which is not here yet
+  // node reads the input as a url, which we can't do here yet
   static parse(input) {
     validateString(input, \"input\");
     throw error(
@@ -15992,7 +16001,7 @@ const kHandle = Symbol(\"kHandle\");
 
 class BlockList {
   constructor() {
-    // newest first in each: addresses by key, then subnets, then ranges
+    // addresses by key, then subnets, then ranges, each newest first
     this[kHandle] = { addresses: new Map(), subnets: [], ranges: [] };
   }
 
@@ -16275,8 +16284,8 @@ module.exports = { BlockList, SocketAddress, isIP, isIPv4, isIPv6 };
 pub const querystring_internal =
   "\"use strict\";
 
-// node's lib/internal/querystring.js. One addition: a character beyond
-// U+FFFF arrives as one code point here, not as a surrogate pair
+// node's lib/internal/querystring.js, with one addition. A character beyond
+// U+FFFF arrives here as one code point, not as a surrogate pair
 
 const { uriError } = require(\"spark:errors\");
 
@@ -16860,9 +16869,9 @@ function decodeStr(s, decoder) {
 pub const url =
   "\"use strict\";
 
-// node's lib/internal/url.js and lib/url.js over a native parser. Not here:
-// URLPattern, URL.createObjectURL and URL.revokeObjectURL, and the warning
-// url.parse gives
+// node's lib/internal/url.js and lib/url.js over a native parser. We don't
+// have URLPattern, URL.createObjectURL or URL.revokeObjectURL, and url.parse
+// gives no warning
 
 const {
   typeError,
@@ -16987,7 +16996,7 @@ function percentDecode(input) {
   return length === j ? output : output.subarray(0, j);
 }
 
-// called with `new` in the code below, as node's error classes are
+// the code below calls these with `new`, like node's error classes
 function ERR_ARG_NOT_ITERABLE(name) {
   return typeError(\"ERR_ARG_NOT_ITERABLE\", `${name} must be iterable`);
 }
@@ -17071,7 +17080,7 @@ function ERR_MISSING_ARGS(...args) {
 const kHostnameAction = 2;
 const kPathnameAction = 6;
 
-// what a file path has escaped before it becomes a url path
+// escapes what a file path needs escaped before it becomes a url path
 function escapeUnsafeChars(text, windows) {
   let out = \"\";
   for (const ch of text) {
@@ -17128,8 +17137,8 @@ function escapeUnsafeChars(text, windows) {
   return out;
 }
 
-// node's native url binding, over the parser. A parse or an update leaves the
-// positions of the url's parts in urlComponents
+// node's native url binding, built on the parser. A parse or an update leaves
+// the positions of the url's parts in urlComponents
 const bindingUrl = {
   urlComponents: [0, 0, 0, 0, 0, 0, 0, 0, 1],
 
@@ -17170,7 +17179,8 @@ const bindingUrl = {
     return this.publish(result);
   },
 
-  // a url as text with parts left out, and the host as unicode on request
+  // writes a url as text with the chosen parts left out, and the host as
+  // unicode if asked
   format(href, fragment, unicode, search, auth) {
     let result = native.parse(href, undefined);
     const drop = (action) => {
@@ -19303,8 +19313,8 @@ module.exports = {
 pub const events =
   "\"use strict\";
 
-// node's lib/events.js with the three internal files it pulls in. What it
-// asks of the rest of node is answered by `shims` below
+// node's lib/events.js with the three internal files it pulls in. The `shims`
+// below answer what it asks of the rest of node
 
 const errors = require(\"spark:errors\");
 const loop = require(\"spark:loop\");
@@ -19313,7 +19323,7 @@ const AsyncIteratorPrototype = Object.getPrototypeOf(
   Object.getPrototypeOf(async function* () {}).prototype,
 );
 
-// a module the embedder may not have passed
+// loads a module the embedder may not have passed, or gives undefined
 function optional(specifier) {
   try {
     return require(specifier);
@@ -19349,7 +19359,7 @@ function identicalSequenceRange(a, b) {
 }
 
 const shims = {
-  // what the files see as `process`
+  // the `process` the files see
   process: () => ({
     nextTick(callback, ...args) {
       loop.nextTick(() => callback(...args));
@@ -19368,7 +19378,7 @@ const shims = {
     inspect: (value, options) => errors.inspect(value, options),
     identicalSequenceRange,
   }),
-  // without the dom events module there are no event targets to meet
+  // without the dom events module there are no event targets
   \"internal/event_target\": () => {
     const found = optional(\"spark:dom_events\");
     if (found === undefined) {
@@ -20493,7 +20503,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -20518,8 +20528,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -20527,8 +20537,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||
@@ -20547,8 +20557,8 @@ module.exports = load(\"events\");
 pub const string_decoder =
   "\"use strict\";
 
-// node's lib/string_decoder.js. The decoding it leaves to c++ is written out
-// below, after src/string_decoder.cc
+// node's lib/string_decoder.js. Node leaves the decoding to c++, so we write it
+// out below, following src/string_decoder.cc
 
 const errors = require(\"spark:errors\");
 const { Buffer } = require(\"node:buffer\");
@@ -20612,8 +20622,8 @@ function slowCases(enc) {
   }
 }
 
-// the decoder's state is seven bytes: up to four of a character cut short,
-// how many more it needs, how many are held, and the encoding
+// the decoder's state is seven bytes. They hold up to four bytes of a cut-off
+// character, how many more it needs, how many are held, and the encoding
 const kIncompleteCharactersStart = 0;
 const kIncompleteCharactersEnd = 4;
 const kMissingBytes = 4;
@@ -20647,12 +20657,13 @@ function decode(state, view) {
   let nread = data.length;
   let prepend;
 
-  // bytes owed to a character the last chunk cut short
+  // finish a character the last chunk cut off
   if (state[kMissingBytes] > 0) {
     if (encoding === \"utf8\") {
       for (let i = 0; i < nread && i < state[kMissingBytes]; ++i) {
         if ((data[start + i] & 0xc0) !== 0x80) {
-          // not a continuation byte: the cut character ends here, unfinished
+          // this isn't a continuation byte, so the cut-off character ends here
+          // unfinished
           state[kMissingBytes] = 0;
           hold(state, data, start, i);
           state[kBufferedBytes] += i;
@@ -20676,7 +20687,7 @@ function decode(state, view) {
 
   if (nread === 0) return prepend ?? \"\";
 
-  // a character this chunk cuts short is held back for the next one
+  // hold back a character this chunk cuts off for the next chunk
   if (encoding === \"utf8\" && data[start + nread - 1] & 0x80) {
     for (let i = nread - 1; ; --i) {
       state[kBufferedBytes]++;
@@ -20857,7 +20868,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -20882,8 +20893,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -20891,8 +20902,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||
@@ -20911,7 +20922,7 @@ module.exports = load(\"string_decoder\");
 pub const util =
   "\"use strict\";
 
-// node's lib/util.js and the files only it uses: deep equality, parseArgs,
+// node's lib/util.js and the files only it uses, for deep equality, parseArgs,
 // MIMEType, debounce, throttle and diff. inspect, format, the type checks,
 // promisify and deprecate come from the shared internals
 
@@ -20938,7 +20949,7 @@ const shims = {
   primordials: internal.primordials,
   internalBinding: internal.internalBinding,
   fallback: internal.find,
-  // until the stream module is here nothing is a stream
+  // nothing is a stream until the stream module is here
   \"internal/streams/utils\": () => ({
     isReadableStream: () => false,
     isWritableStream: () => false,
@@ -24213,7 +24224,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -24238,8 +24249,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -24247,8 +24258,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||
@@ -24267,9 +24278,9 @@ module.exports = load(\"util\");
 pub const stream =
   "\"use strict\";
 
-// node's lib/stream.js and lib/internal/streams/*: Readable, Writable,
-// Duplex, Transform, PassThrough, pipeline, finished, compose and the
-// promise and consumer helpers
+// node's lib/stream.js and lib/internal/streams/*, which give Readable,
+// Writable, Duplex, Transform, PassThrough, pipeline, finished, compose and
+// the promise and consumer helpers
 
 const internal = require(\"spark:internal\");
 
@@ -24331,13 +24342,13 @@ const shims = {
   \"internal/abort_controller\": () => optional(\"spark:dom_events\") ?? {},
   \"internal/event_target\": () => optional(\"spark:dom_events\")?.internals ?? {},
   \"internal/encoding\": () => optional(\"spark:encoding\") ?? {},
-  // there is no Blob yet; this holds bytes for the consumers that go through one
+  // there's no Blob yet, so this holds bytes for the consumers that use one
   \"internal/blob\": () => ({ Blob: Bytes, isBlob: () => false }),
   \"internal/webstreams/adapters\": () => {
     require(\"node:stream/web\");
     return internal.find(\"internal/webstreams/adapters\");
   },
-  // no hooks, and no context to carry into a stream's callbacks
+  // there are no hooks, and no context to carry into a stream's callbacks
   \"internal/async_hooks\": () => ({ enabledHooksExist: () => false }),
   \"internal/async_context_frame\": () => ({ current: () => undefined }),
 };
@@ -31059,7 +31070,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -31084,8 +31095,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -31093,8 +31104,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||
@@ -31119,7 +31130,7 @@ module.exports = require(\"node:stream\").promises;
 pub const stream_consumers =
   "\"use strict\";
 
-// the stream module holds the file; loading it makes it findable
+// the stream module holds this file, so we load it to make the file findable
 require(\"node:stream\");
 const consumers = require(\"spark:internal\").find(\"stream/consumers\");
 
@@ -31136,9 +31147,9 @@ module.exports = {
 pub const structured_clone =
   "\"use strict\";
 
-// the html structured clone algorithm, as node's global structuredClone
-// behaves: a deep copy that keeps shared and circular references, and
-// refuses what cannot be copied with a DataCloneError
+// the html structured clone algorithm, behaving as node's global
+// structuredClone does. It makes a deep copy that keeps shared and circular
+// references, and throws a DataCloneError for anything it can't copy
 
 const { kind, tracksLength } = native;
 const { typeError, isUncloneable } = require(\"spark:errors\");
@@ -31164,7 +31175,7 @@ const typedArrays = {
   BigInt64Array,
   BigUint64Array,
 };
-// the only names an error keeps; any other becomes a plain Error
+// the only error names a clone keeps. Any other becomes a plain Error
 const errors = {
   __proto__: null,
   Error,
@@ -31189,7 +31200,7 @@ function refused(message) {
   return new DOMException(message, \"DataCloneError\");
 }
 
-// how v8 names a value it will not clone
+// describes a value we won't clone, in the words v8 uses
 function described(value, itsKind) {
   if (typeof value === \"symbol\") return String(value);
   if (typeof value === \"function\") {
@@ -31261,7 +31272,8 @@ function clonedError(value, memory) {
   return copy;
 }
 
-// own enumerable string keys, read once each, become plain data properties
+// reads each own enumerable string key once and copies it as a plain data
+// property
 function copyProperties(from, to, memory) {
   for (const key of Object.keys(from)) {
     if (!Object.hasOwn(from, key)) continue;
@@ -31318,7 +31330,7 @@ function cloned(value, memory) {
       copy = clonedBuffer(value);
       break;
     case \"shared_array_buffer\":
-      // the same memory either way; there is no second handle to make
+      // both sides share the same memory, so there's no second handle to make
       copy = value;
       break;
     case \"typed_array\": {
@@ -31423,8 +31435,8 @@ function structuredClone(value, options) {
   }
   const buffers = transferList(options);
   const copy = cloned(value, new Map());
-  // a transferred buffer's bytes were copied above; only now, with the whole
-  // clone made, does the original give them up
+  // we copied the transferred buffers' bytes above. The originals only give
+  // them up now that the whole clone is made
   for (const buffer of buffers) buffer.transfer(0);
   return copy;
 }
@@ -31435,8 +31447,8 @@ module.exports = { structuredClone };
 pub const zlib =
   "\"use strict\";
 
-// node's lib/zlib.js. The handles it drives, c++ in node, are written out
-// below over natives that keep nothing between calls
+// node's lib/zlib.js. The handles it drives are c++ in node, so we write them
+// out below over natives that keep nothing between calls
 
 const internal = require(\"spark:internal\");
 const loop = require(\"spark:loop\");
@@ -31449,17 +31461,18 @@ const constants = internal.internalBinding(\"constants\").zlib;
 const owner_symbol = Symbol(\"owner_symbol\");
 const EMPTY = new Uint8Array(0);
 
-// one compression or decompression in progress. Node's javascript hands it
-// input and a buffer for output; what does not fit waits for the next call
+// one compression or decompression in progress. Node's javascript gives it
+// input and a buffer for output, and what doesn't fit waits for the next call
 class Handle {
   #pending = EMPTY;
-  // the last call filled its output buffer, so the next one only collects
+  // set when the last call filled its output buffer, so the next one only
+  // collects
   #draining = false;
   writeState;
   processCallback;
 
-  // every byte of new output this write gives, or undefined after reporting
-  // an error through onerror
+  // returns every byte of new output from this write, or undefined after
+  // reporting an error through onerror
   produce(chunk, flush) {
     throw new Error(\"not a real handle\");
   }
@@ -31516,8 +31529,8 @@ const formats = {
   [constants.UNZIP]: \"either\",
 };
 
-// zlib gives a reason with each failure; the natives give only its code, so
-// the reason is worked out from where the data went wrong
+// zlib gives a reason with each failure, but the natives only give the code.
+// So we work out the reason from where the data went wrong
 function reasonFor(code, format, input) {
   if (code === \"trailing\") return [\"incorrect header check\", constants.Z_DATA_ERROR, \"Z_DATA_ERROR\"];
   if (code === \"Z_NEED_DICT\") return [\"Missing dictionary\", constants.Z_NEED_DICT, code];
@@ -31531,7 +31544,7 @@ function reasonFor(code, format, input) {
   else if (format === \"deflate\" && zlib) first = 2;
   else if (format === \"either\" && (gzip || zlib)) first = gzip ? 10 : 2;
   else return [\"incorrect header check\", constants.Z_DATA_ERROR, code];
-  // the kind of the first block is in its first byte
+  // the first block's type is in its first byte
   const message = [
     \"invalid stored block lengths\",
     \"invalid distance too far back\",
@@ -31550,9 +31563,9 @@ class Zlib extends Handle {
   #memLevel;
   #strategy;
   #dictionary;
-  // compressing: every write so far as bytes, flush, bytes, flush, ...
+  // when compressing, every write so far as bytes, flush, bytes, flush, ...
   #writes = [];
-  // decompressing: every byte given so far
+  // when decompressing, every byte given so far
   #input = EMPTY;
   #emitted = 0;
 
@@ -32863,7 +32876,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -32888,8 +32901,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -32897,8 +32910,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||
@@ -32931,7 +32944,7 @@ function isatty(fd) {
   return Number.isInteger(fd) && fd >= 0 && fd <= 2147483647 && terminals.includes(fd);
 }
 
-// a terminal read from or written to as a stream; nothing here can open one
+// a terminal used as a stream. Nothing here can open one
 function ReadStream() {
   throw new codes.ERR_METHOD_NOT_IMPLEMENTED(\"tty.ReadStream\");
 }
@@ -32971,7 +32984,7 @@ function getCACertificates(type = \"default\") {
   }
 }
 
-// connections are not here yet; each of these says so when called
+// we can't make connections yet, so each of these says so when called
 function missing(name) {
   return function () {
     throw new codes.ERR_METHOD_NOT_IMPLEMENTED(`tls.${name}`);
@@ -33000,8 +33013,8 @@ module.exports = {
 pub const web_streams =
   "\"use strict\";
 
-// node's web streams: lib/stream/web.js, lib/internal/webstreams/* and the
-// webidl helpers they use
+// node's web streams, from lib/stream/web.js, lib/internal/webstreams/* and
+// the webidl helpers they use
 
 const internal = require(\"spark:internal\");
 const { markUncloneable } = require(\"spark:errors\");
@@ -33028,7 +33041,7 @@ const shims = {
     if (name === \"messaging\") {
       return { DOMException: require(\"spark:domexception\").DOMException };
     }
-    // node's own socket streams, which nothing here has
+    // stand-ins for node's socket streams, which we don't have
     if (name === \"stream_wrap\") {
       return {
         WriteWrap: class WriteWrap {},
@@ -33050,12 +33063,12 @@ const shims = {
   \"internal/events/abort_listener\": () => ({
     addAbortListener: require(\"node:events\").addAbortListener,
   }),
-  // the stream module holds this file; loading it makes it findable
+  // the stream module holds this file, so we load it to make the file findable
   \"internal/streams/utils\": () => {
     require(\"node:stream\");
     return internal.find(\"internal/streams/utils\");
   },
-  // a stream cannot be handed to another thread: there are none
+  // there are no other threads, so a stream can't be handed to one
   \"internal/worker/io\": () => ({
     MessageChannel: class MessageChannel {
       constructor() {
@@ -41441,7 +41454,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -41466,8 +41479,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -41475,8 +41488,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||
@@ -41495,11 +41508,11 @@ module.exports = load(\"stream/web\");
 pub const blob =
   "\"use strict\";
 
-// node's Blob and File: lib/internal/blob.js and lib/internal/file.js. The
-// store they keep their bytes in, c++ in node, is written out below
+// node's Blob and File, from lib/internal/blob.js and lib/internal/file.js.
+// Node keeps their bytes in a c++ store, which we write out below
 
 const internal = require(\"spark:internal\");
-// the web streams hold the webidl helpers these files use
+// these files use the webidl helpers that come with the web streams
 require(\"node:stream/web\");
 
 internal.addLoader(shared, own);
@@ -41521,8 +41534,8 @@ function joined(parts) {
   return all;
 }
 
-// a blob's bytes, held whole. Node reads them out through a reader that
-// gives a piece and then says it is done
+// holds a blob's bytes in one piece. Node reads them through a reader that
+// gives one piece and then says it's done
 class Stored {
   constructor(bytes) {
     this.bytes = bytes;
@@ -42337,7 +42350,7 @@ const files = {
 
     module.exports = { Blob, File };
 
-    // for fetch, which sends a blob's bytes without waiting on a stream
+    // fetch uses this to send a blob's bytes without waiting on a stream
     Object.defineProperty(module.exports, \"bytesOf\", {
       value: (blob) => blob[kHandle].bytes,
       enumerable: false,
@@ -42347,7 +42360,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -42372,8 +42385,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -42381,8 +42394,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||
@@ -42401,11 +42414,11 @@ module.exports = load(\"blob\");
 pub const fetch =
   "\"use strict\";
 
-// fetch, Headers, Request and Response, written to the fetch standard and
-// worded the way node words its errors. The network is the embedder's: one
-// want for a response's status and headers, then one for each piece of its
-// body, so a body that never ends (a stream of events) costs nothing extra.
-// Redirects, aborting and unpacking a compressed body are done here
+// fetch, Headers, Request and Response, written to the fetch standard with
+// errors worded the way node words them. The embedder does the networking. We
+// send it one want for a response's status and headers, then one for each
+// piece of the body, so a body that never ends (a stream of events) costs
+// nothing extra. Redirects, aborting and decompressing happen here
 
 const { AbortController } = require(\"spark:dom_events\");
 const { TextEncoder, TextDecoder } = require(\"spark:encoding\");
@@ -42421,7 +42434,7 @@ const {
 } = require(\"node:stream/web\");
 
 const kInspect = Symbol.for(\"nodejs.util.inspect.custom\");
-// passed to a constructor to make an object that is filled in afterwards
+// pass this to a constructor to make an object we fill in afterwards
 const kMake = Symbol(\"make\");
 const encoder = new TextEncoder();
 
@@ -42453,7 +42466,7 @@ function byteString(value) {
 
 const TOKEN = /^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$/;
 
-// lists these names when the object's keys are asked for, in this order
+// makes these names enumerable, listed in this order
 function enumerable(prototype, names) {
   for (const name of names) {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
@@ -42474,7 +42487,7 @@ function validValue(value) {
 }
 
 class Headers {
-  // [lower-case name, value] in the order they were added
+  // [lower-case name, value] pairs in the order they were added
   #list = [];
   #guard = \"none\";
 
@@ -42509,7 +42522,7 @@ class Headers {
         }
         return;
       }
-      // every key the object has itself, listed or not, as node takes them
+      // like node, take every own key, enumerable or not
       for (const key of Reflect.ownKeys(init)) {
         if (typeof key === \"symbol\") {
           throw new TypeError(
@@ -42602,7 +42615,8 @@ class Headers {
     }
   }
 
-  // by name, a name's values joined with \", \"; set-cookie is never joined
+  // sorted by name, with each name's values joined by \", \". We never join
+  // set-cookie
   #sorted() {
     const names = [...new Set(this.#list.map((entry) => entry[0]))].sort();
     const pairs = [];
@@ -42712,13 +42726,13 @@ function iteratorOver(items) {
 
 // ---- FormData
 
-// text with any half of a surrogate pair replaced, as the web's strings are
+// replaces any lone surrogate, as the web does with its strings
 function scalar(value) {
   return `${value}`.toWellFormed();
 }
 
 class FormData {
-  // [name, text or File] in the order they were added
+  // [name, text or File] pairs in the order they were added
   #entries = [];
 
   constructor(form = undefined) {
@@ -42882,8 +42896,8 @@ function formIteratorOver(items) {
   return iterator;
 }
 
-// a form as the bytes of a multipart/form-data body, and the content type
-// that names the line between its parts
+// encodes a form as a multipart/form-data body, with the content type that
+// names the boundary between its parts
 function multipart(form) {
   const boundary = `----formdata-undici-0${`${Math.floor(Math.random() * 1e11)}`.padStart(11, \"0\")}`;
   const prefix = `--${boundary}\\r\\nContent-Disposition: form-data`;
@@ -42932,7 +42946,7 @@ function indexOfBytes(bytes, needle, from) {
   return -1;
 }
 
-// the form a body holds, going by its content type
+// parses a body as a form, going by its content type
 function parsedForm(bytes, contentType) {
   const failed = () => new TypeError(\"Failed to parse body as FormData.\");
   const type = (contentType ?? \"\").trim();
@@ -42956,7 +42970,7 @@ function parsedForm(bytes, contentType) {
   if (at === -1) throw failed();
   for (;;) {
     at += line.length;
-    // the last line between parts ends with two dashes
+    // the last boundary ends with two dashes
     if (bytes[at] === 0x2d && bytes[at + 1] === 0x2d) break;
     if (bytes[at] !== 0x0d || bytes[at + 1] !== 0x0a) throw failed();
     at += 2;
@@ -43005,8 +43019,8 @@ function streamOf(bytes) {
   });
 }
 
-// what a request or response is given as its body: the stream to read it
-// from, the bytes when they are known up front, and the content type it implies
+// turns what a request or response is given as its body into the stream to
+// read it from, the bytes if we know them up front, and the implied content type
 function extractBody(object) {
   if (object instanceof ReadableStream) {
     if (isDisturbed(object) || object.locked) {
@@ -43083,8 +43097,8 @@ function textStream(body) {
   return stream.pipeThrough(new TextDecoderStream());
 }
 
-// a content type as the web writes one out: the kind in lower case, then each
-// parameter after a semicolon with no space; nothing if it is not a type
+// writes a content type out as the web does: the type in lower case, then
+// each parameter after a semicolon with no space. Gives \"\" if it isn't a type
 function mimeOf(contentType) {
   if (contentType === null || contentType === undefined) return \"\";
   const [essence, ...parameters] = contentType.split(\";\");
@@ -43532,7 +43546,7 @@ class Request {
       );
     }
 
-    // a signal of its own, which follows the one given
+    // the request gets its own signal, which follows the one given
     const controller = new AbortController();
     this.#signal = controller.signal;
     if (signal != null) {
@@ -43575,7 +43589,7 @@ class Request {
           \"Cannot construct a Request with a Request object that has already been used.\",
         );
       }
-      // the body moves to this request; the one it came from is left used
+      // the body moves to this request and leaves the old one used
       const passed = inputBody.stream.pipeThrough(new TransformStream());
       this.#body = { stream: passed, source: inputBody.source, type: inputBody.type };
     }
@@ -43788,7 +43802,7 @@ enumerable(Request.prototype, [
   \"bytes\",
   \"textStream\",
 ]);
-// node has this name on the prototype, holding nothing
+// node has this name on the prototype, set to undefined
 Object.defineProperty(Request.prototype, \"attribute\", {
   value: undefined,
   writable: false,
@@ -43813,7 +43827,7 @@ function failed(message, properties) {
   return new TypeError(\"fetch failed\", { cause });
 }
 
-// a `data:` url is answered here; nothing is asked of the embedder
+// answers a `data:` url here without asking the embedder
 function dataResponse(url) {
   const text = url.href.slice(5);
   const comma = text.indexOf(\",\");
@@ -43832,12 +43846,12 @@ function dataResponse(url) {
   return Response.from(200, \"OK\", [[\"content-type\", type]], streamOf(bytes), [url.href]);
 }
 
-// tells the embedder a body will be read no further; nothing waits on it
+// tells the embedder we won't read any more of a body, without waiting for it
 function drop(handle) {
   native.dropBody(handle).then(undefined, () => {});
 }
 
-// the body of a response, pulled from the embedder one piece at a time
+// pulls a response's body from the embedder one piece at a time
 function networkBody(handle, signal) {
   let finished = false;
   let cancel;
@@ -43855,8 +43869,8 @@ function networkBody(handle, signal) {
       };
       signal.addEventListener(\"abort\", cancel, { once: true });
     },
-    // an empty piece is not the end, and enqueuing nothing would leave a
-    // reader waiting with no pull to come, so ask again
+    // an empty piece isn't the end. Enqueuing nothing would leave a reader
+    // waiting for a pull that never comes, so we ask again
     async pull(controller) {
       for (;;) {
         let piece;
@@ -43899,7 +43913,7 @@ function networkBody(handle, signal) {
   return stream;
 }
 
-// a body sent packed is handed over unpacked, as the headers say it was packed
+// decompresses a body as its content-encoding headers say
 function unpacked(stream, pairs) {
   const packings = pairs
     .filter((pair) => pair[0].toLowerCase() === \"content-encoding\")
@@ -43912,7 +43926,7 @@ function unpacked(stream, pairs) {
     } else if (packing === \"deflate\") {
       stream = stream.pipeThrough(new DecompressionStream(\"deflate\"));
     } else {
-      // a packing not known here: the bytes are passed on as they came
+      // we don't know this encoding, so pass the bytes on as they are
       return stream;
     }
   }
@@ -44048,8 +44062,8 @@ module.exports = { fetch, Headers, Request, Response, FormData };
 pub const crypto =
   "\"use strict\";
 
-// node's digests and random bytes: lib/internal/crypto/hash.js, random.js and
-// util.js, with the handles they drive, c++ in node, written out below
+// node's digests and random bytes, from lib/internal/crypto/hash.js, random.js
+// and util.js. The handles they drive are c++ in node, so we write them out below
 
 const internal = require(\"spark:internal\");
 const loop = require(\"spark:loop\");
@@ -44071,7 +44085,7 @@ function missing(name) {
   };
 }
 
-// an encoding node does not know is read as utf8, as node's own code reads it
+// like node, read a string as utf8 if node doesn't know its encoding
 function bytesOf(data, encoding) {
   if (typeof data === \"string\") {
     return Buffer.from(data, Buffer.isEncoding(encoding) ? encoding : \"utf8\");
@@ -44091,14 +44105,14 @@ function joined(chunks) {
   return all;
 }
 
-// and one it does not know for the digest gives the bytes
+// gives the bytes as a Buffer if node doesn't know the digest's encoding
 function encoded(bytes, encoding) {
   const buffer = Buffer.from(bytes);
   return Buffer.isEncoding(encoding) ? buffer.toString(encoding) : buffer;
 }
 
-// a digest in progress. It keeps what it was given and works the digest out
-// at the end, in one call that leaves nothing behind
+// a digest in progress. It keeps every chunk it's given and works out the
+// digest at the end, in one call that leaves nothing behind
 class Hash {
   #name;
   #length;
@@ -44247,7 +44261,7 @@ const shims = {
       return Buffer.from(buffer, byteOffset, length);
     },
   }),
-  // a key is text or bytes here; node's key objects are not
+  // a key here is text or bytes, because we don't have node's key objects
   \"internal/crypto/keys\": () => ({
     prepareSecretKey(key, encoding) {
       const { codes } = internal.load(\"internal/errors\");
@@ -46617,7 +46631,7 @@ const files = {
       if (isArrayBufferView(value)) {
         return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       }
-      // worded as node's c++ words it, which does not say what it was given
+      // matches the wording of node's c++ error, which doesn't say what it got
       const error = new TypeError(
         `The \"${name}\" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.`,
       );
@@ -46625,7 +46639,7 @@ const files = {
       throw error;
     }
 
-    // every byte is looked at, whatever the earlier ones were
+    // compares every byte, even after a difference, so timing gives nothing away
     function timingSafeEqual(buf1, buf2) {
       const left = bytesOf(buf1, \"buf1\");
       const right = bytesOf(buf2, \"buf2\");
@@ -46650,7 +46664,7 @@ const files = {
       return fillRandomValues(array);
     }
 
-    // the web's digest names, and node's for the same thing
+    // maps the web's digest names to node's
     const webDigests = {
       __proto__: null,
       \"SHA-1\": \"sha1\",
@@ -46727,7 +46741,7 @@ const files = {
       getRandomValues,
       webcrypto,
       subtle,
-      // the web's global, which is the same object as webcrypto
+      // the web's crypto global is the same object as webcrypto
       crypto: webcrypto,
     };
 
@@ -46742,7 +46756,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -46767,8 +46781,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error(\"no module \" + name + \" in this port\");
@@ -46776,8 +46790,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

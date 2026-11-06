@@ -244,7 +244,7 @@ fn resolve_calendar_month_day(
           }
         }
       })
-      // no iso reference year: reject throws, constrain uses non-leap month
+      // with no iso reference year, reject throws and constrain uses the non-leap month
       use mc <- result.try(
         case
           { cal == temporal_calendar.Chinese || cal == temporal_calendar.Dangi }

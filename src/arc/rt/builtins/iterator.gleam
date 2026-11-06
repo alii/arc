@@ -662,7 +662,7 @@ fn windows(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 
 const max_chunk_size = 4_294_967_295
 
-// no coercion, non-numbers are a typeerror
+// doesn't coerce, so non-numbers are a typeerror
 fn chunk_size(st: Agent, this: JsVal, arg: JsVal, name: String) -> Int {
   case integral_number(arg) {
     None ->
@@ -1254,7 +1254,7 @@ fn includes(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   includes_loop(st, rec, first_arg_or_undefined(args), skip)
 }
 
-// no coercion, only integral numbers and infinities pass
+// doesn't coerce, so only integral numbers and infinities pass
 fn skipped_elements(st: Agent, this: JsVal, arg: JsVal) -> Skip {
   let negative = fn() {
     close_throw_range(st, this, "includes skippedElements is negative")
@@ -1349,7 +1349,7 @@ fn join_part(
   }
 }
 
-// return() result is ignored, a missing return is fine
+// ignores the return() result, and a missing return is fine
 fn dispose(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case iter_protocol.call_return(st, this) {
     #(Ok(_returned), st) -> #(mk_undefined(), st)
@@ -1500,7 +1500,7 @@ fn require_object_of(
   }
 }
 
-// next() threw: iterator already broken, no close
+// next() threw, so the iterator is already broken and isn't closed
 fn after_step(
   st: Agent,
   helper_h: Handle,

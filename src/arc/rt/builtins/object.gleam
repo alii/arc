@@ -399,7 +399,7 @@ fn own_string_keys(
   }
 }
 
-// plain named data only, see arc_rt_obj_ffi
+// holds plain named data only, see arc_rt_obj_ffi
 type PlainPairs {
   PlainPairs(List(#(String, JsVal)))
   Miss

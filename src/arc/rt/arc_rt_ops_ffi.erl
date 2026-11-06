@@ -1,5 +1,5 @@
 %% kernels answer miss when the general path is needed
-%% float ops raise badarith past 1.8e308, caught as infinity
+%% float ops raise badarith past 1.8e308, which we catch and turn into infinity
 -module(arc_rt_ops_ffi).
 -export([add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
          lt/2, eq/2, neq/2, classified_binop/3, pure_binop/3,

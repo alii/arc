@@ -1,8 +1,8 @@
 "use strict";
 
-// the html structured clone algorithm, as node's global structuredClone
-// behaves: a deep copy that keeps shared and circular references, and
-// refuses what cannot be copied with a DataCloneError
+// the html structured clone algorithm, behaving as node's global
+// structuredClone does. It makes a deep copy that keeps shared and circular
+// references, and throws a DataCloneError for anything it can't copy
 
 const { kind, tracksLength } = native;
 const { typeError, isUncloneable } = require("spark:errors");
@@ -28,7 +28,7 @@ const typedArrays = {
   BigInt64Array,
   BigUint64Array,
 };
-// the only names an error keeps; any other becomes a plain Error
+// the only error names a clone keeps. Any other becomes a plain Error
 const errors = {
   __proto__: null,
   Error,
@@ -53,7 +53,7 @@ function refused(message) {
   return new DOMException(message, "DataCloneError");
 }
 
-// how v8 names a value it will not clone
+// describes a value we won't clone, in the words v8 uses
 function described(value, itsKind) {
   if (typeof value === "symbol") return String(value);
   if (typeof value === "function") {
@@ -125,7 +125,8 @@ function clonedError(value, memory) {
   return copy;
 }
 
-// own enumerable string keys, read once each, become plain data properties
+// reads each own enumerable string key once and copies it as a plain data
+// property
 function copyProperties(from, to, memory) {
   for (const key of Object.keys(from)) {
     if (!Object.hasOwn(from, key)) continue;
@@ -182,7 +183,7 @@ function cloned(value, memory) {
       copy = clonedBuffer(value);
       break;
     case "shared_array_buffer":
-      // the same memory either way; there is no second handle to make
+      // both sides share the same memory, so there's no second handle to make
       copy = value;
       break;
     case "typed_array": {
@@ -287,8 +288,8 @@ function structuredClone(value, options) {
   }
   const buffers = transferList(options);
   const copy = cloned(value, new Map());
-  // a transferred buffer's bytes were copied above; only now, with the whole
-  // clone made, does the original give them up
+  // we copied the transferred buffers' bytes above. The originals only give
+  // them up now that the whole clone is made
   for (const buffer of buffers) buffer.transfer(0);
   return copy;
 }

@@ -1,7 +1,8 @@
 -module(spark_cli_http_ffi).
 -export([fetch/4, read_body/1, drop_body/1]).
 
-%% http/1.1 over a socket of its own for each request: enough for fetch.
+%% http/1.1 with a socket of its own for each request, which is enough for
+%% fetch.
 %%
 %% Each request has a process, which owns the socket and hands the body out a
 %% piece at a time as it is asked for, so nothing is read ahead of the
@@ -153,7 +154,7 @@ more(Socket, Buffer) ->
         {error, Reason} -> throw({failed, failure(Reason)})
     end.
 
-%% how the body's end is told
+%% how we tell where the body ends
 framing(Method, Status, Headers) ->
     Lower = [{string:lowercase(Name), Value} || {Name, Value} <- Headers],
     Chunked = case proplists:get_value(<<"transfer-encoding">>, Lower) of
@@ -224,7 +225,7 @@ piece(Socket, Framing, Buffer, From) ->
             end
     end.
 
-%% what of the body the bytes in hand hold: a piece, its end, or not enough
+%% whether the bytes in hand hold a piece of the body, its end, or not enough
 take({length, 0}, _Buffer) ->
     done;
 take({length, _}, <<>>) ->

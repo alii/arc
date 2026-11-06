@@ -26,7 +26,7 @@ pub type Os {
 }
 
 pub type User {
-  /// `shell` is None where there is none to name, as on windows
+  /// `shell` is None where there isn't one, such as on windows
   User(uid: Int, gid: Int, username: String, shell: Option(String))
 }
 
@@ -35,9 +35,9 @@ pub type Endianness {
   BigEndian
 }
 
-/// node:os, so far: arch, platform, type, release, version, machine,
-/// hostname, homedir, tmpdir, endianness, availableParallelism, userInfo,
-/// constants, EOL, devNull
+/// node:os, which so far has arch, platform, type, release, version,
+/// machine, hostname, homedir, tmpdir, endianness, availableParallelism,
+/// userInfo, constants, EOL and devNull
 pub fn builtin(os: Os) -> Builtin(host) {
   Builtin(
     specifier: "node:os",

@@ -6,8 +6,8 @@ fn run(source: String) -> String {
   engine.inspect(eng, value)
 }
 
-// {...source} against the same copy written out with Reflect, twice over so
-// that the second round finds the shapes the first one made
+// checks {...source} against the same copy written out with Reflect, twice so
+// the second round finds the shapes the first one made
 pub fn spread_agrees_with_a_copy_written_out_test() {
   assert run(
       "

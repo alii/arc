@@ -1,4 +1,4 @@
-// §24.1.5 insertion order via seqs; next_seq never resets
+// §24.1.5 keeps insertion order with seqs; next_seq never resets
 
 import gleam/dict.{type Dict}
 import gleam/int

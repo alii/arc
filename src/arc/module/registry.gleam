@@ -82,7 +82,8 @@ pub fn clear_module_status(st: Agent, spec: String) -> Agent {
   clear_entry(st, status_property(), spec)
 }
 
-// §16.2.1.5.3 sticky; key presence, not value, marks a cached error
+// §16.2.1.5.3 errors are sticky. A present key marks a cached error, whatever
+// its value
 pub fn read_module_error(st: Agent, spec: String) -> Option(JsVal) {
   read_entry(st, errors_property(), spec)
 }
@@ -143,7 +144,7 @@ pub type Entry {
   Absent(deferred: Option(Handle))
 }
 
-// precedence: sticky error, then tla promise, then namespace
+// checks the sticky error first, then the tla promise, then the namespace
 pub fn lookup(st: Agent, spec: String) -> Entry {
   case read_module_error(st, spec) {
     Some(error) -> Failed(error:)

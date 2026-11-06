@@ -13,10 +13,10 @@ type Format {
 }
 
 /// node's zlib: deflate, inflate, gzip, gunzip, their raw forms, unzip and
-/// zstd, as one-shot calls and as streams. It is node's own javascript over
-/// the compression the vm it runs on carries; there is no brotli yet. A
-/// stream keeps what it was given and works it out again at each flush, so a
-/// long stream with many flushes is slow
+/// zstd, as one-shot calls and as streams. It's node's own javascript over
+/// the compression built into the vm it runs on. There's no brotli yet. A
+/// stream keeps everything it was given and processes it all again at each
+/// flush, so a long stream with many flushes is slow
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:zlib",
@@ -208,7 +208,7 @@ fn format_of(ctx: Context(host), value: JsVal, next) {
   }
 }
 
-// bytes, flush, bytes, flush, ... as pairs; a pair that is not that is left out
+// pairs up bytes, flush, bytes, flush, ..., skipping any malformed pair
 fn ops(ctx: Context(host), writes: List(JsVal)) -> List(#(BitArray, Int)) {
   case writes {
     [bytes, flush, ..rest] ->

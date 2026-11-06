@@ -2,8 +2,8 @@
 
 const given = native.facts();
 
-// what node reports for os.constants on each platform; the numbers are part
-// of that platform's conventions, nothing here is read from a machine
+// what node reports for os.constants on each platform. The numbers are that
+// platform's conventions, so we don't read any of them from the machine
 const constantsFor = {
   linux: {
     __proto__: null,
@@ -291,7 +291,7 @@ function fact(value) {
   return read;
 }
 
-// with the encoding "buffer" the texts come as Buffers, which needs the
+// with the encoding "buffer" the strings come back as Buffers, which needs the
 // buffer module to have been passed
 function userInfo(options) {
   if (typeof options !== "object") options = null;

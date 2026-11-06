@@ -265,7 +265,7 @@ fn string_char_code_at(
   }
 }
 
-/// charCodeAt of a string at an integer: nothing to coerce, nothing to throw
+/// charCodeAt of a string at an integer, which has nothing to coerce and can't throw
 pub fn plain_char_code_at(this: JsVal, idx: JsVal) -> Option(JsVal) {
   case js_string.is_str(this), rt_val.as_integer(idx) {
     True, Some(idx) ->
@@ -589,7 +589,7 @@ fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// no locale support: nfc normalize then compare
+// without locale support, nfc-normalise both strings then compare
 fn string_locale_compare(
   st: Agent,
   this: JsVal,
@@ -618,7 +618,7 @@ fn string_this_value(
   #(mk_string(this_string_value(st, this, method)), st)
 }
 
-// objects only, a primitive is not wrapped to consult its prototype
+// only looks on objects. a primitive isn't wrapped to consult its prototype
 fn get_method(
   st: Agent,
   val: JsVal,
@@ -1206,7 +1206,7 @@ fn with_this_text(st: Agent, this: JsVal) -> #(String, Agent) {
   }
 }
 
-// the js value itself, so length and indexing stay o(1)
+// returns the js value itself so length and indexing stay o(1)
 fn with_this_str(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case js_string.is_str(this) {
     True -> #(this, st)

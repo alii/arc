@@ -1,10 +1,10 @@
 -module(spark_zlib_ffi).
 -export([deflate/7, inflate/4, zstd_compress/2, zstd_decompress/1, crc32/2]).
 
-%% every call opens its own stream and closes it: nothing outlives the call,
-%% so nothing here ties the engine to one process
+%% every call opens and closes its own stream. Nothing outlives the call, so
+%% nothing here ties the engine to one process
 
-%% Ops is every write made so far, each with its flush; the answer is all the
+%% Ops is every write made so far, each with its flush. The answer is all the
 %% output those writes give
 deflate(Ops, Format, Level, WindowBits, MemLevel, Strategy, Dictionary) ->
     Z = zlib:open(),
@@ -44,9 +44,9 @@ deflate_bits(raw, Bits) -> -Bits;
 deflate_bits(_, Bits) -> Bits.
 
 %% the answer is the output so far and whether the stream reached its end.
-%% Gzip data may be several members one after another, read as one; when
-%% that fails but the first member alone is whole, what follows it is not
-%% gzip, which zlib reports as a bad header
+%% Gzip data may be several members in a row, read as one. If that fails but
+%% the first member is whole on its own, what follows it isn't gzip, and zlib
+%% reports that as a bad header
 inflate(Data, Format, WindowBits, Dictionary) when Format =:= gzip; Format =:= either ->
     case inflate_as(Data, Format, WindowBits, Dictionary, reset) of
         {error, <<"Z_DATA_ERROR">>} = Failed ->

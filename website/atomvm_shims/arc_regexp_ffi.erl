@@ -1,4 +1,4 @@
-%% RegExp for the browser playground, on the page's own JavaScript engine.
+%% Runs RegExp for the browser playground on the page's own JavaScript engine.
 %%
 %% AtomVM has no `re` (PCRE), so the real arc_regexp_ffi cannot run there.
 %% The browser, though, has the one regular-expression engine that matches
@@ -9,7 +9,7 @@
 %%
 %% Offsets in and out are UTF-8 BYTE offsets, as the Gleam side expects; the
 %% JS half converts to and from UTF-16 indices. Same offset policy as the real
-%% FFI: negatives clamp to 0, past-the-end is offset_out_of_range, a
+%% FFI: negatives clamp to 0, past the end is offset_out_of_range, and a
 %% continuation byte is a plain no_match.
 -module(arc_regexp_ffi).
 -export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4]).

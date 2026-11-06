@@ -1303,7 +1303,7 @@ fn is_identifier_start(ch: String) -> Bool {
   }
 }
 
-// ascii is decided here, the website build stubs the unicode tables
+// ascii is decided here because the website build stubs the unicode tables
 fn is_identifier_start_code(code: Int) -> Bool {
   digits.is_ascii_alpha_code(code)
   || code == 0x5F

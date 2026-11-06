@@ -1,5 +1,5 @@
-//// what node's util.inspect and util.types, and structuredClone, ask of the
-//// engine: a look inside values that javascript itself cannot take
+//// natives that let node's util.inspect, util.types and structuredClone look
+//// inside values in ways javascript itself can't
 
 import arc/host.{type Context, type HostMethod, HostMethod}
 import arc/internal/ordered_entries
@@ -52,8 +52,8 @@ pub fn natives() -> List(HostMethod(host)) {
         _ -> #(Ok(mk_undefined()), ctx)
       }
     }),
-    // [what is left to visit as a flat list, whether it runs key, value, ...]
-    // for a map or set iterator, and all of a weak map or weak set
+    // [entries as a flat list, whether they run key, value, ...], holding what
+    // a map or set iterator has left to visit, or all of a weak map or set
     HostMethod("previewEntries", 1, fn(ctx, args, _this) {
       case preview(ctx, host.first_arg(args)) {
         None -> #(Ok(mk_undefined()), ctx)
@@ -213,7 +213,7 @@ fn preview(
   }
 }
 
-// a finished iterator sits at -1
+// a finished iterator's cursor is -1
 fn rest(
   entries: ordered_entries.OrderedEntries(k, v),
   cursor: Int,

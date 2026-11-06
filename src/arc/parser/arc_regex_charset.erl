@@ -91,7 +91,8 @@ vsplit_singles(Strs, CI) ->
       {[], []},
       Strs).
 
-%% simple case folding; casefold/1 is full folding, s-only mappings hardcoded
+%% simple case folding. casefold/1 does full folding, so the s-only mappings
+%% are hardcoded
 scf(16#1E9E) -> 16#DF;
 scf(16#1FBC) -> 16#1FB3;
 scf(16#1FCC) -> 16#1FC3;

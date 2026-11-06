@@ -3,8 +3,8 @@ import spark/io.{type Io}
 import spark/js
 
 /// node's streams: Readable, Writable, Duplex, Transform, PassThrough,
-/// pipeline, finished and the rest. With the dom events module passed too,
-/// abort signals work; with encoding, a readable can decode text
+/// pipeline, finished and the rest. Pass the dom events module too for abort
+/// signals, and encoding so a readable can decode text
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:stream",
@@ -29,7 +29,7 @@ pub fn builtin() -> Builtin(host) {
   )
 }
 
-/// pipeline and finished as promises
+/// pipeline and finished, returning promises
 pub fn promises_builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:stream/promises",

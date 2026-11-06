@@ -311,7 +311,7 @@ pub fn unsigned_rounding_mode(
   }
 }
 
-// options read alphabetically, order is observable
+// read options alphabetically because the order is observable
 pub fn get_difference_settings(
   st: Agent,
   args: List(JsVal),

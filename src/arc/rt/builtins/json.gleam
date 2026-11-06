@@ -103,7 +103,7 @@ fn json_parse(
   }
 }
 
-// a whole json text, trailing whitespace only
+// parses a whole json text, allowing only whitespace after it
 fn parse_text(
   bytes: BitArray,
   with_source with_source: Bool,
@@ -127,7 +127,7 @@ fn only_whitespace(
   }
 }
 
-// parsejsonmodule step 1, ahead of any realm
+// parsejsonmodule step 1, run before any realm exists
 pub fn parse_module_source(source: String) -> Result(JsonValue, String) {
   let bytes = bit_array.from_string(source)
   parse_text(bytes, False)
@@ -497,7 +497,7 @@ fn materialize_object_entries(
   }
 }
 
-// dup keys keep first position, last value
+// a duplicate key keeps its first position and its last value
 fn props_from_entries(
   st: Agent,
   entries: List(#(String, ParseRecord)),
@@ -1091,7 +1091,7 @@ fn plain_stringify(st: Agent, value: JsVal, gap: String) -> Stringified
 @external(erlang, "arc_rt_json_ffi", "quote_tree")
 fn quote_tree(s: String) -> StringTree
 
-// all utf-8 binaries already, skips the unicode rescan
+// the parts are utf-8 binaries already, so skip the unicode rescan
 @external(erlang, "erlang", "iolist_to_binary")
 fn flatten(tree: StringTree) -> String
 

@@ -250,8 +250,8 @@ pub type ViewElementType {
 pub type BufferStorage {
   Detached(max_byte_length: Option(Int))
   Bytes(bytes: BitArray, max_byte_length: Option(Int))
-  // a big buffer once an element is written: pieces in a tree, so a write
-  // copies one piece and not the buffer
+  // a big buffer becomes a tree of pieces once an element is written, so a
+  // write copies one piece and not the whole buffer
   Chunked(
     pieces: TreeArray(BitArray),
     byte_length: Int,
@@ -1864,7 +1864,7 @@ pub type IcEntry {
 type IcCallWay =
   #(List(#(Int, Cell)), Handle, ObjKind)
 
-// bare: a map of proto id to IcCallWay, or {offset, callee, kind} when the
+// a bare map of proto id to IcCallWay, or {offset, callee, kind} when the
 // shape holds the key itself
 pub type IcShapedWays
 

@@ -5,10 +5,10 @@ import spark/io.{
 }
 import spark/js
 
-/// node:fs, so far, and only what reads: access and exists, realpath, stat
-/// and lstat, readlink, readdir and readFile, each in its sync, callback and
-/// promise form. Every one is a want the embedder answers (Access, Realpath,
-/// Stat, Readlink, Readdir, ReadFile); nothing here touches a disk
+/// node:fs, which so far only reads: access and exists, realpath, stat and
+/// lstat, readlink, readdir and readFile, each in its sync, callback and
+/// promise form. Each one is a want the embedder answers (Access, Realpath,
+/// Stat, Readlink, Readdir, ReadFile), so nothing here touches a disk
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:fs",
@@ -85,7 +85,7 @@ pub fn builtin() -> Builtin(host) {
   )
 }
 
-/// node:fs/promises; it is node:fs's `promises`, so pass that builtin too
+/// node:fs/promises. It's node:fs's `promises`, so pass that builtin too
 pub fn promises_builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:fs/promises",

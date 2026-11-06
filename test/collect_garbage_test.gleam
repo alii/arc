@@ -24,7 +24,7 @@ pub fn frees_what_small_collections_left_behind_test() {
   assert live(eng) < full - 19_000
   let #(seen, eng) = run(eng, "stays.name")
   assert seen == "'stays'"
-  // nothing made since: the same engine comes back
+  // nothing was made since, so the same engine comes back
   let again = engine.collect_garbage(eng)
   assert live(again) == live(eng)
 }

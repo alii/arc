@@ -10,7 +10,7 @@ pub fn frame_info_at(template: FuncTemplate, line: Int) -> FrameInfo {
   FrameInfo(name: option.unwrap(template.name, ""), script: stack_source, line:)
 }
 
-// no depth bump, caller already counted it
+// doesn't bump the depth because the caller already counted it
 pub fn push_frame_info(agent: Agent, template: FuncTemplate) -> Agent {
   Agent(..agent, frames: [frame_info_at(template, 0), ..agent.frames])
 }
@@ -47,7 +47,7 @@ pub fn sync(state: State, agent: Agent, pc: Int) -> Agent {
   }
 }
 
-// same, then count the frame being entered
+// syncs like sync, then counts the frame being entered
 pub fn sync_entering(state: State, agent: Agent, pc: Int) -> Agent {
   let depth = state.depth
   let line = tuple_array.element(pc + 1, state.func.lines)

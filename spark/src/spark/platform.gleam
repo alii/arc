@@ -1,5 +1,5 @@
-/// the posix world a runtime says it lives in; spark never works this out
-/// from the machine it runs on
+/// the posix platform a runtime reports. spark never works this out from
+/// the machine it runs on
 pub type Platform {
   Linux
   Darwin

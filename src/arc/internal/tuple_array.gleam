@@ -15,7 +15,7 @@ pub fn get(index: Int, arr: TupleArray(a)) -> Option(a)
 @external(erlang, "arc_tuple_array_ffi", "get_unchecked")
 pub fn get_unchecked(index: Int, arr: TupleArray(a)) -> a
 
-// badarg unless 0 <= index < size, o(n) copy
+// badarg unless 0 <= index < size; copies the tuple in o(n)
 @external(erlang, "arc_tuple_array_ffi", "set_unchecked")
 pub fn set_unchecked(index: Int, value: a, arr: TupleArray(a)) -> TupleArray(a)
 

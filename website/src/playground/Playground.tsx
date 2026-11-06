@@ -188,7 +188,7 @@ export function Playground() {
 		try {
 			const result = await vm.vm.call('main', source);
 			console.debug(`arc: run took ${(performance.now() - t0).toFixed(0)}ms`);
-			// A script's completion value is almost always `undefined` — noise.
+			// Hide an `undefined` completion value. Almost every script ends with one.
 			if (result !== 'undefined') push('result', result);
 		} catch (e) {
 			push('error', String(e));

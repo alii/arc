@@ -284,7 +284,7 @@ put_reg(L, S, V) ->
         false -> setelement(S + 1, L, V)
     end.
 
-%% what a closure captured: the leading run of its frame's locals
+%% a closure's captures are the leading run of its frame's locals
 captured(_, 0) -> {};
 captured(Locals, Count) ->
     list_to_tuple(onto(Locals, Count, [])).

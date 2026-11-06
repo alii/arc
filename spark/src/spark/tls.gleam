@@ -4,16 +4,16 @@ import gleam/list
 import spark/builtin.{type Builtin, Builtin}
 import spark/js
 
-/// the certificate authorities scripts are told of, each a PEM text. spark
-/// never asks the machine: `bundled` is what tls.rootCertificates lists (in
-/// node, the roots it ships with), `system` what the machine's own store
-/// holds, `extra` any added on top
+/// the certificate authorities scripts can see, each as PEM text. spark
+/// never asks the machine. `bundled` is what tls.rootCertificates lists (in
+/// node, the roots it ships with), `system` is what the machine's own store
+/// holds and `extra` is any added on top
 pub type Certificates {
   Certificates(bundled: List(String), system: List(String), extra: List(String))
 }
 
-/// node:tls, so far: rootCertificates, getCACertificates and the default
-/// version and renegotiation constants. Making a connection is not here
+/// node:tls, which so far has rootCertificates, getCACertificates and the
+/// default version and renegotiation constants. It can't make connections
 pub fn builtin(certificates: Certificates) -> Builtin(host) {
   Builtin(
     specifier: "node:tls",

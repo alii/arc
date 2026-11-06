@@ -126,7 +126,7 @@ fn bigint_as_uint_n(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// result in [0, m), erlang rem keeps dividend sign
+// result is in [0, m) because erlang rem keeps the dividend's sign
 fn euclid_mod(n: Int, m: Int) -> Int {
   let r = n % m
   case r < 0 {

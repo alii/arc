@@ -8,7 +8,7 @@ start() ->
     announce_ready(),
     loop(Eng).
 
-%% calling in before this hangs the tab; best effort
+%% calling in before this hangs the tab; if announcing fails we only log it
 announce_ready() ->
     try
         emscripten:run_script(<<"globalThis.dispatchEvent(new Event('atomvm:ready'))">>,
@@ -49,7 +49,8 @@ handle_call(Promise, Src0, Eng) ->
             reject_quietly(Promise, fun() -> format_crash(C, R, St) end)
     end.
 
-%% fresh process per run so garbage never piles up; never add min_heap_size
+%% each run gets a fresh process so garbage never piles up; never add
+%% min_heap_size
 in_worker(Eval) ->
     Self = self(),
     Ref = make_ref(),
@@ -78,7 +79,7 @@ reject_malformed(Promise, Msg) ->
 format_malformed(Msg) ->
     to_binary(io_lib:format("arc: malformed request ~p", [Msg])).
 
-%% thunk so a crashing reason still settles the promise
+%% the reason is a thunk so the promise still settles if building it crashes
 reject_quietly(Promise, ReasonFun) ->
     Reason = try ReasonFun()
              catch _:_ -> <<"arc: internal error">>

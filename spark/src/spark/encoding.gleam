@@ -12,7 +12,7 @@ fn decode_utf8(
   stream: Bool,
 ) -> Result(#(String, Int), Nil)
 
-/// TextEncoder and TextDecoder, utf-8 only, as globals
+/// the TextEncoder and TextDecoder globals, which only handle utf-8
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "spark:encoding",
@@ -29,7 +29,7 @@ pub fn builtin() -> Builtin(host) {
             host.array_buffer(ctx, bit_array.from_string(text))
           #(Ok(buffer), ctx)
         }),
-        // [text, bytes left undecoded], or undefined when fatal and invalid
+        // returns [text, bytes left undecoded], or undefined for bad bytes when fatal
         HostMethod("decode", 3, fn(ctx, args, _this) {
           let fatal = classify(host.arg_at(args, 1)) == KBool(True)
           let stream = classify(host.arg_at(args, 2)) == KBool(True)

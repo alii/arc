@@ -3,8 +3,8 @@ import spark/io.{type Io}
 import spark/js
 
 /// node's util: inspect, format, promisify, deprecate, the type checks,
-/// isDeepStrictEqual, parseArgs, MIMEType and the rest. With the encoding
-/// module passed too, it carries TextEncoder and TextDecoder
+/// isDeepStrictEqual, parseArgs, MIMEType and the rest. If you also pass the
+/// encoding module, it exports TextEncoder and TextDecoder too
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:util",
@@ -28,7 +28,7 @@ pub fn builtin() -> Builtin(host) {
   )
 }
 
-/// node:util/types; it is node:util's `types`, so pass that builtin too
+/// node:util/types. It's node:util's `types`, so pass that builtin too
 pub fn types_builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:util/types",

@@ -8,14 +8,14 @@ JavaScript on the BEAM
 </picture>
 <br><br>
 
-Arc is a JavaScript engine and runtime written in [Gleam](https://gleam.run). It implements the ECMAScript spec and is tested against test262 on every commit. By default there are no effects, timers, I/O, etc. Such functionality is provided by the embedder, which is very easy to do as Arc has an excellent embedding API.
+Arc is a JavaScript engine and runtime written in [Gleam](https://gleam.run). It implements the ECMAScript spec. On its own it has no effects, timers or I/O. The program that embeds Arc provides those, and Arc's embedding API makes that easy.
 
-There's also [Spark](./spark), which is a Node.js compatibility layer for Arc. This _does_ implement the glue code for I/O and timers, such as `fs.readFile` and `setTimeout`. Generally speaking you can think of Arc as logically equivalent to JSC or V8, and Spark as Bun or Node.js.
+There's also [Spark](./spark), a Node.js compatibility layer for Arc. Spark _does_ provide I/O and timers, such as `fs.readFile` and `setTimeout`. You can think of Arc as the equivalent of JSC or V8, and Spark as the equivalent of Bun or Node.js.
 
-Arc's API is unstable between commits, but this is true for many engines. We recommend pinning to a commit sha and doing upgrades to Arc on some regular cadence.
+Arc's API can change from one commit to the next, which is true of many engines. We recommend pinning to a commit SHA and upgrading on a regular schedule.
 <br><br>
 
-By default Arc interprets JavaScript, but it has an AOT mode for compiling JavaScript to Erlang. This has tradeoffs and is not recommended for dynamic code (e.g. code generated/created at runtime). Arc runs on Erlang/OTP, and in the browser on our own fork of [AtomVM](https://www.atomvm.net) compiled to WebAssembly. We forked Atom to improve performance in the browser specifically.
+By default Arc interprets JavaScript, but it can also compile JavaScript to Erlang ahead of time (AOT). AOT has tradeoffs, and we don't recommend it for dynamic code, such as code generated at runtime. Arc runs on Erlang/OTP, and in the browser on our own fork of [AtomVM](https://www.atomvm.net) compiled to WebAssembly. We forked AtomVM to make it faster in the browser.
 <br><br>
 
 Arc is tested against [test262](https://github.com/tc39/test262) on every commit:
@@ -27,4 +27,4 @@ Arc is tested against [test262](https://github.com/tc39/test262) on every commit
 
 <br><br>
 
-Arc uses the Mozilla Public License, Version 2.0
+Arc uses the Mozilla Public License, Version 2.0.

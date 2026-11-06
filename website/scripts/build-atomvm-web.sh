@@ -4,9 +4,9 @@ set -euo pipefail
 # Build the AtomVM WebAssembly runtime the playground runs on, from upstream
 # source plus our patches, and install it into website/public/atomvm/.
 #
-# Why not the prebuilt release? Upstream AtomVM 0.7.0-alpha.0 has three
-# behaviours that make an allocation-heavy Gleam program (Arc's interpreter)
-# crawl — see atomvm_patches/0001-arc-playground-perf.patch:
+# We don't use the prebuilt release because upstream AtomVM 0.7.0-alpha.0 has
+# three behaviours that make an allocation-heavy Gleam program like Arc's
+# interpreter crawl. atomvm_patches/0001-arc-playground-perf.patch fixes them:
 #   * `case` on atoms (OP_SELECT_VAL) compared atoms by fetching and memcmp'ing
 #     their names from the atom table; now an immediate bit-compare;
 #   * any heap fragment (every compound literal use creates one) forced a full
@@ -14,8 +14,6 @@ set -euo pipefail
 #     fragments are folded in only when large;
 #   * the default heap policy kept heaps nearly full (a GC every few
 #     allocations); default is now BEAM-like fibonacci growth.
-# Measured on the playground: fib(15) 3.2s -> 14ms native, 1.6s -> 40ms in the
-# browser; a 5000-iteration loop 2.2s -> 38ms in the browser.
 #
 # It is also linked with memory growth allowed (256MB initial, 2GB max): the
 # copying collector's alloc/free of ever larger heaps fragments a fixed arena

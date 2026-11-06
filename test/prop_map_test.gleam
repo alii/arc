@@ -5,9 +5,9 @@ import gleam/int
 import gleam/list
 import gleam/string
 
-// keys made by hand, so that many of them want the same few slots: five names
-// on id 8, names whose own ids are the very slots those spill into, #names
-// next door on the odd numbers, and some indices
+// hand-made keys that crowd into the same few slots. Five names sit on id 8,
+// other names' ids are the slots those spill into, #names sit next door on the
+// odd numbers, and there are some indices
 fn crowded() -> List(PropertyKey) {
   [
     Named(8, "a"),

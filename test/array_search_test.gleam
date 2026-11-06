@@ -6,7 +6,7 @@ fn run(source: String) -> String {
   engine.inspect(eng, value)
 }
 
-// includes and indexOf against a plain loop written with the spec's own
+// checks includes and indexOf against a plain loop using the spec's own
 // comparisons, over arrays and values that compare in every different way
 pub fn includes_and_index_of_agree_with_a_plain_loop_test() {
   assert run(

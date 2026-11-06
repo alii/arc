@@ -1,12 +1,12 @@
 %% Erlang -> page JavaScript round trip for the browser playground.
 %%
 %% AtomVM's emscripten port can run a script on the page's main thread
-%% (`emscripten:run_script/2`) but not get a value back; and the page can push
+%% (`emscripten:run_script/2`) but can't get a value back. The page can push
 %% text into a REGISTERED Erlang process (`Module.cast(name, text)`, delivered
 %% as `{emscripten, {cast, Binary}}`). This module is the registered process
 %% that stitches the two into a call: `call(Script)` evaluates `Script` (JS
 %% source of an expression that yields a string) on the main thread and
-%% returns `{ok, Text}` — or `{error, Text}` if it threw. Replies are matched
+%% returns `{ok, Text}`, or `{error, Text}` if it threw. Replies are matched
 %% to callers by a request id the page echoes back.
 %%
 %% The page half is `globalThis.__arcJsBridge` in website/src/playground/
@@ -70,10 +70,10 @@ loop(Pending, NextId) ->
             loop(Pending, NextId)
     end.
 
-%% A JS string literal (double-quoted) for a UTF-8 binary: escapes `\`, `"`,
-%% control characters and U+2028/U+2029 (line terminators, illegal in a JS
-%% string literal); everything else passes through as UTF-8, which the JS
-%% engine decodes.
+%% Builds a double-quoted JS string literal from a UTF-8 binary. It escapes `\`,
+%% `"`, control characters and U+2028/U+2029, which are line terminators and
+%% illegal in a JS string literal. Everything else passes through as UTF-8 for
+%% the JS engine to decode.
 js_string(Bin) when is_binary(Bin) ->
     <<$", (js_escape(Bin, <<>>))/binary, $">>.
 

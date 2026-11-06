@@ -16,11 +16,11 @@ import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 
-// the first `count` locals, which are what the closure captured
+// the closure's captures are the first `count` locals
 @external(erlang, "arc_interp_locals_ffi", "captured")
 fn captured(locals: TupleArray(JsVal), count: Int) -> EnvTuple
 
-// the parent's values at `slots`, then the record
+// captures the parent's values at `slots`, then the record
 @external(erlang, "arc_rt_env_ffi", "capture_with")
 fn captured_with(
   slots: List(Int),
@@ -32,12 +32,12 @@ fn captured_with(
 @external(erlang, "arc_rt_env_ffi", "renest")
 fn renest(env: EnvTuple, nested: Int) -> EnvTuple
 
-// a stub's frame has its function's record where its last capture goes
+// a stub's frame holds its function's record where its last capture goes
 @external(erlang, "erlang", "element")
 fn record_at(position: Int, locals: TupleArray(JsVal)) -> BitArray
 
-/// a closure of a function left uncompiled: the stub its kind shares, with
-/// the function's record as its last capture. Once some closure of the same
+/// makes a closure of an uncompiled function from the stub its kind shares,
+/// with the function's record as its last capture. Once any closure of the
 /// function has been called, later ones are ordinary closures of the real code
 pub fn make_closure(
   agent: Agent,
@@ -72,10 +72,11 @@ pub fn make_closure(
   }
 }
 
-/// the first call of such a closure: compiles its function out of the unit's
-/// text, or takes what another closure of it compiled, and lays the frame out
-/// again for the real code. A stub's frame is its captures, the record last,
-/// then this, the function object, the home object and new.target
+/// runs the first call of such a closure. It compiles the function from the
+/// unit's text, or takes what another closure of it compiled, then lays the
+/// frame out again for the real code. A stub's frame holds its captures with
+/// the record last, then this, the function object, the home object and
+/// new.target
 pub fn first_call(state: State) -> Result(State, StepExit) {
   let assert lexical.OwnedLexicalSlots(base: env_size) = state.func.lexical
     as "interp: a stub's frame is not laid out as one"
@@ -144,7 +145,7 @@ pub fn first_call(state: State) -> Result(State, StepExit) {
   )
 }
 
-/// the text a unit's functions are compiled from on their first calls
+/// stores the text a unit's functions compile from when first called
 pub fn keep_unit_text(agent: Agent, unit_id: Int, text: UnitText) -> Agent {
   let store = agent.store
   let unit_texts = dict.insert(store.meta.unit_texts, unit_id, text)

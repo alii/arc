@@ -3846,7 +3846,7 @@ fn loop(
   }
 }
 
-// new_target undefined = plain call; otherwise entered from loop_construct
+// an undefined new_target means a plain call; otherwise loop_construct entered
 fn loop_call(
   state: State,
   drive: Drive,
@@ -7798,7 +7798,7 @@ fn setter_as_frame(
   }
 }
 
-// pushes f as a frame when it is same-realm bytecode, else otherwise
+// pushes f as a frame when it is same-realm bytecode, else calls otherwise
 fn call_as_frame(
   state: State,
   f: JsVal,

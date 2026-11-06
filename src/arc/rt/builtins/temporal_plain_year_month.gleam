@@ -647,7 +647,7 @@ fn year_month_until_since(
   make_duration(st, protos, dur)
 }
 
-// round year count of ib - ia by day progress between year marks
+// rounds the year count of ib - ia by day progress between year marks
 fn round_calendar_year_total(
   cal: temporal_calendar.Calendar,
   ia: IsoDate,

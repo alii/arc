@@ -413,7 +413,7 @@ fn update_constructor(
   }
 }
 
-// usually one compare against the last props map seen pristine
+// usually takes one compare against the last props map we saw pristine
 fn proto_pristine(st: Agent) -> #(Bool, Agent) {
   case rt_store.cell_get(st, st.realm.regexp.prototype), ctor_state(st) {
     SObject(props:, ..), Some(CtorState(proto_props:, ..)) ->
@@ -912,7 +912,7 @@ pub fn builtin_exec_ranges(
 ) -> #(MatchRanges, String, Agent) {
   let #(li_v, st) = rt_val.get_named(st, mk_object(h), names.last_index, None)
   let #(last_index, st) = rt_val.to_length(st, li_v)
-  // re-read after the get, a getter may have recompiled
+  // re-read after the get because a getter may have recompiled it
   let #(flags, compiled, st) = matcher(st, h)
   let global = has_flag(flags, "g")
   let sticky = has_flag(flags, "y")
@@ -934,7 +934,7 @@ pub fn builtin_exec_ranges(
         True -> set_last_index(st, h, mk_int(match_start + match_len))
         False -> st
       }
-      // unconditional like v8, gating would leave stale statics
+      // always update, like v8, because gating would leave stale statics
       let st = update_legacy_statics(st, s, whole, groups)
       #(RangesHit(whole:, groups:, names:), flags, st)
     }
@@ -1309,7 +1309,7 @@ fn intrinsic_getter(
   }
 }
 
-// get(rx, "flags") short of the accessor call when nothing is observable
+// get(rx, "flags"), skipping the accessor call when nothing can observe it
 pub fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
   let #(pristine, st) = case classify(rx) {
     KHandle(h) -> own_flags(st, h)
@@ -1324,7 +1324,7 @@ pub fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
   }
 }
 
-// own exec absent and the proto's exec is the untouched intrinsic
+// true when rx has no own exec and the proto's exec is the untouched intrinsic
 pub fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
   let proto = st.realm.regexp.prototype
   case rt_store.cell_get(st, h) {
@@ -1337,7 +1337,6 @@ pub fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
   }
 }
 
-// unanchored search replaces the per-index sticky probe, same matches
 pub fn species_constructor(
   st: Agent,
   o: JsVal,

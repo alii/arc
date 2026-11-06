@@ -93,7 +93,7 @@ fn proxy_create(st: Agent, args: List(JsVal)) -> #(Handle, Agent) {
 fn proxy_revocable(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(proxy_h, st) = proxy_create(st, args)
   let realm = st.realm
-  // not rooted, pinning would leak proxy and handler
+  // not rooted because pinning would leak the proxy and handler
   let #(revoker_h, st) =
     rt_call.native_new(
       st,

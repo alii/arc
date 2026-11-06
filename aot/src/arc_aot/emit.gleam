@@ -163,7 +163,7 @@ fn root_lexical_prologue(
   }
 }
 
-// §16.1.7 step 16, hoist top-level function declarations
+// §16.1.7 step 16 hoists top-level function declarations
 fn emit_hoist(
   e: state.Emitter,
   located: ast.StmtWithLine,
@@ -310,7 +310,7 @@ pub fn compile_source(
         ..scope.default_analyze_opts(),
         strict: is_strict,
         top_lex: scope.LocalLexical,
-        // slot globals measured slower on richards, keep off
+        // slot globals measured slower on richards, so keep them off
         module_slot_globals: False,
         box_try_writes: True,
         share_sibling_slots: False,

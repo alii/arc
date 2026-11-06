@@ -7,7 +7,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-// approximate root rules, indices in utf-16 code units
+// approximates the root rules, with indices in utf-16 code units
 pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {
   case granularity {
     WordGranularity -> segment_words(s)

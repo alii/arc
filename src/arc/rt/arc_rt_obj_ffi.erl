@@ -657,7 +657,7 @@ index_write(St, Id, Idx, V) ->
         _ -> miss
     end.
 
-%% no own property in the way, and a length that may grow
+%% true when no own property is in the way and length may grow
 may_append(Props, Idx) ->
     (not is_map_key(?INDEX_SLOT(Idx), Props))
         andalso case Props of

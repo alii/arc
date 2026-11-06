@@ -2,10 +2,10 @@ import spark/builtin.{type Builtin, Builtin}
 import spark/io.{type Io}
 import spark/js
 
-/// EventEmitter and the rest of the events module. With the dom events
-/// module passed too, its helpers also take an EventTarget; with
-/// async_hooks, EventEmitterAsyncResource works; with process, a listener
-/// leak is warned about
+/// EventEmitter and the rest of the events module. If you also pass the dom
+/// events module, its helpers take an EventTarget too. Passing async_hooks
+/// makes EventEmitterAsyncResource work, and passing process makes it warn
+/// about listener leaks
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:events",

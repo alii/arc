@@ -22,6 +22,6 @@ pub fn unsafe_slice(bytes: bytes, start: Int, len: Int) -> String
 @external(erlang, "arc_bytes_ffi", "drop_start")
 pub fn drop_start(bytes: bytes, start: Int) -> bytes
 
-// may return past the end, loops rely on it
+// may return a position past the end, which loops rely on
 @external(erlang, "arc_bytes_ffi", "next_char_boundary")
 pub fn next_char_boundary(bytes: bytes, pos: Int) -> Int

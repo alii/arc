@@ -13,7 +13,7 @@ const {
 } = require("spark:errors");
 const { Buffer } = require("node:buffer");
 
-// a module the embedder may not have passed
+// loads a module the embedder may not have passed, or gives undefined
 function optional(specifier) {
   try {
     return require(specifier);
@@ -80,7 +80,8 @@ function isURL(self) {
   );
 }
 
-// a path may be a string, bytes or a file: URL; the embedder is asked with text
+// a path may be a string, bytes or a file: URL, but we always ask the embedder
+// with text
 function getValidatedPath(fileURLOrPath, name = "path") {
   let path = fileURLOrPath;
   if (isURL(path)) {
@@ -132,8 +133,8 @@ function getOptions(options, defaultOptions = kEmptyObject) {
   return options;
 }
 
-// a name or a path comes from the embedder as text; node hands it on as
-// text, as a Buffer, or as that Buffer read in another encoding
+// the embedder gives names and paths as text. Node hands them on as text, as a
+// Buffer, or as that Buffer read in another encoding
 function inEncoding(text, encoding) {
   if (!encoding || encoding === "utf8" || encoding === "utf-8") return text;
   const bytes = Buffer.from(text);
@@ -178,7 +179,7 @@ function getValidMode(mode) {
   return int;
 }
 
-// a want that failed is thrown or rejected as its error code, a string
+// a failed want is thrown or rejected with its error code as a string
 function failed(thrown, syscall, path) {
   return typeof thrown === "string" ? systemError(thrown, syscall, path) : thrown;
 }
@@ -248,8 +249,8 @@ function realpathSyncNative(path, options) {
   }
 }
 
-// one question to the embedder, where node walks the path itself; a failure
-// is reported for the whole path with syscall realpath
+// node walks the path itself, but we ask the embedder once. A failure names the
+// whole path, with syscall realpath
 function realpathSync(path, options) {
   options = getOptions(options);
   if (typeof path !== "string" && !isURL(path) && !ArrayBuffer.isView(path)) {
@@ -370,7 +371,7 @@ function dateFromMs(ms) {
   return new Date(Math.round(Number(ms)));
 }
 
-// each is made on first read and then kept on the object
+// makes each field on first read and then keeps it on the object
 function lazyFields(names, make) {
   const fields = { __proto__: null };
   for (const name of names) {
@@ -454,7 +455,7 @@ Stats.prototype._checkModeProperty = function (property) {
   return (this.mode & S_IFMT) === property;
 };
 
-// `fields` is the eighteen numbers the Stat want is answered with
+// `fields` is the eighteen numbers the embedder answers a Stat want with
 function getStatsFromBinding(fields, bigint) {
   if (bigint) {
     const big = fields.map(BigInt);
@@ -509,8 +510,8 @@ class Dirent {
 
 // ---- stat and lstat
 
-// with throwIfNoEntry false, a path that is not there is undefined, not an
-// error; for stat that includes a path that runs through a file
+// with throwIfNoEntry false, a missing path gives undefined, not an error. For
+// stat, that includes a path that runs through a file
 function isNoEntry(thrown, follow) {
   return thrown === "ENOENT" || (follow && thrown === "ENOTDIR");
 }
@@ -618,7 +619,7 @@ function readlink(path, options, callback) {
 
 // ---- readdir
 
-// the Readdir want is answered with name, kind, name, kind, ...
+// the embedder answers a Readdir want with name, kind, name, kind, ...
 function listed(flat) {
   const names = [];
   const types = [];
@@ -680,7 +681,7 @@ async function leadsToDirectory(path) {
   }
 }
 
-// one directory's entries into the results, and its sub-directories onto the
+// adds one directory's entries to the results, and its sub-directories to the
 // list still to visit
 function collect(walk, i, names, types, options, isDirectoryLink) {
   const dir = walk.dirs[i];
@@ -773,7 +774,7 @@ function readdir(path, options, callback) {
 
 // ---- readFile
 
-// only reading is here, so only the flags that read
+// we only support reading, so only the flags that read work
 function checkReadFlag(flag) {
   if (flag === undefined || flag === null || flag === "r" || flag === "rs" || flag === "sr") {
     return;
@@ -794,8 +795,8 @@ function readTarget(path) {
   return getValidatedPath(path);
 }
 
-// node opens, then reads: a missing file fails at open, a directory at
-// read. Its sync read names no path in that error; the others do
+// node opens and then reads, so a missing file fails at open and a directory
+// fails at read. Only the sync read leaves the path out of that error
 function readFailed(thrown, path, namesPath) {
   if (thrown === "EISDIR") {
     return systemError("EISDIR", "read", namesPath ? path : undefined);

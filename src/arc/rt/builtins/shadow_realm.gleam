@@ -125,7 +125,7 @@ fn try_run_in_realm(
   rt_realm.with_realm(st, id, body)
 }
 
-// §2.3 getwrappedvalue, from source realm into target realm
+// §2.3 getwrappedvalue moves a value from the source realm into the target realm
 fn get_wrapped_value(
   st: Agent,
   from: Int,
@@ -161,7 +161,7 @@ fn wrap_all(
   #(list.reverse(wrapped), st)
 }
 
-// §2.2 wrappedfunctioncreate, into is callerrealm
+// §2.2 wrappedfunctioncreate, where into is callerrealm
 fn wrapped_function_create(
   st: Agent,
   from: Int,
@@ -224,7 +224,7 @@ fn evaluate(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  // own realm is callerrealm and brands errors
+  // own realm is callerrealm, and errors are branded with it
   use st <- rt_realm.with_realm(st, own_realm)
   let eval_realm = require_shadow_realm(st, this, "evaluate")
   case classify(first_arg_or_undefined(args)) {
@@ -237,7 +237,7 @@ fn evaluate(
   }
 }
 
-// §3.1.3 performshadowrealmeval with callerrealm current
+// §3.1.3 performshadowrealmeval, run with callerrealm as the current realm
 fn perform_shadow_realm_eval(
   st: Agent,
   source: String,
@@ -299,7 +299,7 @@ fn wrapped_function_call(
   }
 }
 
-// §3.4.2 importvalue: validates, then always rejects (no module loader)
+// §3.4.2 importvalue validates its arguments, then always rejects because we have no module loader
 fn import_value(
   st: Agent,
   own_realm: Int,

@@ -6,13 +6,13 @@ import spark/builtin.{type Builtin, Builtin}
 import spark/io.{type Io, Random}
 import spark/js
 
-/// node:crypto, so far: the digests (createHash, createHmac, hash,
+/// node:crypto, which so far has the digests (createHash, createHmac, hash,
 /// getHashes), random bytes (randomBytes, randomFill, randomInt, randomUUID,
-/// getRandomValues) and timingSafeEqual; and `crypto`, the web's global,
-/// with getRandomValues, randomUUID and subtle.digest. Digests are worked
-/// out by the vm spark runs on. Random bytes are a want the embedder
-/// answers (Random), so spark has no randomness of its own. No ciphers,
-/// keys or signatures yet
+/// getRandomValues) and timingSafeEqual. It also defines the web's `crypto`
+/// global with getRandomValues, randomUUID and subtle.digest. The vm spark
+/// runs on works out the digests. Random bytes come from the embedder through
+/// the Random want, so spark has no randomness of its own. There are no
+/// ciphers, keys or signatures yet
 pub fn builtin() -> Builtin(host) {
   Builtin(
     specifier: "node:crypto",
@@ -85,7 +85,7 @@ pub fn builtin() -> Builtin(host) {
   )
 }
 
-// undefined for a digest this build does not have
+// returns undefined for a digest this build doesn't have
 fn digest(
   ctx: Context(host),
   result: Result(BitArray, Nil),

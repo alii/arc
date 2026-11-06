@@ -136,7 +136,7 @@ function getMark(name) {
   return ts;
 }
 
-// a detail is copied, which needs the embedder to have given structuredClone
+// copies a detail, which needs the embedder to have given structuredClone
 function cloneDetail(detail) {
   if (detail == null) return null;
   if (typeof globalThis.structuredClone !== "function") {

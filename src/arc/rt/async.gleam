@@ -113,7 +113,7 @@ pub fn enqueue_job(st: Agent, job: Job) -> Agent {
   )
 }
 
-// what runs when a turn ends: drain microtasks plus any embedder loop
+// runs when a turn ends to drain microtasks and any embedder loop
 pub type Drain =
   fn(Agent) -> Agent
 
@@ -286,7 +286,7 @@ type Side {
   Reject
 }
 
-// target: undefined, child promise, coroutine data cell, or user fn
+// target is undefined, a child promise, a coroutine data cell or a user fn
 fn settle(st: Agent, target: JsVal, side: Side, value: JsVal) -> Agent {
   case classify(target) {
     types.KUndef -> st

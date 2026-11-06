@@ -261,7 +261,7 @@ fn revalidate(st: Agent, info: AtomicsTarget, idx: Int) -> BufferInfo {
   buf
 }
 
-// non-finite maps to +0, match before saturating
+// non-finite maps to +0, so match it before saturating
 fn to_operand(st: Agent, info: AtomicsTarget, val: JsVal) -> #(Int, Agent) {
   case info.kind {
     BigKind(_) -> rt_val.to_bigint(st, val)

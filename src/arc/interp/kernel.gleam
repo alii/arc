@@ -31,8 +31,8 @@ pub fn same(a: JsVal, b: JsVal) -> Bool
 @external(erlang, "arc_interp_ffi", "cell_of")
 pub fn cell_of(st: Agent, v: JsVal) -> Cell
 
-// what a closure captures out of `locals`: `nested` is its own template's
-// nested_captures, `from` that of the function whose frame this is
+// builds what a closure captures out of `locals`. `nested` is its own
+// template's nested_captures and `from` is that of the frame's function
 @external(erlang, "arc_rt_env_ffi", "capture")
 pub fn capture_env(
   descriptors: List(Int),
@@ -264,7 +264,8 @@ pub type IterPlan {
   IterMiss
 }
 
-// the first count elements onto the stack; miss if destructuring could be observed
+// pushes the first count elements onto the stack, or misses if destructuring
+// could be observed
 @external(erlang, "arc_rt_lang_ffi", "unpack_array")
 pub fn unpack_array(
   agent: Agent,
@@ -273,6 +274,6 @@ pub fn unpack_array(
   onto: List(JsVal),
 ) -> List(JsVal)
 
-// in the kernel only when the step observes nothing
+// steps in the kernel only when the step observes nothing
 @external(erlang, "arc_rt_lang_ffi", "iter_step")
 pub fn iter_step(store: Store, rec: JsVal) -> IterPlan

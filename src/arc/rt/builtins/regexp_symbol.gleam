@@ -589,7 +589,7 @@ pub fn symbol_split(
 }
 
 // §22.2.6.4 result when rx is plain and the proto getters are intrinsic
-
+// an unanchored search replaces the per-index sticky probe and finds the same matches
 fn split_pristine(
   st: Agent,
   compiled: types.CompiledRegExp,

@@ -1,4 +1,4 @@
-%% offsets here are local minus utc, posix sign negated at parse
+%% offsets here are local minus utc; the parser negates the posix sign
 -module(arc_posix_tz).
 
 -export([parse/1, offset_at/2, transitions/3, year_of/1]).
@@ -47,7 +47,7 @@ parse_dst_rules(StdOff, DstOff, "," ++ R5) ->
         _ -> {fixed, StdOff}
     end;
 parse_dst_rules(StdOff, DstOff, _) ->
-    %% no rule given: posix default us rule
+    %% with no rule given, posix uses its default us rule
     {dst, StdOff, DstOff, {m, 3, 2, 0, 7200}, {m, 11, 1, 0, 7200}}.
 
 parse_name("<" ++ Rest) ->
@@ -93,7 +93,7 @@ parse_int(S) ->
         _ -> {ok, list_to_integer(Digits), R}
     end.
 
-%% ranges checked at parse; eval has no handler
+%% the parser checks ranges, so evaluation has no error handling
 in_range(N, Lo, Hi) -> N >= Lo andalso N =< Hi.
 
 parse_rule("M" ++ R0) ->

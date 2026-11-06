@@ -83,7 +83,7 @@ class TextEncoder {
     return new Uint8Array(native.encode(`${input}`));
   }
 
-  // read counts string positions as this engine indexes them
+  // `read` counts string positions the way this engine indexes strings
   #encodeInto(src, dest) {
     const whole = new Uint8Array(native.encode(src));
     if (whole.length <= dest.length) {

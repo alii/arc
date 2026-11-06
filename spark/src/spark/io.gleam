@@ -9,46 +9,46 @@ import gleam/list
 ///
 /// spark performs none of these; each one reaches the embedder through `Io`
 pub type Want {
-  /// may `path` be reached with this access mode (0 exists, 4 read, 2 write,
-  /// 1 execute, or-ed together); behind node:fs access and existsSync
+  /// whether `path` can be reached with this access mode (0 exists, 4 read,
+  /// 2 write, 1 execute, or-ed together). node:fs access and existsSync use it
   Access(path: String, mode: Int)
-  /// the canonical absolute path for `path`, with every symlink followed;
-  /// answered with Text. A relative path is the embedder's to resolve
+  /// the canonical absolute path for `path`, with every symlink followed.
+  /// The embedder answers with Text, and resolves a relative path itself
   Realpath(path: String)
-  /// what is at `path`. With `follow` false a symlink is described itself,
-  /// not what it points at. Answered with Info; behind node:fs stat and lstat
+  /// what is at `path`. When `follow` is false a symlink describes itself, not
+  /// what it points at. The answer is Info, for node:fs stat and lstat
   Stat(path: String, follow: Bool)
-  /// the text the symlink at `path` holds, as written; answered with Text;
-  /// behind node:fs readlink
+  /// the text the symlink at `path` holds, as written. The answer
+  /// is Text, for node:fs readlink
   Readlink(path: String)
   /// what the directory at `path` holds, in any order and without "." and
-  /// ".."; answered with Entries; behind node:fs readdir
+  /// "..". The answer is Entries, for node:fs readdir
   Readdir(path: String)
-  /// every byte of the file at `path`; answered with Bytes; behind node:fs
+  /// every byte of the file at `path`. The answer is Bytes, for node:fs
   /// readFile
   ReadFile(path: String)
-  /// make this http request and say what came back, once the status and the
-  /// headers are in and however long the body is. `url` is an absolute http:
-  /// or https: url, `headers` are sent as given, `body` is the bytes to send
-  /// (none when empty). A redirect is not followed and a packed body is not
-  /// unpacked: fetch does both itself. Answered with Head; behind fetch
+  /// make this http request and answer once the status and headers are in,
+  /// however long the body is. `url` is an absolute http: or https: url,
+  /// `headers` are sent as given and `body` is the bytes to send (none when
+  /// empty). Don't follow redirects or unpack a compressed body, because fetch
+  /// does both itself. The answer is Head
   Fetch(
     method: String,
     url: String,
     headers: List(#(String, String)),
     body: BitArray,
   )
-  /// the next piece, of any size, of the body a Head named with this number;
-  /// answered with Bytes, or with Done once the body has ended
+  /// the next piece, of any size, of the body a Head gave this number.
+  /// The answer is Bytes, or Done once the body has ended
   ReadBody(body: Int)
-  /// the script will read no more of this body, so what is left of it can be
-  /// let go; answered with Done
+  /// the script won't read any more of this body, so the rest can be let go.
+  /// The answer is Done
   DropBody(body: Int)
-  /// this many bytes that nobody could guess; answered with Bytes. Behind
-  /// node:crypto's randomBytes, randomUUID and the rest, and the web's
+  /// this many bytes that nobody could guess. The answer is Bytes. node:crypto's
+  /// randomBytes, randomUUID and the rest use it, and so does the web's
   /// crypto.getRandomValues
   Random(bytes: Int)
-  /// write these bytes to the process's standard output or error; behind
+  /// write these bytes to the process's standard output or error, for
   /// process.stdout.write and process.stderr.write
   Write(stream: Stream, data: BitArray)
 }
@@ -64,9 +64,9 @@ pub type Answer {
   Bytes(BitArray)
   Info(FileInfo)
   Entries(List(Entry))
-  /// how a Fetch was answered: the status line's number and words, the
-  /// headers in the order they came, and a number of the embedder's choosing
-  /// by which the body is then asked for
+  /// the answer to a Fetch: the status code and reason, the headers in the
+  /// order they came, and a number the embedder picks for the body, which
+  /// ReadBody and DropBody then use
   Head(status: Int, reason: String, headers: List(#(String, String)), body: Int)
 }
 
@@ -80,7 +80,7 @@ pub type FileKind {
   BlockDevice
 }
 
-/// what stat tells of one file, field for field. `permissions` is the mode
+/// what stat reports for one file, field for field. `permissions` is the mode
 /// without the bits that say what kind of file it is, such as 0o644. The
 /// four times are nanoseconds since the start of 1970
 pub type FileInfo {
@@ -116,7 +116,7 @@ pub type Failure {
 /// the two doors all io goes through
 pub type Io {
   Io(
-    /// answer before returning; the calling process is blocked meanwhile
+    /// answer before returning. The calling process is blocked until then
     now: fn(Want) -> Result(Answer, Failure),
     /// keep the slip and return; answer it later with spark.answer
     later: fn(Want, ReplySlip) -> Nil,
@@ -128,7 +128,8 @@ pub opaque type ReplySlip {
   ReplySlip(ticket: host.Ticket)
 }
 
-/// for a native behind a sync api; a failure is thrown as its code
+/// asks through `now`, for a native behind a sync api. A failure is thrown as
+/// its code
 pub fn ask(
   io: Io,
   ctx: host.Context(host),
@@ -137,8 +138,8 @@ pub fn ask(
   encode(ctx, io.now(want))
 }
 
-/// for a native behind an async api; returns a promise that settles when the
-/// slip is answered, rejecting with the failure's code
+/// asks through `later`, for a native behind an async api. Returns a promise
+/// that settles when the slip is answered, or rejects with the failure's code
 pub fn ask_later(
   io: Io,
   ctx: host.Context(host),

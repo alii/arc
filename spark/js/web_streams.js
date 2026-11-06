@@ -1,7 +1,7 @@
 "use strict";
 
-// node's web streams: lib/stream/web.js, lib/internal/webstreams/* and the
-// webidl helpers they use
+// node's web streams, from lib/stream/web.js, lib/internal/webstreams/* and
+// the webidl helpers they use
 
 const internal = require("spark:internal");
 const { markUncloneable } = require("spark:errors");
@@ -28,7 +28,7 @@ const shims = {
     if (name === "messaging") {
       return { DOMException: require("spark:domexception").DOMException };
     }
-    // node's own socket streams, which nothing here has
+    // stand-ins for node's socket streams, which we don't have
     if (name === "stream_wrap") {
       return {
         WriteWrap: class WriteWrap {},
@@ -50,12 +50,12 @@ const shims = {
   "internal/events/abort_listener": () => ({
     addAbortListener: require("node:events").addAbortListener,
   }),
-  // the stream module holds this file; loading it makes it findable
+  // the stream module holds this file, so we load it to make the file findable
   "internal/streams/utils": () => {
     require("node:stream");
     return internal.find("internal/streams/utils");
   },
-  // a stream cannot be handed to another thread: there are none
+  // there are no other threads, so a stream can't be handed to one
   "internal/worker/io": () => ({
     MessageChannel: class MessageChannel {
       constructor() {
@@ -8441,7 +8441,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -8466,8 +8466,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error("no module " + name + " in this port");
@@ -8475,8 +8475,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

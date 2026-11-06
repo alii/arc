@@ -1,6 +1,6 @@
 #!/usr/bin/env escript
 %%! -noshell
-%% Minimal AVM packer — just enough of packbeam to bundle Arc for AtomVM.
+%% A minimal AVM packer with just enough of packbeam to bundle Arc for AtomVM.
 %%
 %% usage: pack_avm.escript <output.avm> <start_module> <input.beam|input.avm>...
 %%
@@ -53,8 +53,8 @@ uncompress_lit(Chunks) ->
             [{"LitU", zlib:uncompress(Comp)} | Rest]
     end.
 
-%% Pre-packed library avm — slurp its entries so shadowing works (our shims
-%% for arc_unicode_ffi/arc_regexp_ffi must win over any duplicates downstream).
+%% Read a pre-packed library avm's entries so shadowing works. Our shims for
+%% arc_unicode_ffi/arc_regexp_ffi must win over any duplicates downstream.
 load_avm(Path) ->
     {ok, <<"#!/usr/bin/env AtomVM\n", 0, 0, Body/binary>>} = file:read_file(Path),
     avm_entries(Body, []).
@@ -105,7 +105,7 @@ pack({Mod, Name, Data}, Start) ->
 pad(N) -> binary:copy(<<0>>, (4 - N rem 4) rem 4).
 pad_to_4(N) -> N + (4 - N rem 4) rem 4.
 
-%% First occurrence wins — shims packed ahead of stdlib shadow it.
+%% The first occurrence wins, so shims packed ahead of stdlib shadow it.
 dedup(Entries) -> dedup(Entries, #{}, []).
 dedup([], _, Acc) -> lists:reverse(Acc);
 dedup([{M, _, _} = E | T], Seen, Acc) ->

@@ -1,8 +1,8 @@
 "use strict";
 
-// the parts of node's net module that open nothing: isIP and friends,
-// SocketAddress and BlockList. The address parsing and printing is libuv's
-// inet_pton and inet_ntop; the matching rules are node's own
+// the parts of node's net module that don't open anything: isIP and friends,
+// SocketAddress and BlockList. Addresses are parsed and printed as libuv's
+// inet_pton and inet_ntop, and the matching rules are node's own
 
 const {
   error,
@@ -54,7 +54,8 @@ function isIP(s) {
 const AF_INET = 4;
 const AF_INET6 = 6;
 
-// four bytes, or undefined: no leading zeros, exactly four parts
+// returns four bytes, or undefined unless the text is exactly four parts with
+// no leading zeros
 function parseIPv4(text) {
   const bytes = [0];
   let sawDigit = false;
@@ -90,7 +91,8 @@ function hexValue(ch) {
   return -1;
 }
 
-// sixteen bytes, or undefined; anything from a '%' on is a zone and ignored
+// returns sixteen bytes, or undefined. We ignore the zone, which is anything
+// from a '%' on
 function parseIPv6(text) {
   const zone = text.indexOf("%");
   if (zone !== -1) text = text.slice(0, zone);
@@ -226,7 +228,7 @@ function sameBytes(a, b, count, aFrom = 0, bFrom = 0) {
   return true;
 }
 
-// -1, 0 or 1 over `count` bytes
+// compares `count` bytes and returns -1, 0 or 1
 function orderBytes(a, b, count, aFrom = 0, bFrom = 0) {
   for (let i = 0; i < count; i++) {
     const d = a[aFrom + i] - b[bFrom + i];
@@ -250,7 +252,8 @@ function isMatch(a, b) {
   return isMapped(v6.bytes) && sameBytes(v6.bytes, v4.bytes, 4, 12, 0);
 }
 
-// undefined when an ipv4 address meets an ipv6 one that does not wrap one
+// returns undefined when comparing an ipv4 address with an ipv6 one that
+// doesn't wrap an ipv4 address
 function compare(a, b) {
   if (a.family === b.family) {
     return orderBytes(a.bytes, b.bytes, a.bytes.length);
@@ -396,7 +399,7 @@ class SocketAddress {
     };
   }
 
-  // node reads the input as a url, which is not here yet
+  // node reads the input as a url, which we can't do here yet
   static parse(input) {
     validateString(input, "input");
     throw error(
@@ -456,7 +459,7 @@ const kHandle = Symbol("kHandle");
 
 class BlockList {
   constructor() {
-    // newest first in each: addresses by key, then subnets, then ranges
+    // addresses by key, then subnets, then ranges, each newest first
     this[kHandle] = { addresses: new Map(), subnets: [], ranges: [] };
   }
 

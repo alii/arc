@@ -109,7 +109,7 @@ pub fn update_binop(op: ast.UpdateOp) -> ClassifiedBinOp {
   }
 }
 
-// typeof and delete map to None: they have dedicated arms
+// typeof and delete map to None because they have their own arms
 pub fn translate_unaryop(op: ast.UnaryOp) -> Option(opcode.UnaryOpKind) {
   case op {
     ast.Negate -> Some(opcode.Neg)

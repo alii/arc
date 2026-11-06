@@ -330,7 +330,7 @@ fn map_clear(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 
 fn map_for_each(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(cb, this_arg) = two_args_or_undefined(args)
-  // brand check before callable check, observable
+  // the brand check runs before the callable check, which is observable
   use map <- require_map(st, this, "forEach")
   use cb <- helpers.require_callable(st, cb, fn() {
     rt_val.type_of(st, cb) <> " is not a function"

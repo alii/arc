@@ -3346,8 +3346,8 @@ pub fn function_bind_preserves_this_test() -> Nil {
   )
 }
 
-// functions written in a for head each close over their own names: the
-// parts of a head are emitted in another order than they are written
+// functions written in a for head each close over their own names, even though
+// a head's parts are emitted in a different order from how they're written
 pub fn for_classic_head_functions_keep_their_scopes_test() -> Nil {
   assert_normal(
     "(function () {

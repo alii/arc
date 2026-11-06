@@ -1,7 +1,7 @@
 "use strict";
 
-// node's lib/string_decoder.js. The decoding it leaves to c++ is written out
-// below, after src/string_decoder.cc
+// node's lib/string_decoder.js. Node leaves the decoding to c++, so we write it
+// out below, following src/string_decoder.cc
 
 const errors = require("spark:errors");
 const { Buffer } = require("node:buffer");
@@ -65,8 +65,8 @@ function slowCases(enc) {
   }
 }
 
-// the decoder's state is seven bytes: up to four of a character cut short,
-// how many more it needs, how many are held, and the encoding
+// the decoder's state is seven bytes. They hold up to four bytes of a cut-off
+// character, how many more it needs, how many are held, and the encoding
 const kIncompleteCharactersStart = 0;
 const kIncompleteCharactersEnd = 4;
 const kMissingBytes = 4;
@@ -100,12 +100,13 @@ function decode(state, view) {
   let nread = data.length;
   let prepend;
 
-  // bytes owed to a character the last chunk cut short
+  // finish a character the last chunk cut off
   if (state[kMissingBytes] > 0) {
     if (encoding === "utf8") {
       for (let i = 0; i < nread && i < state[kMissingBytes]; ++i) {
         if ((data[start + i] & 0xc0) !== 0x80) {
-          // not a continuation byte: the cut character ends here, unfinished
+          // this isn't a continuation byte, so the cut-off character ends here
+          // unfinished
           state[kMissingBytes] = 0;
           hold(state, data, start, i);
           state[kBufferedBytes] += i;
@@ -129,7 +130,7 @@ function decode(state, view) {
 
   if (nread === 0) return prepend ?? "";
 
-  // a character this chunk cuts short is held back for the next one
+  // hold back a character this chunk cuts off for the next chunk
   if (encoding === "utf8" && data[start + nread - 1] & 0x80) {
     for (let i = nread - 1; ; --i) {
       state[kBufferedBytes]++;
@@ -310,7 +311,7 @@ const files = {
 
 const loaded = new Map();
 
-// a module this file holds, by node's own name for it
+// returns a module this file holds, looked up by its node name
 function own(name) {
   if (loaded.has(name)) return loaded.get(name).exports;
   if (Object.hasOwn(shims, name)) {
@@ -335,8 +336,8 @@ function own(name) {
   return made.exports;
 }
 
-// what the other ports may have from here: the files, and not the stand-ins,
-// which are this port's own answers to its own questions
+// lets other ports load the files here, but not the stand-ins, which only
+// answer this port's own requires
 function shared(name) {
   if (!Object.hasOwn(files, name)) {
     throw new Error("no module " + name + " in this port");
@@ -344,8 +345,8 @@ function shared(name) {
   return own(name);
 }
 
-// what the files here call require: this file's own modules first, then
-// wherever else the name can be found
+// the files here call this as require. It tries this file's modules first,
+// then the fallback
 function load(name) {
   if (
     loaded.has(name) ||

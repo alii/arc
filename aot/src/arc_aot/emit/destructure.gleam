@@ -175,7 +175,7 @@ fn emit_array_elements(
   }
 }
 
-// §8.6.2 requireobjectcoercible first, then each key evaluated once
+// §8.6.2 runs requireobjectcoercible first, then evaluates each key once
 fn emit_object_pattern(
   properties: List(ast.PatternProperty),
   source: ir.Value,

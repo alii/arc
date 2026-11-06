@@ -361,7 +361,7 @@ each_named(St, Obj, [K | Ks], [V | Vs], Strict) ->
                Ks, Vs, Strict);
 each_named(St, _, _, _, _) -> St.
 
-%% a literal of distinct plain named keys: one shaped cell, its shape cached by site
+%% builds a literal of distinct plain named keys as one shaped cell, caching its shape by site
 new_object_shaped(St, Keys, Vals, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
     Store = element(?AGENT_STORE, St),
     Proto = {?SOME, element(?BUILTINPAIR_PROTOTYPE,

@@ -63,7 +63,7 @@ pub fn throw_syntax_error(st: Agent, msg: String) -> a {
 }
 
 // §9.1.1.1.5/6 tdz read throws referenceerror
-// not by classify: the variable may hold a private name, which is no js value
+// not via classify, because the variable may hold a private name, which is not a js value
 pub fn tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
   case v == types.mk_tdz() {
     True -> {
@@ -329,7 +329,7 @@ pub fn float_to_int(f: Float) -> Int {
   }
 }
 
-// +. 0.0 normalizes -0.0 before comparing
+// +. 0.0 normalises -0.0 before comparing
 pub fn integral_int(f: Float) -> Option(Int) {
   let i = float_to_int(f)
   case int.to_float(i) +. 0.0 == f +. 0.0 {

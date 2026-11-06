@@ -28,9 +28,9 @@ fn position(source: String, marker: String) -> #(Int, Int) {
   #(string.byte_size(before), list.length(string.split(before, "\n")))
 }
 
-// `free` is, for each outer name the function uses, in order, how the code
-// around it hands it over, or None for a global; `parent_slots` are the
-// parent's slots for the ones it does hand over
+// `free` says how the code around the function hands over each outer name it
+// uses, in order, with None for a global. `parent_slots` are the parent's slots
+// for the names it does hand over
 fn alone(
   source: String,
   marker: String,

@@ -182,7 +182,7 @@ pub fn next_prop_seq(st: Agent) -> #(Int, Agent) {
   )
 }
 
-// spelled out rather than via types.*_property: one call per property made
+// spelled out rather than built with types.*_property, so each property takes one call
 pub fn frozen_property(st: Agent, value: JsVal) -> #(Property, Agent) {
   let #(seq, st) = next_prop_seq(st)
   let prop =

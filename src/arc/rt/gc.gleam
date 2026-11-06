@@ -34,7 +34,7 @@ import gleam/set
 @external(erlang, "arc_rt_gc_ffi", "push_refs")
 pub fn push_refs(term: a, acc: List(Int)) -> List(Int)
 
-// refs only in what changed since the old copy; unchanged parts are old news
+// refs only in what changed since the old copy, since unchanged parts were already seen
 @external(erlang, "arc_rt_gc_ffi", "diff_refs")
 fn diff_refs(before: a, now: a, acc: List(Int)) -> List(Int)
 
@@ -356,7 +356,7 @@ pub fn maybe_collect(st: Agent) -> Agent {
   }
 }
 
-// minor gcs are cheap, so a fixed young generation size
+// minor gcs are cheap, so the young generation has a fixed size
 fn due(store: Store) -> Bool {
   store.alloc_since_gc >= store.gc_threshold
 }
@@ -395,7 +395,7 @@ pub fn collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
   }
 }
 
-// full; with cells kept for good only the ids above them are walked
+// a full gc; when cells are kept for good it walks only the ids above them
 pub fn collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   case st.store.meta.kept.below {
     0 -> collect_all(st, extra_roots)
@@ -643,7 +643,7 @@ fn is_read_ic(entry: IcEntry) -> Bool {
 @external(erlang, "lists", "sort")
 fn ascending(ids: List(Int)) -> List(Int)
 
-// hot: probed once per heap edge
+// hot, since we probe it once per heap edge
 @external(erlang, "maps", "is_key")
 fn marked(id: Int, live: Dict(Int, Nil)) -> Bool
 

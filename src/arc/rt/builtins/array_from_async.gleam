@@ -328,7 +328,7 @@ pub fn reject_with(st: Agent, error: JsVal, reject: JsVal) -> #(JsVal, Agent) {
   #(mk_undefined(), settle(st, reject, error))
 }
 
-// §7.4.13 under throw completion: original error always wins
+// §7.4.13 under a throw completion, where the original error always wins
 fn from_async_close_then_reject(
   st: Agent,
   iter: JsVal,

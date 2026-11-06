@@ -527,7 +527,7 @@ fn call_nested(
   }
 }
 
-// holes as undefined
+// reads holes as undefined
 pub fn array_values(agent: Agent, v: JsVal) -> List(JsVal) {
   case classify(v) {
     KHandle(h) ->
@@ -778,7 +778,8 @@ fn return_to(state: State, saved: SavedFrame, value: JsVal) -> State {
   )
 }
 
-// cont finishes the midway op; no safepoint, its captures live only here
+// cont finishes the op cut off midway. There's no safepoint because its
+// captures live only here
 pub fn cont_return(
   agent: Agent,
   depth: Int,
@@ -805,7 +806,7 @@ pub fn restore_frame(
   State(..caller, agent:, stack:, locals:, pc: saved.pc)
 }
 
-// out of handlers here; continue the search in the caller
+// this frame has no handlers left, so carry on the search in the caller
 pub fn unwind_frame(state: State) -> Option(State) {
   case state.call_stack {
     [] -> None
@@ -870,7 +871,8 @@ pub fn root_this(
   }
 }
 
-// same per cell, so callers making many build it once
+// what a root call needs from a function cell, so callers making many calls
+// build it once
 pub type RootCallee {
   RootCallee(
     callee: JsVal,

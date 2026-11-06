@@ -1,4 +1,4 @@
-%% math:* badariths on overflow, so these return jsnum shapes; math_kernel may answer miss
+%% math:* raises badarith on overflow, so these return jsnum shapes. math_kernel may return miss
 -module(arc_rt_math_ffi).
 -export([exp_total/1, pow_total/2, cosh_total/1, sinh_total/1, hypot_total/1, to_float32/1,
          math_sqrt/1, math_floor/1, math_abs/1,
@@ -6,7 +6,7 @@
 
 -include("../arc_rt_layout.hrl").
 
-%% plain number args straight to the kernels, else miss
+%% sends plain number args straight to the kernels, otherwise returns miss
 math_kernel(math_floor, [X | _]) -> math_floor(X);
 math_kernel(math_abs, [X | _]) -> math_abs(X);
 math_kernel(math_sqrt, [X | _]) -> math_sqrt(X);
@@ -96,7 +96,7 @@ signed_infinity(X) ->
         false -> j_pos_inf
     end.
 
-%% never wildcard-match a non-number arg, spec throws there
+%% never wildcard-match a non-number arg because the spec throws there
 math_sqrt(X) when is_number(X), X >= 0 -> math:sqrt(X);
 math_sqrt(X) when is_number(X) -> js_nan;
 math_sqrt(js_nan) -> js_nan;

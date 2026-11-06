@@ -304,7 +304,7 @@ pub fn instant_method(
       case valid_rounding_increment(inc, max, inclusive: True) {
         False -> rt_val.throw_range_error(st, "invalid roundingIncrement")
         True -> {
-          // rounds as if positive: down is toward the big bang
+          // round as if positive, so down means toward the big bang
           let rounded =
             round_to_increment(ns, inc * unit_ns, as_if_positive_mode(mode))
           make_instant(
