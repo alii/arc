@@ -1,6 +1,3 @@
-> [!NOTE]
-> arc is still a young project, tread carefully!
-
 # arc ⌒
 
 JavaScript on the BEAM
