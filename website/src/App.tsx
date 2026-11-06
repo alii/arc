@@ -88,10 +88,6 @@ export default function App() {
 				<motion.div variants={item} className="flex items-center gap-4">
 					<ExternalLink href="https://github.com/alii/arc">GitHub</ExternalLink>
 				</motion.div>
-
-				<motion.p variants={item} className="text-rpd-muted dark:text-rp-muted text-sm">
-					Arc is an early research project and is rough in places.
-				</motion.p>
 			</motion.div>
 
 			{wide && (
