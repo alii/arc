@@ -52,15 +52,29 @@ export default function App() {
 				</motion.div>
 
 				<motion.p variants={item}>
-					Arc is a JavaScript engine written in <ExternalLink href="https://gleam.run">Gleam</ExternalLink>. It
-					implements ECMAScript and has no built-in timers, I/O or concurrency. The BEAM program that embeds it provides
-					whatever globals and host functions the JavaScript needs.
+					Arc is a JavaScript engine and runtime written in{' '}
+					<ExternalLink href="https://gleam.run">Gleam</ExternalLink>. It implements the ECMAScript spec. On its own it has
+					no effects, timers or I/O. The program that embeds Arc provides those, and Arc's embedding API makes that easy.
 				</motion.p>
 
 				<motion.p variants={item}>
-					By default Arc interprets JavaScript, and it can also compile it ahead of time to Erlang. It runs on
-					Erlang/OTP, and in the browser on <ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink> compiled
-					to WebAssembly.
+					There's also <ExternalLink href="https://github.com/alii/arc/tree/master/spark">Spark</ExternalLink>, a
+					Node.js compatibility layer for Arc. Spark <em>does</em> provide I/O and timers, such as{' '}
+					<code>fs.readFile</code> and <code>setTimeout</code>. You can think of Arc as the equivalent of JSC or V8, and
+					Spark as the equivalent of Bun or Node.js.
+				</motion.p>
+
+				<motion.p variants={item}>
+					Arc's API can change from one commit to the next, which is true of many engines. We recommend pinning to a
+					commit SHA and upgrading on a regular schedule.
+				</motion.p>
+
+				<motion.p variants={item}>
+					By default Arc interprets JavaScript, but it can also compile JavaScript to Erlang ahead of time (AOT). AOT has
+					tradeoffs, and we don't recommend it for dynamic code, such as code generated at runtime. Arc runs on
+					Erlang/OTP, and in the browser on our own fork of{' '}
+					<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink> compiled to WebAssembly. We forked AtomVM to
+					make it faster in the browser.
 					{wide ? ' The playground next to this text runs that way, and its Erlang tab shows the compiled output.' : ''}
 					{wide && (
 						<>
@@ -78,7 +92,8 @@ export default function App() {
 
 				<motion.div variants={item}>
 					<p>
-						Tested against <ExternalLink href="https://github.com/tc39/test262">test262</ExternalLink> on every commit:
+						Arc is tested against <ExternalLink href="https://github.com/tc39/test262">test262</ExternalLink> on every
+						commit:
 					</p>
 					<ConformanceChart />
 				</motion.div>

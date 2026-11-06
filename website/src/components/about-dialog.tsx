@@ -63,8 +63,8 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 									<Section title="What is running">
 										This page runs Arc inside your browser. Arc is a JavaScript engine, and here it runs on{' '}
 										<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink>, a small BEAM implementation
-										compiled to WebAssembly. It downloads once, at about 7 MB. After that nothing you type leaves your
-										machine.
+										compiled to WebAssembly. You download it once, and it's about 7 MB. After that, nothing you type
+										leaves your machine.
 									</Section>
 
 									<Section title="Tabs">
@@ -77,21 +77,21 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 									</Section>
 
 									<Section title="Speed">
-										Programs run roughly tens of times slower here than on the real BEAM, because AtomVM in WebAssembly
+										Programs run tens of times slower here than on the real BEAM, because AtomVM in WebAssembly
 										is an interpreter running an interpreter. AtomVM also loads code on first use and Arc builds its
-										built-ins at startup, so a small program runs in the background after the page loads to get that out
-										of the way. The status reads <em>warming up caches</em> until it finishes, and if you press run
+										built-ins at startup, so the page runs a small program in the background when it loads to get that
+										out of the way. The status reads <em>warming up caches</em> until it finishes, and if you press run
 										before then, your program waits its turn.
 									</Section>
 
 									<Section title="Limits">
 										AtomVM has no regex engine, so <code>RegExp</code> uses your browser's, at about a millisecond per
-										match. There are no timers, filesystem or network.
+										match. You can't use timers, the filesystem or the network here.
 									</Section>
 
 									<p className="text-xs text-rpd-muted dark:text-rp-muted">
 										Arc is an early research project.{' '}
-										<ExternalLink href="https://github.com/alii/arc">Source on GitHub</ExternalLink>.
+										<ExternalLink href="https://github.com/alii/arc">Read the source on GitHub</ExternalLink>.
 									</p>
 								</div>
 							</motion.div>
