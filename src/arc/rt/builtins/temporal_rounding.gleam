@@ -326,7 +326,8 @@ pub fn get_difference_settings(
   #(#(largest, smallest, inc, mode), st)
 }
 
-pub const largest_smaller_msg = "largestUnit must not be smaller than smallestUnit"
+pub const largest_smaller_msg =
+  "largestUnit must not be smaller than smallestUnit"
 
 pub fn largest_smaller_than_smallest(largest: Unit, smallest: Unit) -> Bool {
   unit_rank(largest) < unit_rank(smallest)

@@ -21,7 +21,8 @@ fn eval_string(source: String) -> String {
 }
 
 // 100,000 bytes is far past the size where a written buffer becomes pieces
-const big = "var a = new Uint8Array(100000);
+const big =
+  "var a = new Uint8Array(100000);
   for (var i = 0; i < a.length; i += 997) a[i] = (i / 997) & 255;
 "
 

@@ -20,7 +20,8 @@ pub fn these_names_do_share_a_number_test() {
   assert c == d
 }
 
-const prelude = "
+const prelude =
+  "
   var out = [];
   function attempt(f) { try { out.push(JSON.stringify(f())); } catch (e) { out.push(e.constructor.name); } }
 "

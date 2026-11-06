@@ -1,6 +1,7 @@
 //// generated from js/*.js by `gleam run -m embed_js`; edit those instead
 
-pub const bootstrap = "(function () {
+pub const bootstrap =
+  "(function () {
   \"use strict\";
 
   const compile = Function;
@@ -161,7 +162,8 @@ pub const bootstrap = "(function () {
 })
 "
 
-pub const errors = "\"use strict\";
+pub const errors =
+  "\"use strict\";
 
 let realInspect;
 
@@ -590,7 +592,8 @@ module.exports = {
 };
 "
 
-pub const internal = "\"use strict\";
+pub const internal =
+  "\"use strict\";
 
 // node's own internals, the files the rest of its library is written
 // against: errors, validators, util, inspect and a few small ones. Other
@@ -7964,7 +7967,8 @@ module.exports = {
 };
 "
 
-pub const async_hooks = "\"use strict\";
+pub const async_hooks =
+  "\"use strict\";
 
 const { getContext, setContext } = native;
 
@@ -8150,7 +8154,8 @@ module.exports = {
 };
 "
 
-pub const timers = "\"use strict\";
+pub const timers =
+  "\"use strict\";
 
 const { now, getContext, setContext } = native;
 const { validateFunction } = require(\"spark:errors\");
@@ -8434,7 +8439,8 @@ module.exports = {
 };
 "
 
-pub const fs = "\"use strict\";
+pub const fs =
+  "\"use strict\";
 
 const {
   AbortError,
@@ -9363,7 +9369,8 @@ module.exports = {
 };
 "
 
-pub const process = "\"use strict\";
+pub const process =
+  "\"use strict\";
 
 const { facts, write, now, getContext, setContext } = native;
 const { invalidArgType, systemError, validateFunction } = require(\"spark:errors\");
@@ -9453,7 +9460,8 @@ Object.defineProperty(module.exports, Symbol.toStringTag, {
 });
 "
 
-pub const os = "\"use strict\";
+pub const os =
+  "\"use strict\";
 
 const given = native.facts();
 
@@ -9802,7 +9810,8 @@ Object.defineProperties(module.exports, {
 });
 "
 
-pub const encoding = "\"use strict\";
+pub const encoding =
+  "\"use strict\";
 
 const {
   typeError,
@@ -10034,7 +10043,8 @@ class TextDecoder {
 module.exports = { TextEncoder, TextDecoder };
 "
 
-pub const perf_hooks = "\"use strict\";
+pub const perf_hooks =
+  "\"use strict\";
 
 const {
   error,
@@ -10452,12 +10462,14 @@ module.exports = {
 };
 "
 
-pub const fs_promises = "\"use strict\";
+pub const fs_promises =
+  "\"use strict\";
 
 module.exports = require(\"node:fs\").promises;
 "
 
-pub const global = "\"use strict\";
+pub const global =
+  "\"use strict\";
 
 const { validateFunction } = require(\"spark:errors\");
 
@@ -10469,7 +10481,8 @@ function queueMicrotask(callback) {
 module.exports = { global: globalThis, queueMicrotask };
 "
 
-pub const domexception = "\"use strict\";
+pub const domexception =
+  "\"use strict\";
 
 const internals = new WeakMap();
 const nameToCode = new Map();
@@ -10651,7 +10664,8 @@ Object.defineProperties(QuotaExceededError.prototype, {
 module.exports = { DOMException, QuotaExceededError };
 "
 
-pub const dom_events = "\"use strict\";
+pub const dom_events =
+  "\"use strict\";
 
 const {
   error,
@@ -11757,7 +11771,8 @@ Object.defineProperty(module.exports, \"internals\", {
 });
 "
 
-pub const buffer = "\"use strict\";
+pub const buffer =
+  "\"use strict\";
 
 // node's lib/buffer.js. Two things differ on purpose: small buffers are not
 // carved out of a shared pool, so each has its own memory (byteOffset 0), and
@@ -14246,7 +14261,8 @@ Object.defineProperties(module.exports, {
 });
 "
 
-pub const path = "\"use strict\";
+pub const path =
+  "\"use strict\";
 
 // node's lib/path.js. matchesGlob is not here yet
 
@@ -15505,17 +15521,20 @@ posix._makeLong = posix.toNamespacedPath;
 module.exports = isWindows ? win32 : posix;
 "
 
-pub const path_posix = "\"use strict\";
+pub const path_posix =
+  "\"use strict\";
 
 module.exports = require(\"node:path\").posix;
 "
 
-pub const path_win32 = "\"use strict\";
+pub const path_win32 =
+  "\"use strict\";
 
 module.exports = require(\"node:path\").win32;
 "
 
-pub const net = "\"use strict\";
+pub const net =
+  "\"use strict\";
 
 // the parts of node's net module that open nothing: isIP and friends,
 // SocketAddress and BlockList. The address parsing and printing is libuv's
@@ -16253,7 +16272,8 @@ class BlockList {
 module.exports = { BlockList, SocketAddress, isIP, isIPv4, isIPv6 };
 "
 
-pub const querystring_internal = "\"use strict\";
+pub const querystring_internal =
+  "\"use strict\";
 
 // node's lib/internal/querystring.js. One addition: a character beyond
 // U+FFFF arrives as one code point here, not as a surrogate pair
@@ -16364,7 +16384,8 @@ function encodeStr(str, noEscapeTable, hexTable) {
 module.exports = { encodeStr, hexTable, isHexTable };
 "
 
-pub const querystring = "\"use strict\";
+pub const querystring =
+  "\"use strict\";
 
 // node's lib/querystring.js
 
@@ -16836,7 +16857,8 @@ function decodeStr(s, decoder) {
 }
 "
 
-pub const url = "\"use strict\";
+pub const url =
+  "\"use strict\";
 
 // node's lib/internal/url.js and lib/url.js over a native parser. Not here:
 // URLPattern, URL.createObjectURL and URL.revokeObjectURL, and the warning
@@ -19278,7 +19300,8 @@ module.exports = {
 };
 "
 
-pub const events = "\"use strict\";
+pub const events =
+  "\"use strict\";
 
 // node's lib/events.js with the three internal files it pulls in. What it
 // asks of the rest of node is answered by `shims` below
@@ -20521,7 +20544,8 @@ function load(name) {
 module.exports = load(\"events\");
 "
 
-pub const string_decoder = "\"use strict\";
+pub const string_decoder =
+  "\"use strict\";
 
 // node's lib/string_decoder.js. The decoding it leaves to c++ is written out
 // below, after src/string_decoder.cc
@@ -20884,7 +20908,8 @@ function load(name) {
 module.exports = load(\"string_decoder\");
 "
 
-pub const util = "\"use strict\";
+pub const util =
+  "\"use strict\";
 
 // node's lib/util.js and the files only it uses: deep equality, parseArgs,
 // MIMEType, debounce, throttle and diff. inspect, format, the type checks,
@@ -24239,7 +24264,8 @@ function load(name) {
 module.exports = load(\"util\");
 "
 
-pub const stream = "\"use strict\";
+pub const stream =
+  "\"use strict\";
 
 // node's lib/stream.js and lib/internal/streams/*: Readable, Writable,
 // Duplex, Transform, PassThrough, pipeline, finished, compose and the
@@ -31084,12 +31110,14 @@ function load(name) {
 module.exports = load(\"stream\");
 "
 
-pub const stream_promises = "\"use strict\";
+pub const stream_promises =
+  "\"use strict\";
 
 module.exports = require(\"node:stream\").promises;
 "
 
-pub const stream_consumers = "\"use strict\";
+pub const stream_consumers =
+  "\"use strict\";
 
 // the stream module holds the file; loading it makes it findable
 require(\"node:stream\");
@@ -31105,7 +31133,8 @@ module.exports = {
 };
 "
 
-pub const structured_clone = "\"use strict\";
+pub const structured_clone =
+  "\"use strict\";
 
 // the html structured clone algorithm, as node's global structuredClone
 // behaves: a deep copy that keeps shared and circular references, and
@@ -31403,7 +31432,8 @@ function structuredClone(value, options) {
 module.exports = { structuredClone };
 "
 
-pub const zlib = "\"use strict\";
+pub const zlib =
+  "\"use strict\";
 
 // node's lib/zlib.js. The handles it drives, c++ in node, are written out
 // below over natives that keep nothing between calls
@@ -32884,12 +32914,14 @@ function load(name) {
 module.exports = load(\"zlib\");
 "
 
-pub const util_types = "\"use strict\";
+pub const util_types =
+  "\"use strict\";
 
 module.exports = require(\"node:util\").types;
 "
 
-pub const tty = "\"use strict\";
+pub const tty =
+  "\"use strict\";
 
 const { codes } = require(\"spark:errors\");
 
@@ -32911,7 +32943,8 @@ function WriteStream() {
 module.exports = { isatty, ReadStream, WriteStream };
 "
 
-pub const tls = "\"use strict\";
+pub const tls =
+  "\"use strict\";
 
 const { codes, invalidArgValue, validateString } = require(\"spark:errors\");
 
@@ -32964,7 +32997,8 @@ module.exports = {
 };
 "
 
-pub const web_streams = "\"use strict\";
+pub const web_streams =
+  "\"use strict\";
 
 // node's web streams: lib/stream/web.js, lib/internal/webstreams/* and the
 // webidl helpers they use
@@ -41458,7 +41492,8 @@ function load(name) {
 module.exports = load(\"stream/web\");
 "
 
-pub const blob = "\"use strict\";
+pub const blob =
+  "\"use strict\";
 
 // node's Blob and File: lib/internal/blob.js and lib/internal/file.js. The
 // store they keep their bytes in, c++ in node, is written out below
@@ -42363,7 +42398,8 @@ function load(name) {
 module.exports = load(\"blob\");
 "
 
-pub const fetch = "\"use strict\";
+pub const fetch =
+  "\"use strict\";
 
 // fetch, Headers, Request and Response, written to the fetch standard and
 // worded the way node words its errors. The network is the embedder's: one
@@ -44009,7 +44045,8 @@ function fetch(input, init = undefined) {
 module.exports = { fetch, Headers, Request, Response, FormData };
 "
 
-pub const crypto = "\"use strict\";
+pub const crypto =
+  "\"use strict\";
 
 // node's digests and random bytes: lib/internal/crypto/hash.js, random.js and
 // util.js, with the handles they drive, c++ in node, written out below

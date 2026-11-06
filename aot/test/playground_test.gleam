@@ -5,7 +5,8 @@ import carder/backend/core_printer
 import carder/pipeline
 import gleam/string
 
-const src = "class Counter { #n = 0; inc() { return ++this.#n; } }
+const src =
+  "class Counter { #n = 0; inc() { return ++this.#n; } }
 function* fib() { let [a, b] = [0, 1]; for (;;) { yield a; [a, b] = [b, a + b]; } }
 async function main() {
   const c = new Counter();

@@ -40,7 +40,7 @@ jobs:
       - uses: erlef/setup-beam@v1
         with:
           otp-version: '29'
-          gleam-version: '1.18'
+          gleam-version: '1.19'
           rebar3-version: '3'
 
       - name: Build

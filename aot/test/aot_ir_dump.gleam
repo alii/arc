@@ -87,7 +87,8 @@ fn dump_richards_node_counts() -> Nil {
   io.println("")
 }
 
-pub const crypto_am3_write_js = "
+pub const crypto_am3_write_js =
+  "
 function am3(i,x,w,j,c,n) {
   var this_array = this.array;
   var w_array    = w.array;

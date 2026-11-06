@@ -25,7 +25,8 @@ const budget_us = 3_000_000
 
 pub const sum_js = "let s=0;for(let i=0;i<1000000;i++)s+=i;s"
 
-pub const adder_js = "function makeAdder(x){return function(y){return x+y}}let add5=makeAdder(5);let s=0;for(let i=0;i<1000000;i++)s+=add5(i);s"
+pub const adder_js =
+  "function makeAdder(x){return function(y){return x+y}}let add5=makeAdder(5);let s=0;for(let i=0;i<1000000;i++)s+=add5(i);s"
 
 pub const obj_js = "let o={x:0};for(let i=0;i<1000000;i++)o.x=o.x+i;let s=o.x;s"
 

@@ -26,165 +26,181 @@ pub type FnFlags {
   )
 }
 
-pub const function_sloppy = FnFlags(
-  is_constructor: True,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: False,
-  is_async: False,
-  is_strict: False,
-)
+pub const function_sloppy =
+  FnFlags(
+    is_constructor: True,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: False,
+    is_async: False,
+    is_strict: False,
+  )
 
-pub const function_strict = FnFlags(
-  is_constructor: True,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: False,
-  is_async: False,
-  is_strict: True,
-)
+pub const function_strict =
+  FnFlags(
+    is_constructor: True,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: False,
+    is_async: False,
+    is_strict: True,
+  )
 
-pub const method_sloppy = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: False,
-  is_async: False,
-  is_strict: False,
-)
+pub const method_sloppy =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: False,
+    is_async: False,
+    is_strict: False,
+  )
 
-pub const method_strict = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: False,
-  is_async: False,
-  is_strict: True,
-)
+pub const method_strict =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: False,
+    is_async: False,
+    is_strict: True,
+  )
 
-pub const arrow_sloppy = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: True,
-  is_generator: False,
-  is_async: False,
-  is_strict: False,
-)
+pub const arrow_sloppy =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: True,
+    is_generator: False,
+    is_async: False,
+    is_strict: False,
+  )
 
-pub const arrow_strict = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: True,
-  is_generator: False,
-  is_async: False,
-  is_strict: True,
-)
+pub const arrow_strict =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: True,
+    is_generator: False,
+    is_async: False,
+    is_strict: True,
+  )
 
-pub const async_arrow_sloppy = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: True,
-  is_generator: False,
-  is_async: True,
-  is_strict: False,
-)
+pub const async_arrow_sloppy =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: True,
+    is_generator: False,
+    is_async: True,
+    is_strict: False,
+  )
 
-pub const async_arrow_strict = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: True,
-  is_generator: False,
-  is_async: True,
-  is_strict: True,
-)
+pub const async_arrow_strict =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: True,
+    is_generator: False,
+    is_async: True,
+    is_strict: True,
+  )
 
-pub const async_function_sloppy = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: False,
-  is_async: True,
-  is_strict: False,
-)
+pub const async_function_sloppy =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: False,
+    is_async: True,
+    is_strict: False,
+  )
 
-pub const async_function_strict = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: False,
-  is_async: True,
-  is_strict: True,
-)
+pub const async_function_strict =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: False,
+    is_async: True,
+    is_strict: True,
+  )
 
-pub const generator_sloppy = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: True,
-  is_async: False,
-  is_strict: False,
-)
+pub const generator_sloppy =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: True,
+    is_async: False,
+    is_strict: False,
+  )
 
-pub const generator_strict = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: True,
-  is_async: False,
-  is_strict: True,
-)
+pub const generator_strict =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: True,
+    is_async: False,
+    is_strict: True,
+  )
 
-pub const async_generator_sloppy = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: True,
-  is_async: True,
-  is_strict: False,
-)
+pub const async_generator_sloppy =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: True,
+    is_async: True,
+    is_strict: False,
+  )
 
-pub const async_generator_strict = FnFlags(
-  is_constructor: False,
-  is_class_constructor: False,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: True,
-  is_async: True,
-  is_strict: True,
-)
+pub const async_generator_strict =
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: True,
+    is_async: True,
+    is_strict: True,
+  )
 
-pub const class_constructor = FnFlags(
-  is_constructor: True,
-  is_class_constructor: True,
-  is_derived_constructor: False,
-  is_arrow: False,
-  is_generator: False,
-  is_async: False,
-  is_strict: True,
-)
+pub const class_constructor =
+  FnFlags(
+    is_constructor: True,
+    is_class_constructor: True,
+    is_derived_constructor: False,
+    is_arrow: False,
+    is_generator: False,
+    is_async: False,
+    is_strict: True,
+  )
 
-pub const derived_class_constructor = FnFlags(
-  is_constructor: True,
-  is_class_constructor: True,
-  is_derived_constructor: True,
-  is_arrow: False,
-  is_generator: False,
-  is_async: False,
-  is_strict: True,
-)
+pub const derived_class_constructor =
+  FnFlags(
+    is_constructor: True,
+    is_class_constructor: True,
+    is_derived_constructor: True,
+    is_arrow: False,
+    is_generator: False,
+    is_async: False,
+    is_strict: True,
+  )
 
 // the shared constant for these flags
 pub fn flags(

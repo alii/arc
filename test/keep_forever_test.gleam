@@ -35,7 +35,8 @@ fn live(eng: Engine(Nil)) -> Int {
   rt_gc.stats(engine.agent(eng)).live_count
 }
 
-const shared = "
+const shared =
+  "
   var shared = { name: 'shared', list: [1, 2, 3], made: [] };
   var cache = new WeakMap();
   function churn(n) { var last; for (var i = 0; i < n; i++) last = { i: i, pad: [i, i] }; return last.i; }

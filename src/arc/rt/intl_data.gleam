@@ -362,19 +362,20 @@ pub type DateTimeComponents {
   )
 }
 
-pub const empty_date_time_components = DateTimeComponents(
-  weekday: None,
-  era: None,
-  year: None,
-  month: None,
-  day: None,
-  day_period: None,
-  hour: None,
-  minute: None,
-  second: None,
-  fractional_second_digits: None,
-  time_zone_name: None,
-)
+pub const empty_date_time_components =
+  DateTimeComponents(
+    weekday: None,
+    era: None,
+    year: None,
+    month: None,
+    day: None,
+    day_period: None,
+    hour: None,
+    minute: None,
+    second: None,
+    fractional_second_digits: None,
+    time_zone_name: None,
+  )
 
 pub type FormatTimeZone {
   // host zone, reported as "UTC"

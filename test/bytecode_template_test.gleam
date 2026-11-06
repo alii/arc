@@ -98,7 +98,8 @@ fn all_template_sites(t: FuncTemplate) -> List(Int) {
   ])
 }
 
-const tagged_source = "
+const tagged_source =
+  "
   function id(s) { return s }
   var a = id`top`;
   function f(x) { return [id`f0${x}`, () => id`arrow`] }

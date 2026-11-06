@@ -440,7 +440,8 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
   }
 }
 
-const iteration_budget_msg = "Array-like length exceeds the maximum supported iteration"
+const iteration_budget_msg =
+  "Array-like length exceeds the maximum supported iteration"
 
 // §24.1.5.2.1
 fn map_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -702,7 +703,8 @@ fn alloc_helper_body(st: Agent, body: HelperBody) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-const helper_receiver_err = "Iterator Helper method called on incompatible receiver"
+const helper_receiver_err =
+  "Iterator Helper method called on incompatible receiver"
 
 const helper_running_err = "Iterator Helper is currently being iterated"
 

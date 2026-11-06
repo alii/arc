@@ -249,7 +249,8 @@ pub fn ge_i32(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-const bigint_mix_error = "Cannot mix BigInt and other types, use explicit conversions"
+const bigint_mix_error =
+  "Cannot mix BigInt and other types, use explicit conversions"
 
 fn to_numeric_operands(
   st: Agent,

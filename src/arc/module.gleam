@@ -105,7 +105,8 @@ pub type ModuleError {
   EvaluationPending(promise: Handle)
 }
 
-const tla_never_settled_message = "module evaluation never completed: top-level await promise never settled"
+const tla_never_settled_message =
+  "module evaluation never completed: top-level await promise never settled"
 
 pub fn compile_bundle_error_message(err: CompileBundleError) -> String {
   case err {

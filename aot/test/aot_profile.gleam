@@ -717,7 +717,8 @@ pub fn raytrace_apply_verify() -> Bool {
   args_ok && chk_ok && reaches
 }
 
-const am3_bench_js = "
+const am3_bench_js =
+  "
 function BI() { this.array = new Array(); }
 BI.prototype.am3 = function(i,x,w,j,c,n) {
   var this_array = this.array;

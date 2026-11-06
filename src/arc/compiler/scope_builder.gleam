@@ -63,13 +63,14 @@ pub type RawFunctionInfo {
   )
 }
 
-const blank_raw_fn_info = RawFunctionInfo(
-  is_arrow: False,
-  is_derived_constructor: False,
-  annexb_candidates: [],
-  source: None,
-  waits: False,
-)
+const blank_raw_fn_info =
+  RawFunctionInfo(
+    is_arrow: False,
+    is_derived_constructor: False,
+    annexb_candidates: [],
+    source: None,
+    waits: False,
+  )
 
 fn new_raw_scope(
   id: ScopeId,

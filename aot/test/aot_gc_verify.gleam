@@ -13,7 +13,8 @@ import gleam/io
 import gleam/list
 import gleam/string
 
-const prog_a_alloc = "
+const prog_a_alloc =
+  "
 globalThis.keep = [];
 function m(x){return function(y){return x+y}}
 let a=m(5);
@@ -27,7 +28,8 @@ console.log('alloc-done ' + globalThis.keep.length);
 
 const prog_a_read = "console.log('read ' + globalThis.keep[5][0]);"
 
-const prog_b = "
+const prog_b =
+  "
 globalThis.keep = [];
 function m(x){return function(y){return x+y}}
 let a=m(5);
@@ -44,7 +46,8 @@ Promise.resolve().then(function(){
 console.log('sync');
 "
 
-const prog_c = "
+const prog_c =
+  "
 function m(x){return function(y){return x+y}}
 let a=m(5);
 Promise.resolve().then(function(){

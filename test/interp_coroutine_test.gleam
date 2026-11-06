@@ -80,7 +80,8 @@ fn thrown(source: String) -> String {
   }
 }
 
-const settle = "
+const settle =
+  "
   var q = Promise.resolve();
   for (var i = 0; i < 30; i++) q = q.then(() => 0);
   q.then(() => { out = log.join(',') });

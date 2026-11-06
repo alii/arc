@@ -6,7 +6,8 @@ fn run(source: String) -> String {
   engine.inspect(eng, value)
 }
 
-const prelude = "
+const prelude =
+  "
   var out = [];
   function attempt(f) { try { out.push(String(f())); } catch (e) { out.push(e.constructor.name); } }
   class Stamp { constructor(o) { return o; } }

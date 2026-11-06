@@ -8,7 +8,8 @@ import gleam/int
 import gleam/list
 import gleam/string
 
-const source = "
+const source =
+  "
   function used(a, b) { /* long enough to be worth leaving for later */ return a + b; }
   function unused(a) { /* long enough to be worth leaving for later */ return a; }
   var arrow = (a) => { /* long enough to be worth leaving for later */ return a + '!'; };
@@ -78,7 +79,8 @@ pub fn hints_for_another_source_are_ignored_test() {
   assert compiled_late(eng) == 0
 }
 
-const library = "
+const library =
+  "
   function first(a) { /* long enough to be worth leaving for later */ return a + 1; }
   function second(a) { /* long enough to be worth leaving for later */ return a + 2; }
   'ab!'

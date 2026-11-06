@@ -1,8 +1,10 @@
 import aot_harness
 
-const sum_src = "function sum(n){let s=0;for(let i=1;i<=n;i++)s+=i;return s} console.log(sum(10))"
+const sum_src =
+  "function sum(n){let s=0;for(let i=1;i<=n;i++)s+=i;return s} console.log(sum(10))"
 
-const make_adder_src = "function makeAdder(x){return function(y){return x+y}} console.log(makeAdder(3)(4))"
+const make_adder_src =
+  "function makeAdder(x){return function(y){return x+y}} console.log(makeAdder(3)(4))"
 
 pub fn sum_n_diff_test() {
   let i = aot_harness.run_interpreted(sum_src)
@@ -20,7 +22,8 @@ pub fn make_adder_diff_test() {
 
 const object_literal_src = "let o={x:5};console.log(o.x)"
 
-const obj_prop_src = "let o={x:0};for(let i=1;i<=4;i++)o.x=o.x+i;console.log(o.x)"
+const obj_prop_src =
+  "let o={x:0};for(let i=1;i<=4;i++)o.x=o.x+i;console.log(o.x)"
 
 pub fn object_literal_diff_test() {
   let i = aot_harness.run_interpreted(object_literal_src)
@@ -36,7 +39,8 @@ pub fn obj_prop_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const method_call_proto_own_src = "function A(){};A.prototype.mp=function(){return 'proto'};var a=new A();a.mo=function(){return 'own'};console.log(a.mp());console.log(a.mo())"
+const method_call_proto_own_src =
+  "function A(){};A.prototype.mp=function(){return 'proto'};var a=new A();a.mo=function(){return 'own'};console.log(a.mp());console.log(a.mo())"
 
 pub fn method_call_proto_own_diff_test() {
   let i = aot_harness.run_interpreted(method_call_proto_own_src)
@@ -45,7 +49,8 @@ pub fn method_call_proto_own_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const method_call_proto_chain_src = "function A(){};A.prototype.m=function(){return 'A'};function B(){};B.prototype=new A();var b=new B();console.log(b.m());B.prototype.m=function(){return 'B'};console.log(b.m())"
+const method_call_proto_chain_src =
+  "function A(){};A.prototype.m=function(){return 'A'};function B(){};B.prototype=new A();var b=new B();console.log(b.m());B.prototype.m=function(){return 'B'};console.log(b.m())"
 
 pub fn method_call_proto_chain_diff_test() {
   let i = aot_harness.run_interpreted(method_call_proto_chain_src)
@@ -54,7 +59,8 @@ pub fn method_call_proto_chain_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const method_call_shaped_chain_src = "function A(){this.a=1};A.prototype.m=function(){return 'A'+this.a+this.b+this.c};function B(){this.b=2};B.prototype=new A();function C(){this.c=3};C.prototype=new B();function D(){this.d=4};D.prototype=new C();var b=new B(),c=new C(),d=new D();var s='';for(var i=0;i<3;i++){s+=b.m()+'|'+c.m()+'|'+d.m()+'|'};console.log(s);C.prototype.m=function(){return 'C'};console.log(c.m()+b.m()+d.m());B.prototype.m=function(){return 'B'};console.log(c.m()+b.m());c.m=function(){return 'own'};console.log(c.m()+d.m())"
+const method_call_shaped_chain_src =
+  "function A(){this.a=1};A.prototype.m=function(){return 'A'+this.a+this.b+this.c};function B(){this.b=2};B.prototype=new A();function C(){this.c=3};C.prototype=new B();function D(){this.d=4};D.prototype=new C();var b=new B(),c=new C(),d=new D();var s='';for(var i=0;i<3;i++){s+=b.m()+'|'+c.m()+'|'+d.m()+'|'};console.log(s);C.prototype.m=function(){return 'C'};console.log(c.m()+b.m()+d.m());B.prototype.m=function(){return 'B'};console.log(c.m()+b.m());c.m=function(){return 'own'};console.log(c.m()+d.m())"
 
 pub fn method_call_shaped_chain_diff_test() {
   let i = aot_harness.run_interpreted(method_call_shaped_chain_src)
@@ -66,7 +72,8 @@ pub fn method_call_shaped_chain_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const method_call_miss_src = "var o={};try{o.nope()}catch(e){console.log('miss:'+e.name)};Object.defineProperty(o,'g',{get:function(){return function(){return 'getter'}}});console.log(o.g())"
+const method_call_miss_src =
+  "var o={};try{o.nope()}catch(e){console.log('miss:'+e.name)};Object.defineProperty(o,'g',{get:function(){return function(){return 'getter'}}});console.log(o.g())"
 
 pub fn method_call_miss_diff_test() {
   let i = aot_harness.run_interpreted(method_call_miss_src)
@@ -75,7 +82,8 @@ pub fn method_call_miss_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const this_multi_field_src = "function T(){this.a=1;this.b=2;this.c=3};T.prototype.p=9;Object.defineProperty(T.prototype,'g',{get:function(){return this.a+this.b}});T.prototype.rd=function(){var s='';s+=this.a;s+=this.b;s+=this.c;s+=this.g;s+=this.p;return s};console.log(new T().rd())"
+const this_multi_field_src =
+  "function T(){this.a=1;this.b=2;this.c=3};T.prototype.p=9;Object.defineProperty(T.prototype,'g',{get:function(){return this.a+this.b}});T.prototype.rd=function(){var s='';s+=this.a;s+=this.b;s+=this.c;s+=this.g;s+=this.p;return s};console.log(new T().rd())"
 
 pub fn this_multi_field_diff_test() {
   let i = aot_harness.run_interpreted(this_multi_field_src)
@@ -84,7 +92,8 @@ pub fn this_multi_field_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const ctor_add_setter_src = "function P(){this.x=1;this.y=2};new P();new P();Object.defineProperty(P.prototype,'y',{set:function(v){this.z=v*10}});var p=new P();console.log(''+p.x+p.y+p.z)"
+const ctor_add_setter_src =
+  "function P(){this.x=1;this.y=2};new P();new P();Object.defineProperty(P.prototype,'y',{set:function(v){this.z=v*10}});var p=new P();console.log(''+p.x+p.y+p.z)"
 
 pub fn ctor_add_setter_diff_test() {
   let i = aot_harness.run_interpreted(ctor_add_setter_src)
@@ -93,7 +102,8 @@ pub fn ctor_add_setter_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const ctor_add_readonly_src = "function P(){this.x=1;this.y=2};new P();new P();Object.defineProperty(P.prototype,'x',{value:7,writable:false});var p=new P();console.log(''+p.x+p.y+Object.keys(p))"
+const ctor_add_readonly_src =
+  "function P(){this.x=1;this.y=2};new P();new P();Object.defineProperty(P.prototype,'x',{value:7,writable:false});var p=new P();console.log(''+p.x+p.y+Object.keys(p))"
 
 pub fn ctor_add_readonly_diff_test() {
   let i = aot_harness.run_interpreted(ctor_add_readonly_src)
@@ -102,7 +112,8 @@ pub fn ctor_add_readonly_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const ctor_add_proxy_src = "function P(){this.x=1};new P();new P();P.prototype=new Proxy({},{set:function(t,k,v,r){console.log('trap:'+k);return Reflect.set(t,k,v,r)}});var p=new P();console.log(''+p.x+Object.keys(p))"
+const ctor_add_proxy_src =
+  "function P(){this.x=1};new P();new P();P.prototype=new Proxy({},{set:function(t,k,v,r){console.log('trap:'+k);return Reflect.set(t,k,v,r)}});var p=new P();console.log(''+p.x+Object.keys(p))"
 
 pub fn ctor_add_proxy_diff_test() {
   let i = aot_harness.run_interpreted(ctor_add_proxy_src)
@@ -111,7 +122,8 @@ pub fn ctor_add_proxy_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const ctor_add_shaped_proto_src = "function A(){this.m=1};var proto=new A();function B(){this.m=2};B.prototype=proto;new B();var b=new B();console.log(''+b.m+proto.m+Object.keys(b))"
+const ctor_add_shaped_proto_src =
+  "function A(){this.m=1};var proto=new A();function B(){this.m=2};B.prototype=proto;new B();var b=new B();console.log(''+b.m+proto.m+Object.keys(b))"
 
 pub fn ctor_add_shaped_proto_diff_test() {
   let i = aot_harness.run_interpreted(ctor_add_shaped_proto_src)
@@ -120,7 +132,8 @@ pub fn ctor_add_shaped_proto_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const set_read_coherence_src = "function C(){this.x=0;this.y=0};C.prototype.w=function(a,b){this.x=a;this.y=b};var c=new C();c.w(4,5);var k='x';console.log(''+c[k]+c['y']+c.x)"
+const set_read_coherence_src =
+  "function C(){this.x=0;this.y=0};C.prototype.w=function(a,b){this.x=a;this.y=b};var c=new C();c.w(4,5);var k='x';console.log(''+c[k]+c['y']+c.x)"
 
 pub fn set_read_coherence_diff_test() {
   let i = aot_harness.run_interpreted(set_read_coherence_src)
@@ -129,7 +142,8 @@ pub fn set_read_coherence_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const new_return_shape_src = "function Fo(){this.v=1;return {v:2}};function Fp(){this.v=1;return 5};console.log(''+new Fo().v);console.log(''+new Fp().v)"
+const new_return_shape_src =
+  "function Fo(){this.v=1;return {v:2}};function Fp(){this.v=1;return 5};console.log(''+new Fo().v);console.log(''+new Fp().v)"
 
 pub fn new_return_shape_diff_test() {
   let i = aot_harness.run_interpreted(new_return_shape_src)
@@ -138,7 +152,8 @@ pub fn new_return_shape_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const new_nonctor_src = "var A=function(){return 1};A=()=>{};try{new A()}catch(e){console.log('arrow:'+e.name)};function F(x){this.v=x};var B=F.bind(null,7);console.log(''+new B().v)"
+const new_nonctor_src =
+  "var A=function(){return 1};A=()=>{};try{new A()}catch(e){console.log('arrow:'+e.name)};function F(x){this.v=x};var B=F.bind(null,7);console.log(''+new B().v)"
 
 pub fn new_nonctor_diff_test() {
   let i = aot_harness.run_interpreted(new_nonctor_src)
@@ -147,7 +162,8 @@ pub fn new_nonctor_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const truth_value_src = "function A(){};function B(){};var a=new A();var o={p:1};var s='';s+=(a instanceof A)+','+(a instanceof B)+',';s+=('p' in o)+','+('zz' in o)+',';s+=(1==1)+','+(1==2)+',';s+=('a'<'b')+','+('b'<'a')+',';s+=typeof (a instanceof A)+','+typeof ('p' in o)+','+typeof ('a'<'b');console.log(s)"
+const truth_value_src =
+  "function A(){};function B(){};var a=new A();var o={p:1};var s='';s+=(a instanceof A)+','+(a instanceof B)+',';s+=('p' in o)+','+('zz' in o)+',';s+=(1==1)+','+(1==2)+',';s+=('a'<'b')+','+('b'<'a')+',';s+=typeof (a instanceof A)+','+typeof ('p' in o)+','+typeof ('a'<'b');console.log(s)"
 
 pub fn truth_value_results_are_booleans_diff_test() {
   let i = aot_harness.run_interpreted(truth_value_src)
@@ -159,7 +175,8 @@ pub fn truth_value_results_are_booleans_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const instanceof_chain_src = "function A(){};function B(){};B.prototype=new A();var b=new B();var s='';s+=(b instanceof B)?'y':'n';s+=(b instanceof A)?'y':'n';s+=({} instanceof A)?'y':'n';console.log(s)"
+const instanceof_chain_src =
+  "function A(){};function B(){};B.prototype=new A();var b=new B();var s='';s+=(b instanceof B)?'y':'n';s+=(b instanceof A)?'y':'n';s+=({} instanceof A)?'y':'n';console.log(s)"
 
 pub fn instanceof_chain_diff_test() {
   let i = aot_harness.run_interpreted(instanceof_chain_src)
@@ -168,7 +185,8 @@ pub fn instanceof_chain_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const instanceof_bound_src = "function A(){};var a=new A();var Ab=A.bind(null);var s='';s+=(a instanceof Ab)?'y':'n';s+=({} instanceof Ab)?'y':'n';console.log(s)"
+const instanceof_bound_src =
+  "function A(){};var a=new A();var Ab=A.bind(null);var s='';s+=(a instanceof Ab)?'y':'n';s+=({} instanceof Ab)?'y':'n';console.log(s)"
 
 pub fn instanceof_bound_diff_test() {
   let i = aot_harness.run_interpreted(instanceof_bound_src)
@@ -177,7 +195,8 @@ pub fn instanceof_bound_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const instanceof_has_instance_src = "function H(){};Object.defineProperty(H,Symbol.hasInstance,{value:function(v){return v===42}});var s='';s+=(42 instanceof H)?'y':'n';s+=({} instanceof H)?'y':'n';console.log(s)"
+const instanceof_has_instance_src =
+  "function H(){};Object.defineProperty(H,Symbol.hasInstance,{value:function(v){return v===42}});var s='';s+=(42 instanceof H)?'y':'n';s+=({} instanceof H)?'y':'n';console.log(s)"
 
 pub fn instanceof_has_instance_diff_test() {
   let i = aot_harness.run_interpreted(instanceof_has_instance_src)
@@ -186,7 +205,8 @@ pub fn instanceof_has_instance_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const cond_eq_src = "var a=1,b=1,c=2,o={};function f(x,y){if(x==y)return 'y';else return 'n'}console.log(f(a,b),f(a,c),f(null,undefined),f(o,o),f('1',1));if(a!=c)console.log('ne');if(a!=b)console.log('bad');var i=0;while(i!=3)i++;console.log(i);for(var j=5;j==5;j++)console.log('once')"
+const cond_eq_src =
+  "var a=1,b=1,c=2,o={};function f(x,y){if(x==y)return 'y';else return 'n'}console.log(f(a,b),f(a,c),f(null,undefined),f(o,o),f('1',1));if(a!=c)console.log('ne');if(a!=b)console.log('bad');var i=0;while(i!=3)i++;console.log(i);for(var j=5;j==5;j++)console.log('once')"
 
 pub fn cond_eq_diff_test() {
   let i = aot_harness.run_interpreted(cond_eq_src)
@@ -220,7 +240,8 @@ pub fn finally_throws_once_diff_test() {
   )
 }
 
-const user_iter_src = "var log=[];function it(n){var i=0;return {[Symbol.iterator](){return this},next(){i++;return {done:i>n,value:i}},return(){log.push('ret'+i);return {}}}}
+const user_iter_src =
+  "var log=[];function it(n){var i=0;return {[Symbol.iterator](){return this},next(){i++;return {done:i>n,value:i}},return(){log.push('ret'+i);return {}}}}
 for(var a of it(3)){log.push(a)}
 for(var b of it(5)){if(b==2)break;log.push(b)}
 try{for(var c of it(5)){if(c==2)throw 'boom';log.push(c)}}catch(e){log.push(e)}
@@ -317,7 +338,8 @@ pub fn unsupported_using_is_compile_error_test() {
   assert msg == "UnsupportedFeature(\"using declaration\")"
 }
 
-const iter_close_protocol_src = "var log=[];function it(n){var i=0;return {[Symbol.iterator](){return this},next(){i++;log.push('n'+i);return {done:i>n,value:i}},return(){log.push('r');return {}}}}
+const iter_close_protocol_src =
+  "var log=[];function it(n){var i=0;return {[Symbol.iterator](){return this},next(){i++;log.push('n'+i);return {done:i>n,value:i}},return(){log.push('r');return {}}}}
 var [a]=it(3);var [b,c,d,e]=it(2);var [...all]=it(2);var [f,...g]=it(3);
 var t={[Symbol.iterator](){return this},next(){throw 'nx'},return(){log.push('BAD')}};try{for(const x of t){}}catch(ex){log.push(ex)}
 console.log(log.join(),a,e,all.join(),g.join())"

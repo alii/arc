@@ -90,19 +90,21 @@ pub type LexicalRefs {
   )
 }
 
-pub const no_lexical_refs = LexicalRefs(
-  this: False,
-  active_func: False,
-  home_object: False,
-  new_target: False,
-)
+pub const no_lexical_refs =
+  LexicalRefs(
+    this: False,
+    active_func: False,
+    home_object: False,
+    new_target: False,
+  )
 
-pub const every_lexical_ref = LexicalRefs(
-  this: True,
-  active_func: True,
-  home_object: True,
-  new_target: True,
-)
+pub const every_lexical_ref =
+  LexicalRefs(
+    this: True,
+    active_func: True,
+    home_object: True,
+    new_target: True,
+  )
 
 pub fn refs_or(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
   LexicalRefs(

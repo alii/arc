@@ -13,7 +13,8 @@ fn new_engine() -> Engine(Nil) {
   })
 }
 
-const prelude = "
+const prelude =
+  "
 var log = [];
 function run(value, body) {
   var previous = swap(value);

@@ -296,7 +296,8 @@ fn regexp_source_flags(st: Agent, v: JsVal) -> Option(#(String, String)) {
   }
 }
 
-const legacy_receiver_error = "RegExp legacy static properties may only be accessed on the RegExp constructor"
+const legacy_receiver_error =
+  "RegExp legacy static properties may only be accessed on the RegExp constructor"
 
 fn legacy_static_get(
   st: Agent,
