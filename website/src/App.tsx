@@ -65,16 +65,8 @@ export default function App() {
 				</motion.p>
 
 				<motion.p variants={item}>
-					Arc's API can change from one commit to the next, which is true of many engines. We recommend pinning to a
-					commit SHA and upgrading on a regular schedule.
-				</motion.p>
-
-				<motion.p variants={item}>
-					By default Arc interprets JavaScript, but it can also compile JavaScript to Erlang ahead of time (AOT). AOT has
-					tradeoffs, and we don't recommend it for dynamic code, such as code generated at runtime. Arc runs on
-					Erlang/OTP, and in the browser on our own fork of{' '}
-					<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink> compiled to WebAssembly. We forked AtomVM to
-					make it faster in the browser.
+					By default Arc interprets JavaScript, but it can also compile it to Erlang. It runs on Erlang/OTP, and in the
+					browser on our fork of <ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink>.
 					{wide ? ' The playground next to this text runs that way, and its Erlang tab shows the compiled output.' : ''}
 					{wide && (
 						<>
