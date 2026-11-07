@@ -6007,6 +6007,7 @@ built-ins/Date/prototype/setDate/prop-desc.js
 built-ins/Date/prototype/setDate/this-value-invalid-date.js
 built-ins/Date/prototype/setDate/this-value-non-date.js
 built-ins/Date/prototype/setDate/this-value-non-object.js
+built-ins/Date/prototype/setDate/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setDate/this-value-valid-date.js
 built-ins/Date/prototype/setFullYear/15.9.5.40_1.js
 built-ins/Date/prototype/setFullYear/arg-date-to-number-err.js
@@ -6025,6 +6026,7 @@ built-ins/Date/prototype/setFullYear/prop-desc.js
 built-ins/Date/prototype/setFullYear/this-value-invalid-date.js
 built-ins/Date/prototype/setFullYear/this-value-non-date.js
 built-ins/Date/prototype/setFullYear/this-value-non-object.js
+built-ins/Date/prototype/setFullYear/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setFullYear/this-value-valid-date-date.js
 built-ins/Date/prototype/setFullYear/this-value-valid-date-month.js
 built-ins/Date/prototype/setFullYear/this-value-valid-date-year.js
@@ -6047,6 +6049,7 @@ built-ins/Date/prototype/setHours/prop-desc.js
 built-ins/Date/prototype/setHours/this-value-invalid-date.js
 built-ins/Date/prototype/setHours/this-value-non-date.js
 built-ins/Date/prototype/setHours/this-value-non-object.js
+built-ins/Date/prototype/setHours/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setHours/this-value-valid-date-hour.js
 built-ins/Date/prototype/setHours/this-value-valid-date-min.js
 built-ins/Date/prototype/setHours/this-value-valid-date-ms.js
@@ -6064,6 +6067,7 @@ built-ins/Date/prototype/setMilliseconds/prop-desc.js
 built-ins/Date/prototype/setMilliseconds/this-value-invalid-date.js
 built-ins/Date/prototype/setMilliseconds/this-value-non-date.js
 built-ins/Date/prototype/setMilliseconds/this-value-non-object.js
+built-ins/Date/prototype/setMilliseconds/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setMilliseconds/this-value-valid-date.js
 built-ins/Date/prototype/setMinutes/arg-coercion-order.js
 built-ins/Date/prototype/setMinutes/arg-min-to-number-err.js
@@ -6082,6 +6086,7 @@ built-ins/Date/prototype/setMinutes/prop-desc.js
 built-ins/Date/prototype/setMinutes/this-value-invalid-date.js
 built-ins/Date/prototype/setMinutes/this-value-non-date.js
 built-ins/Date/prototype/setMinutes/this-value-non-object.js
+built-ins/Date/prototype/setMinutes/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setMinutes/this-value-valid-date.js
 built-ins/Date/prototype/setMonth/arg-coercion-order.js
 built-ins/Date/prototype/setMonth/arg-date-to-number-err.js
@@ -6098,6 +6103,7 @@ built-ins/Date/prototype/setMonth/prop-desc.js
 built-ins/Date/prototype/setMonth/this-value-invalid-date.js
 built-ins/Date/prototype/setMonth/this-value-non-date.js
 built-ins/Date/prototype/setMonth/this-value-non-object.js
+built-ins/Date/prototype/setMonth/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setMonth/this-value-valid-date-date.js
 built-ins/Date/prototype/setMonth/this-value-valid-date-month.js
 built-ins/Date/prototype/setSeconds/arg-coercion-order.js
@@ -6115,6 +6121,7 @@ built-ins/Date/prototype/setSeconds/prop-desc.js
 built-ins/Date/prototype/setSeconds/this-value-invalid-date.js
 built-ins/Date/prototype/setSeconds/this-value-non-date.js
 built-ins/Date/prototype/setSeconds/this-value-non-object.js
+built-ins/Date/prototype/setSeconds/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setSeconds/this-value-valid-date-ms.js
 built-ins/Date/prototype/setSeconds/this-value-valid-date-sec.js
 built-ins/Date/prototype/setTime/arg-to-number-err.js
@@ -6127,6 +6134,7 @@ built-ins/Date/prototype/setTime/prop-desc.js
 built-ins/Date/prototype/setTime/this-value-invalid-date.js
 built-ins/Date/prototype/setTime/this-value-non-date.js
 built-ins/Date/prototype/setTime/this-value-non-object.js
+built-ins/Date/prototype/setTime/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setTime/this-value-valid-date.js
 built-ins/Date/prototype/setUTCDate/arg-coercion-order.js
 built-ins/Date/prototype/setUTCDate/date-value-read-before-tonumber-when-date-is-invalid.js
@@ -6135,12 +6143,14 @@ built-ins/Date/prototype/setUTCDate/length.js
 built-ins/Date/prototype/setUTCDate/name.js
 built-ins/Date/prototype/setUTCDate/not-a-constructor.js
 built-ins/Date/prototype/setUTCDate/prop-desc.js
+built-ins/Date/prototype/setUTCDate/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setUTCFullYear/date-value-read-before-tonumber-when-date-is-invalid.js
 built-ins/Date/prototype/setUTCFullYear/date-value-read-before-tonumber-when-date-is-valid.js
 built-ins/Date/prototype/setUTCFullYear/length.js
 built-ins/Date/prototype/setUTCFullYear/name.js
 built-ins/Date/prototype/setUTCFullYear/not-a-constructor.js
 built-ins/Date/prototype/setUTCFullYear/prop-desc.js
+built-ins/Date/prototype/setUTCFullYear/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setUTCHours/arg-coercion-order.js
 built-ins/Date/prototype/setUTCHours/date-value-read-before-tonumber-when-date-is-invalid.js
 built-ins/Date/prototype/setUTCHours/date-value-read-before-tonumber-when-date-is-valid.js
@@ -6148,6 +6158,7 @@ built-ins/Date/prototype/setUTCHours/length.js
 built-ins/Date/prototype/setUTCHours/name.js
 built-ins/Date/prototype/setUTCHours/not-a-constructor.js
 built-ins/Date/prototype/setUTCHours/prop-desc.js
+built-ins/Date/prototype/setUTCHours/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setUTCHours/this-value-valid-date-hour.js
 built-ins/Date/prototype/setUTCHours/this-value-valid-date-min.js
 built-ins/Date/prototype/setUTCHours/this-value-valid-date-ms.js
@@ -6159,6 +6170,7 @@ built-ins/Date/prototype/setUTCMilliseconds/length.js
 built-ins/Date/prototype/setUTCMilliseconds/name.js
 built-ins/Date/prototype/setUTCMilliseconds/not-a-constructor.js
 built-ins/Date/prototype/setUTCMilliseconds/prop-desc.js
+built-ins/Date/prototype/setUTCMilliseconds/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setUTCMilliseconds/this-value-valid-date.js
 built-ins/Date/prototype/setUTCMinutes/arg-coercion-order.js
 built-ins/Date/prototype/setUTCMinutes/date-value-read-before-tonumber-when-date-is-invalid.js
@@ -6167,6 +6179,7 @@ built-ins/Date/prototype/setUTCMinutes/length.js
 built-ins/Date/prototype/setUTCMinutes/name.js
 built-ins/Date/prototype/setUTCMinutes/not-a-constructor.js
 built-ins/Date/prototype/setUTCMinutes/prop-desc.js
+built-ins/Date/prototype/setUTCMinutes/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setUTCMinutes/this-value-valid-date.js
 built-ins/Date/prototype/setUTCMonth/arg-coercion-order.js
 built-ins/Date/prototype/setUTCMonth/date-value-read-before-tonumber-when-date-is-invalid.js
@@ -6175,6 +6188,7 @@ built-ins/Date/prototype/setUTCMonth/length.js
 built-ins/Date/prototype/setUTCMonth/name.js
 built-ins/Date/prototype/setUTCMonth/not-a-constructor.js
 built-ins/Date/prototype/setUTCMonth/prop-desc.js
+built-ins/Date/prototype/setUTCMonth/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setUTCMonth/this-value-valid-date-date.js
 built-ins/Date/prototype/setUTCMonth/this-value-valid-date-month.js
 built-ins/Date/prototype/setUTCSeconds/arg-coercion-order.js
@@ -6184,6 +6198,7 @@ built-ins/Date/prototype/setUTCSeconds/length.js
 built-ins/Date/prototype/setUTCSeconds/name.js
 built-ins/Date/prototype/setUTCSeconds/not-a-constructor.js
 built-ins/Date/prototype/setUTCSeconds/prop-desc.js
+built-ins/Date/prototype/setUTCSeconds/this-value-valid-date-arg-non-finite.js
 built-ins/Date/prototype/setUTCSeconds/this-value-valid-date-ms.js
 built-ins/Date/prototype/setUTCSeconds/this-value-valid-date-sec.js
 built-ins/Date/prototype/toDateString/format.js
@@ -26006,9 +26021,11 @@ intl402/String/prototype/toLocaleLowerCase/validates-all-locale-identifiers.js
 intl402/String/prototype/toLocaleUpperCase/special_casing_Azeri.js
 intl402/String/prototype/toLocaleUpperCase/special_casing_Turkish.js
 intl402/String/prototype/toLocaleUpperCase/validates-all-locale-identifiers.js
+intl402/Temporal/Duration/compare/calendar-intl-objects.js
 intl402/Temporal/Duration/compare/relativeto-hour.js
 intl402/Temporal/Duration/compare/relativeto-sub-minute-offset.js
 intl402/Temporal/Duration/compare/twenty-five-hour-day.js
+intl402/Temporal/Duration/prototype/round/calendar-intl-objects.js
 intl402/Temporal/Duration/prototype/round/dst-balancing-result.js
 intl402/Temporal/Duration/prototype/round/relativeto-infinity-throws-rangeerror.js
 intl402/Temporal/Duration/prototype/round/relativeto-string-datetime.js
@@ -26017,6 +26034,7 @@ intl402/Temporal/Duration/prototype/round/rounding-increment-relativeto.js
 intl402/Temporal/Duration/prototype/round/rounding-with-largestunit.js
 intl402/Temporal/Duration/prototype/toLocaleString/returns-same-results-as-DurationFormat.js
 intl402/Temporal/Duration/prototype/toLocaleString/taint-duration-prototype.js
+intl402/Temporal/Duration/prototype/total/calendar-intl-objects.js
 intl402/Temporal/Duration/prototype/total/dst-balancing-result.js
 intl402/Temporal/Duration/prototype/total/dst-day-length.js
 intl402/Temporal/Duration/prototype/total/dst-rounding-result.js
@@ -26036,6 +26054,7 @@ intl402/Temporal/PlainDate/compare/future-calendar.js
 intl402/Temporal/PlainDate/compare/infinity-throws-rangeerror.js
 intl402/Temporal/PlainDate/from/basic-hebrew.js
 intl402/Temporal/PlainDate/from/calc-epoch-year-hebrew.js
+intl402/Temporal/PlainDate/from/calendar-intl-objects.js
 intl402/Temporal/PlainDate/from/calendar-invalid-era-with-era-year.js
 intl402/Temporal/PlainDate/from/calendar-invalid-era.js
 intl402/Temporal/PlainDate/from/calendar-not-supporting-eras.js
@@ -26502,6 +26521,7 @@ intl402/Temporal/PlainDate/prototype/with/wrapping-at-end-of-month-ethioaa.js
 intl402/Temporal/PlainDate/prototype/with/wrapping-at-end-of-month-ethiopic.js
 intl402/Temporal/PlainDate/prototype/with/wrapping-at-end-of-month-gregory.js
 intl402/Temporal/PlainDate/prototype/with/wrapping-at-end-of-month-japanese.js
+intl402/Temporal/PlainDate/prototype/withCalendar/calendar-intl-objects.js
 intl402/Temporal/PlainDate/prototype/withCalendar/calendar-time-string.js
 intl402/Temporal/PlainDate/prototype/withCalendar/canonicalize-calendar.js
 intl402/Temporal/PlainDate/prototype/withCalendar/extreme-dates.js
@@ -26516,6 +26536,7 @@ intl402/Temporal/PlainDateTime/compare/calendar-ignored.js
 intl402/Temporal/PlainDateTime/compare/future-calendar.js
 intl402/Temporal/PlainDateTime/compare/infinity-throws-rangeerror.js
 intl402/Temporal/PlainDateTime/from/basic-hebrew.js
+intl402/Temporal/PlainDateTime/from/calendar-intl-objects.js
 intl402/Temporal/PlainDateTime/from/calendar-invalid-era-with-era-year.js
 intl402/Temporal/PlainDateTime/from/calendar-invalid-era.js
 intl402/Temporal/PlainDateTime/from/calendar-not-supporting-eras.js
@@ -26973,6 +26994,7 @@ intl402/Temporal/PlainDateTime/prototype/with/wrapping-at-end-of-month-ethiopic.
 intl402/Temporal/PlainDateTime/prototype/with/wrapping-at-end-of-month-gregory.js
 intl402/Temporal/PlainDateTime/prototype/with/wrapping-at-end-of-month-japanese.js
 intl402/Temporal/PlainDateTime/prototype/withCalendar/argument-string.js
+intl402/Temporal/PlainDateTime/prototype/withCalendar/calendar-intl-objects.js
 intl402/Temporal/PlainDateTime/prototype/withCalendar/calendar-time-string.js
 intl402/Temporal/PlainDateTime/prototype/withCalendar/canonicalize-calendar.js
 intl402/Temporal/PlainDateTime/prototype/withCalendar/extreme-dates.js
@@ -26984,6 +27006,7 @@ intl402/Temporal/PlainDateTime/prototype/yearOfWeek/non-iso-week-of-year.js
 intl402/Temporal/PlainMonthDay/canonicalize-calendar.js
 intl402/Temporal/PlainMonthDay/from/buddhist-invalid-month-code-m13.js
 intl402/Temporal/PlainMonthDay/from/buddhist-month-codes.js
+intl402/Temporal/PlainMonthDay/from/calendar-intl-objects.js
 intl402/Temporal/PlainMonthDay/from/calendar-not-supporting-eras.js
 intl402/Temporal/PlainMonthDay/from/calendarresolvefields-error-ordering-chinese.js
 intl402/Temporal/PlainMonthDay/from/calendarresolvefields-error-ordering-hebrew.js
@@ -27064,6 +27087,7 @@ intl402/Temporal/PlainYearMonth/compare/future-calendar.js
 intl402/Temporal/PlainYearMonth/compare/infinity-throws-rangeerror.js
 intl402/Temporal/PlainYearMonth/from/argument-object.js
 intl402/Temporal/PlainYearMonth/from/basic-hebrew.js
+intl402/Temporal/PlainYearMonth/from/calendar-intl-objects.js
 intl402/Temporal/PlainYearMonth/from/calendar-not-supporting-eras.js
 intl402/Temporal/PlainYearMonth/from/calendarresolvefields-error-ordering-chinese.js
 intl402/Temporal/PlainYearMonth/from/calendarresolvefields-error-ordering-gregory.js
@@ -27395,6 +27419,7 @@ intl402/Temporal/ZonedDateTime/from/argument-string-dst-option-offset.js
 intl402/Temporal/ZonedDateTime/from/argument-string-with-Z-and-timezone.js
 intl402/Temporal/ZonedDateTime/from/argument-valid.js
 intl402/Temporal/ZonedDateTime/from/basic-hebrew.js
+intl402/Temporal/ZonedDateTime/from/calendar-intl-objects.js
 intl402/Temporal/ZonedDateTime/from/calendar-invalid-era-with-era-year.js
 intl402/Temporal/ZonedDateTime/from/calendar-invalid-era.js
 intl402/Temporal/ZonedDateTime/from/calendar-not-supporting-eras.js
@@ -27920,6 +27945,7 @@ intl402/Temporal/ZonedDateTime/prototype/with/wrapping-at-end-of-month-gregory.j
 intl402/Temporal/ZonedDateTime/prototype/with/wrapping-at-end-of-month-japanese.js
 intl402/Temporal/ZonedDateTime/prototype/withCalendar/basic.js
 intl402/Temporal/ZonedDateTime/prototype/withCalendar/calendar-case-insensitive.js
+intl402/Temporal/ZonedDateTime/prototype/withCalendar/calendar-intl-objects.js
 intl402/Temporal/ZonedDateTime/prototype/withCalendar/calendar-time-string.js
 intl402/Temporal/ZonedDateTime/prototype/withCalendar/canonicalize-calendar.js
 intl402/Temporal/ZonedDateTime/prototype/withCalendar/extreme-dates.js
