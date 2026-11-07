@@ -314,6 +314,7 @@ is_slow_test(Name) ->
         <<"TypedArray/prototype/copyWithin/coerced-values-end-detached">>,
         <<"TypedArray/prototype/copyWithin/coerced-values-start-detached">>,
         <<"TypedArray/element-setting-converts-using-ToNumber">>,
-        <<"TypedArray/sort_large_countingsort">>
+        <<"TypedArray/sort_large_countingsort">>,
+        <<"staging/sm/regress/regress-610026">>
     ],
     lists:any(fun(P) -> binary:match(Name, P) =/= nomatch end, Slow).
