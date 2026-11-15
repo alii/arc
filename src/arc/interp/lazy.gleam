@@ -3,7 +3,8 @@ import arc/bytecode/lexical
 import arc/compiler
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/kernel
-import arc/interp/state.{type State, type StepExit, State}
+import arc/interp/state.{type State, type StepExit, Frame, State}
+import arc/interp/thread
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, FuncTemplate}
 import arc/rt/closure as rt_closure
 import arc/rt/store as rt_store
@@ -49,11 +50,12 @@ pub fn make_closure(
 ) -> #(Handle, Agent) {
   let assert Ok(#(start, slots)) = lazy.creation(record)
     as "interp: a lazy function's record does not read back"
+  let slots = bytecode.capture_slots(parent, slots)
   case dict.get(agent.store.meta.lazy_code, #(unit_id, start)) {
     Ok(template) ->
       rt_closure.new_bytecode_function(
         agent,
-        template,
+        thread.known(agent, template),
         kernel.capture_env(
           slots,
           template.nested_captures,
@@ -78,11 +80,12 @@ pub fn make_closure(
 /// the record last, then this, the function object, the home object and
 /// new.target
 pub fn first_call(state: State) -> Result(State, StepExit) {
-  let assert lexical.OwnedLexicalSlots(base: env_size) = state.func.lexical
+  let assert lexical.OwnedLexicalSlots(base: env_size) =
+    state.frame.func.lexical
     as "interp: a stub's frame is not laid out as one"
   let agent = state.agent
   use UnitText(bytes:, is_module:) <- result.try(
-    case dict.get(agent.store.meta.unit_texts, state.unit_id) {
+    case dict.get(agent.store.meta.unit_texts, state.frame.unit_id) {
       Ok(text) -> Ok(text)
       Error(Nil) ->
         state.throw_syntax_error(state, "a function's unit kept no text")
@@ -98,7 +101,7 @@ pub fn first_call(state: State) -> Result(State, StepExit) {
         )
     },
   )
-  let key = #(state.unit_id, function.source.start)
+  let key = #(state.frame.unit_id, function.source.start)
   use #(template, agent) <- result.map(
     case dict.get(agent.store.meta.lazy_code, key) {
       Ok(template) -> Ok(#(template, agent))
@@ -111,37 +114,45 @@ pub fn first_call(state: State) -> Result(State, StepExit) {
             lazy: True,
           )
         {
-          Ok(template) -> Ok(#(template, remember(agent, key, template)))
+          Ok(template) -> {
+            let #(template, agent) =
+              thread.with_id(agent, bytecode.shared(template))
+            Ok(#(template, remember(agent, key, template)))
+          }
           Error(error) -> state.throw_syntax_error(state, string.inspect(error))
         }
     },
   )
+  let #(template, agent) = thread.threaded(agent, template)
   // a name given at run time is on this closure's own copy of the stub
-  let template = case template.name, state.func.name {
+  let template = case template.name, state.frame.func.name {
     None, Some(_) as name -> FuncTemplate(..template, name:)
     _, _ -> template
   }
-  let callee = tuple_array.get_unchecked(env_size + 1, state.locals)
+  let lexical_at = fn(ref) {
+    tuple_array.get_unchecked(env_size + lexical.ref_offset(ref), state.locals)
+  }
+  let callee = lexical_at(lexical.ActiveFuncRef)
   let env =
     renest(captured(state.locals, env_size - 1), template.nested_captures)
   let locals =
     kernel.frame_locals(
       env,
       template.lexical,
-      state.this,
+      lexical_at(lexical.ThisRef),
       callee,
-      state.home_object,
-      state.new_target,
-      state.call_args,
+      lexical_at(lexical.HomeObjectRef),
+      lexical_at(lexical.NewTargetRef),
+      state.frame.call_args,
       template.arity,
       template.local_count,
     )
   State(
     ..state,
     agent: adopt(agent, callee, template, env),
-    func: template,
+    frame: Frame(..state.frame, func: template),
     locals:,
-    pc: 0,
+    pc: 1,
   )
 }
 

@@ -6,11 +6,11 @@ import arc/bytecode/opcode
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/guard
 import arc/interp/kernel
-import arc/interp/safepoint
 import arc/interp/state.{
-  type SavedFrame, type State, type StepExit, Returned, SavedCont, SavedFrame,
-  SavedRegFrame, State, Threw,
+  type ReturnTo, type State, type StepExit, Direct, Frame, Outermost, Resumption,
+  SavedCont, SavedFrame, SavedRegs, SavedThread, State, Threw,
 }
+import arc/interp/thread
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FnFlags, type FuncTemplate}
@@ -53,17 +53,14 @@ pub type CoroutineCall {
     template: FuncTemplate,
     unit_id: Int,
     locals: TupleArray(JsVal),
-    this: JsVal,
-    home_object: JsVal,
     args: List(JsVal),
     rest_stack: List(JsVal),
   )
 }
 
-// callbacks into interpreter parts this module cannot import
-pub type Drive {
-  Drive(start_coroutine: fn(State, CoroutineCall) -> Result(State, StepExit))
-}
+// resume imports this module, so it is called by name
+@external(erlang, "arc@interp@resume", "start_coroutine")
+fn start_coroutine(state: State, call: CoroutineCall) -> Result(State, StepExit)
 
 // §10.2.1.2 bind this, then lay out locals
 fn setup_frame(
@@ -76,7 +73,7 @@ fn setup_frame(
   args: List(JsVal),
   this_arg: JsVal,
   new_target: JsVal,
-) -> #(TupleArray(JsVal), JsVal, Agent) {
+) -> #(TupleArray(JsVal), Agent) {
   let #(this_val, agent) = case template.is_arrow || flags.is_strict {
     True -> #(this_arg, agent)
     False ->
@@ -103,7 +100,6 @@ fn setup_frame(
       template.arity,
       template.local_count,
     ),
-    this_val,
     agent,
   )
 }
@@ -142,7 +138,6 @@ fn call_function(
   this_arg: JsVal,
   constructor_this: Option(JsVal),
   new_target: JsVal,
-  drive: Drive,
 ) -> Result(State, StepExit) {
   call_function_then(
     state,
@@ -157,7 +152,6 @@ fn call_function(
     this_arg,
     constructor_this,
     new_target,
-    drive,
     None,
   )
 }
@@ -176,7 +170,6 @@ pub fn call_function_then(
   this_arg: JsVal,
   constructor_this: Option(JsVal),
   new_target: JsVal,
-  drive: Drive,
   cont: Option(fn(JsVal, State) -> Result(State, StepExit)),
 ) -> Result(State, StepExit) {
   case
@@ -188,9 +181,10 @@ pub fn call_function_then(
     }
     False -> {
       let home = home_value(home_object)
-      let #(locals, this_val, agent) =
+      let #(template, agent) = thread.for_call(state.agent, fn_h, template)
+      let #(locals, agent) =
         setup_frame(
-          state.agent,
+          agent,
           env,
           kernel.object_val([fn_h]),
           home,
@@ -202,21 +196,19 @@ pub fn call_function_then(
         )
       case template.is_generator || template.is_async {
         True ->
-          drive.start_coroutine(
+          start_coroutine(
             State(..state, agent:),
             CoroutineCall(
               fn_h:,
               template:,
               unit_id:,
               locals:,
-              this: this_val,
-              home_object: home,
               args:,
               rest_stack:,
             ),
           )
         False -> {
-          let depth = state.depth
+          let depth = state.frame.depth
           case depth >= limits.max_call_depth {
             True ->
               state.throw_stack_overflow(
@@ -226,7 +218,7 @@ pub fn call_function_then(
               let saved = case cont {
                 None ->
                   SavedFrame(
-                    caller: state,
+                    caller: state.frame,
                     pc: state.pc + 1,
                     stack: rest_stack,
                     locals: state.locals,
@@ -234,30 +226,31 @@ pub fn call_function_then(
                   )
                 Some(cont) ->
                   SavedCont(
-                    caller: state,
+                    caller: state.frame,
                     pc: state.pc + 1,
                     stack: rest_stack,
                     locals: state.locals,
                     constructor_this: None,
                     cont:,
+                    resume: None,
                   )
               }
               Ok(State(
                 agent:,
                 stack: [],
                 locals:,
-                func: template,
-                unit_id:,
-                pc: 0,
-                call_stack: [saved, ..state.call_stack],
-                outer_depth: state.outer_depth,
-                depth: depth + 1,
-                try_stack: [],
-                this: this_val,
-                new_target:,
-                home_object: home,
-                call_args: args,
-                eval_env: None,
+                pc: 1,
+                frame: Frame(
+                  func: template,
+                  unit_id:,
+                  return_to: saved,
+                  outer_depth: state.frame.outer_depth,
+                  depth: depth + 1,
+                  try_stack: [],
+                  call_args: args,
+                  eval_env: None,
+                  realm: state.frame.realm,
+                ),
               ))
             }
           }
@@ -267,38 +260,48 @@ pub fn call_function_then(
   }
 }
 
-// §15.10 isintailposition
-pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
-  let frame_eligible = case state.try_stack, state.call_stack {
-    [], [SavedCont(..), ..] -> False
-    [], [_, ..] ->
-      state.func.is_strict
-      && !callee.is_generator
-      && !callee.is_async
-      && kernel.is(state.new_target, kernel.Undefined)
+// §15.10 isintailposition, for the ops that do nothing but call
+fn at_tail_call(state: State) -> Bool {
+  let func = state.frame.func
+  func.is_strict
+  && !func.is_derived_constructor
+  && case
+    tuple_array.element(state.pc, func.bytecode),
+    tuple_array.element(state.pc + 1, func.bytecode)
+  {
+    opcode.CallEval(..), opcode.Return
+    | opcode.CallApply, opcode.Return
+    | opcode.CallMethodApply, opcode.Return
+    | opcode.ApplyArguments(..), opcode.Return
+    -> True
     _, _ -> False
   }
-  case frame_eligible {
-    False -> False
-    True ->
-      case tuple_array.element(pc + 2, state.func.bytecode) {
-        opcode.Return -> True
-        _ -> False
-      }
+}
+
+fn gives_up_frame(state: State, callee: FuncTemplate) -> Bool {
+  case state.frame.try_stack, state.frame.return_to {
+    [], SavedFrame(constructor_this: None, ..)
+    | [], SavedThread(constructor_this: None, ..)
+    | [], SavedRegs(constructor_this: None, ..)
+    -> !callee.is_generator && !callee.is_async
+    _, _ -> False
   }
 }
 
 // §15.10.3 drop the just-parked caller frame
-pub fn elide_tail_frame(new_state: State) -> State {
-  case new_state.call_stack {
-    [saved, ..rest_frames] ->
+fn elide_tail_frame(new_state: State) -> State {
+  case new_state.frame.return_to {
+    SavedFrame(caller:, ..) ->
       State(
         ..new_state,
-        call_stack: rest_frames,
-        depth: saved.caller.depth,
-        agent: leave_frame(new_state.agent, saved.caller.depth),
+        frame: Frame(
+          ..new_state.frame,
+          return_to: caller.return_to,
+          depth: caller.depth,
+        ),
+        agent: leave_frame(new_state.agent, caller.depth),
       )
-    [] -> new_state
+    _ -> new_state
   }
 }
 
@@ -308,7 +311,18 @@ pub fn call(
   this: JsVal,
   args: List(JsVal),
   rest_stack: List(JsVal),
-  drive: Drive,
+) -> Result(State, StepExit) {
+  call_from(state, callee, this, args, rest_stack, at_tail_call(state))
+}
+
+// called by name from threaded code, which knows what is in tail position
+pub fn call_from(
+  state: State,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+  rest_stack: List(JsVal),
+  in_tail: Bool,
 ) -> Result(State, StepExit) {
   let cell = kernel.cell_of(state.agent, callee)
   case kernel.is(cell, kernel.Miss) {
@@ -320,7 +334,7 @@ pub fn call(
         this,
         args,
         rest_stack,
-        drive,
+        in_tail,
       )
     True ->
       case classify(callee) {
@@ -333,21 +347,21 @@ pub fn call(
             this,
             args,
             rest_stack,
-            drive,
+            in_tail,
           )
         _ -> not_a_function(state, callee)
       }
   }
 }
 
-pub fn call_cell(
+fn call_cell(
   state: State,
   h: Handle,
   cell: Cell,
   this: JsVal,
   args: List(JsVal),
   rest_stack: List(JsVal),
-  drive: Drive,
+  in_tail: Bool,
 ) -> Result(State, StepExit) {
   case cell {
     SObject(
@@ -378,22 +392,21 @@ pub fn call_cell(
           this,
           None,
           kernel.literal([kernel.Undefined]),
-          drive,
         )
-      case is_tail_call(state, state.pc, template) {
+      case in_tail && gives_up_frame(state, template) {
         True -> result.map(res, elide_tail_frame)
         False -> res
       }
     }
     // §10.4.1.1 bound call
     SObject(kind: BoundFn(target:, bound_this:, bound_args:, ..), ..) ->
-      call(
+      call_from(
         state,
         mk_object(target),
         bound_this,
         list.append(bound_args, args),
         rest_stack,
-        drive,
+        in_tail,
       )
     // §20.2.3.3 function.prototype.call
     SObject(kind: NativeFn(token: FunctionN(FunctionCall), ..), ..) -> {
@@ -401,7 +414,7 @@ pub fn call_cell(
         [t, ..rest] -> #(t, rest)
         [] -> #(mk_undefined(), [])
       }
-      call(state, this, this_arg, call_args, rest_stack, drive)
+      call_from(state, this, this_arg, call_args, rest_stack, in_tail)
     }
     // §20.2.3.1 function.prototype.apply
     SObject(kind: NativeFn(token: FunctionN(FunctionApply), ..), ..) -> {
@@ -415,7 +428,7 @@ pub fn call_cell(
         KUndef | KNull -> Ok(#([], state))
         _ -> list_from_array_like(state, arg_array, rest_stack)
       })
-      call(state, this, this_arg, call_args, rest_stack, drive)
+      call_from(state, this, this_arg, call_args, rest_stack, in_tail)
     }
     // §28.1.1 reflect.apply
     SObject(kind: NativeFn(token: ReflectN(ReflectApply), ..), ..) -> {
@@ -431,7 +444,7 @@ pub fn call_cell(
         args_list,
         rest_stack,
       ))
-      call(state, target, this_arg, call_args, rest_stack, drive)
+      call_from(state, target, this_arg, call_args, rest_stack, in_tail)
     }
     SObject(kind: NativeFn(token:, ..), ..) ->
       call_native(state, token, mk_object(h), this, args, rest_stack)
@@ -571,12 +584,11 @@ pub fn construct(
   args: List(JsVal),
   rest_stack: List(JsVal),
   new_target: JsVal,
-  drive: Drive,
 ) -> Result(State, StepExit) {
   // §7.2.4 gate runs after argument evaluation
   case rt_call.is_constructor(state.agent, ctor), classify(ctor) {
     True, KHandle(ctor_h) ->
-      construct_handle(state, ctor_h, args, rest_stack, new_target, drive)
+      construct_handle(state, ctor_h, args, rest_stack, new_target)
     _, _ ->
       state.throw_type_error(
         State(..state, stack: rest_stack),
@@ -591,7 +603,6 @@ fn construct_handle(
   args: List(JsVal),
   rest_stack: List(JsVal),
   new_target: JsVal,
-  drive: Drive,
 ) -> Result(State, StepExit) {
   case rt_store.cell_get(state.agent, ctor_h) {
     SObject(
@@ -624,7 +635,6 @@ fn construct_handle(
             mk_tdz(),
             None,
             new_target,
-            drive,
           )
         False -> {
           use #(new_obj, state) <- result.try(guard.guarded2(
@@ -646,7 +656,6 @@ fn construct_handle(
             this_val,
             Some(this_val),
             new_target,
-            drive,
           )
         }
       }
@@ -662,7 +671,6 @@ fn construct_handle(
         list.append(bound_args, args),
         rest_stack,
         nt,
-        drive,
       )
     }
     _ ->
@@ -691,7 +699,7 @@ fn construct_handle(
 }
 
 fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
-  case lexical.slot_of(state.func.lexical, ref) {
+  case lexical.slot_of(state.frame.func.lexical, ref) {
     None -> mk_undefined()
     Some(idx) -> {
       let raw = tuple_array.get_unchecked(idx, state.locals)
@@ -711,8 +719,9 @@ fn read_this_local(state: State) -> JsVal {
   read_lexical_local(state, lexical.ThisRef)
 }
 
-// §10.2.2 steps 10-12 constructor return override
-fn constructor_result(
+// §10.2.2 steps 10-12 constructor return override; threaded code calls it by
+// name
+pub fn constructor_result(
   state: State,
   return_value: JsVal,
   constructor_this: Option(JsVal),
@@ -724,7 +733,7 @@ fn constructor_result(
         _ -> Ok(constructed)
       }
     None ->
-      case state.func.is_derived_constructor {
+      case state.frame.func.is_derived_constructor {
         False -> Ok(return_value)
         True ->
           case classify(return_value) {
@@ -752,101 +761,63 @@ fn constructor_result(
   }
 }
 
-pub fn return_op(state: State) -> Result(State, StepExit) {
-  let return_value = case state.stack {
-    [v, ..] -> v
-    [] -> mk_undefined()
-  }
-  case state.call_stack {
-    [] -> Error(Returned(return_value, state))
-    [SavedCont(..) as saved, ..] ->
-      cont_return(state.agent, state.depth, saved, return_value)
-    [saved, ..] ->
-      case constructor_result(state, return_value, saved.constructor_this) {
-        Error(#(thrown, state)) -> Error(Threw(thrown, state))
-        Ok(pushed) -> Ok(return_to(state, saved, pushed))
-      }
-  }
-}
-
-fn return_to(state: State, saved: SavedFrame, value: JsVal) -> State {
-  safepoint.maybe_collect_at_return(
-    restore_frame(leave_frame(state.agent, state.depth), saved, [
-      value,
-      ..saved.stack
-    ]),
-  )
-}
-
-// cont finishes the op cut off midway. There's no safepoint because its
-// captures live only here
-pub fn cont_return(
-  agent: Agent,
-  depth: Int,
-  saved: SavedFrame,
-  value: JsVal,
-) -> Result(State, StepExit) {
-  let assert SavedCont(cont:, ..) = saved
-  let caller = restore_frame(leave_frame(agent, depth), saved, saved.stack)
-  // cont re-runs the op itself and saved.pc points after it
-  cont(value, State(..caller, pc: saved.pc - 1))
-}
-
+/// the state of the frame `saved` goes back to, `pushing` on top of its stack
 pub fn restore_frame(
   agent: Agent,
-  saved: SavedFrame,
-  stack: List(JsVal),
-) -> State {
-  let caller = saved.caller
-  let locals = case saved, caller.func.regs {
-    SavedRegFrame(locals:, r0:, r1:, ..), bytecode.Regs(a, b) ->
-      kernel.flush_registers(locals, a, b, r0, r1)
-    _, _ -> saved.locals
+  saved: ReturnTo,
+  pushing pushing: List(JsVal),
+) -> Option(State) {
+  let restored = fn(frame, pc, stack, locals) {
+    Some(State(agent:, pc:, stack: list.append(pushing, stack), locals:, frame:))
   }
-  State(..caller, agent:, stack:, locals:, pc: saved.pc)
+  case saved {
+    Outermost | Direct -> None
+    SavedRegs(caller:, pc:, stack:, locals:, r0:, r1:, r2:, r3:, ..)
+    | SavedCont(
+        caller:,
+        pc:,
+        stack:,
+        locals:,
+        resume: Some(Resumption(r0:, r1:, r2:, r3:, ..)),
+        ..,
+      ) ->
+      kernel.flush_registers(locals, caller.func.regs, r0, r1, r2, r3)
+      |> restored(caller, pc, stack, _)
+    SavedFrame(caller:, pc:, stack:, locals:, ..)
+    | SavedThread(caller:, pc:, stack:, locals:, ..)
+    | SavedCont(caller:, pc:, stack:, locals:, ..) ->
+      restored(caller, pc, stack, locals)
+  }
 }
 
 // this frame has no handlers left, so carry on the search in the caller
 pub fn unwind_frame(state: State) -> Option(State) {
-  case state.call_stack {
-    [] -> None
-    [saved, ..] ->
-      Some(restore_frame(
-        leave_frame(state.agent, state.depth),
-        saved,
-        saved.stack,
-      ))
+  case state.frame.return_to {
+    Outermost | Direct -> None
+    saved ->
+      restore_frame(leave_frame(state.agent, state.frame.depth), saved, [])
   }
 }
 
 // §10.4.4.7 unmapped when strict or non-simple params
-pub fn create_arguments(
-  state: State,
-  simple_params simple_params: Bool,
-) -> State {
-  let #(obj, agent) = arguments_object(state, simple_params)
-  State(..state, agent:, stack: [obj, ..state.stack], pc: state.pc + 1)
-}
-
 pub fn arguments_object(
   state: State,
   simple_params simple_params: Bool,
 ) -> #(JsVal, Agent) {
   let callee = read_lexical_local(state, lexical.ActiveFuncRef)
-  case state.func.is_strict || !simple_params {
+  case state.frame.func.is_strict || !simple_params {
     True ->
-      rt_obj.new_arguments(state.agent, state.call_args, mk_undefined(), callee)
+      rt_obj.new_arguments(
+        state.agent,
+        state.frame.call_args,
+        mk_undefined(),
+        callee,
+      )
     False -> {
       let no_boxes: List(Handle) = []
-      rt_obj.new_arguments(state.agent, state.call_args, no_boxes, callee)
+      rt_obj.new_arguments(state.agent, state.frame.call_args, no_boxes, callee)
     }
   }
-}
-
-pub fn create_rest_array(state: State, from_index: Int) -> State {
-  let #(arr, agent) =
-    rt_obj.new_array(state.agent, list.drop(state.call_args, from_index))
-  State(..state, agent:, stack: [arr, ..state.stack], pc: state.pc + 1)
 }
 
 pub type RootKind {
@@ -919,7 +890,7 @@ pub fn enter_root(
   }
 }
 
-pub fn root_state(
+fn root_state(
   agent: Agent,
   callee: RootCallee,
   this_arg: JsVal,
@@ -927,7 +898,7 @@ pub fn root_state(
   new_target: JsVal,
 ) -> State {
   let RootCallee(callee:, template:, env:, home:, flags:, unit_id:) = callee
-  let #(locals, this_val, agent) =
+  let #(locals, agent) =
     setup_frame(
       agent,
       env,
@@ -943,32 +914,30 @@ pub fn root_state(
   let depth = agent.call_depth + 1
   State(
     agent:,
-    pc: 0,
+    pc: 1,
     stack: [],
     locals:,
-    func: template,
-    unit_id:,
-    call_stack: [],
-    outer_depth: depth,
-    depth:,
-    try_stack: [],
-    this: this_val,
-    new_target:,
-    home_object: home,
-    call_args: args,
-    eval_env: None,
+    frame: Frame(
+      func: template,
+      unit_id:,
+      return_to: Outermost,
+      outer_depth: depth,
+      depth:,
+      try_stack: [],
+      call_args: args,
+      eval_env: None,
+      realm: agent.realm.id,
+    ),
   )
 }
 
 pub fn root_coroutine(state: State, fn_h: Handle) -> CoroutineCall {
   CoroutineCall(
     fn_h:,
-    template: state.func,
-    unit_id: state.unit_id,
+    template: state.frame.func,
+    unit_id: state.frame.unit_id,
     locals: state.locals,
-    this: state.this,
-    home_object: state.home_object,
-    args: state.call_args,
+    args: state.frame.call_args,
     rest_stack: [],
   )
 }

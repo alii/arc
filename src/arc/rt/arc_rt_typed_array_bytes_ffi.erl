@@ -4,13 +4,13 @@
          f32_bits_of_double/1, f64_bits_of_double/1, decode_f32_bits/1, decode_f64_bits/1]).
 
 zeroed(N) when N =< 0 -> <<>>;
-zeroed(N) -> binary:copy(<<0>>, N).
+zeroed(N) -> <<0:N/unit:8>>.
 
 %% caller guarantees off + size(region) =< size(bin)
 splice(Bin, Off, Region) ->
     Len = byte_size(Region),
-    <<Before:Off/binary, _:Len/binary, After/bits>> = Bin,
-    <<Before/binary, Region/binary, After/bits>>.
+    <<_:Off/binary, _:Len/binary, After/bits>> = Bin,
+    <<Bin:Off/binary, Region/binary, After/bits>>.
 
 get_int(Bin, Off, i8)  -> get_int_bits(Bin, Off, 8, signed);
 get_int(Bin, Off, u8)  -> get_int_bits(Bin, Off, 8, unsigned);
@@ -40,8 +40,8 @@ set_int(Bin, Off, u64, V) -> set_int_bits(Bin, Off, 64, V).
 
 set_int_bits(Bin, Off, SizeBits, V) ->
     SizeBytes = SizeBits div 8,
-    <<Before:Off/binary, _:SizeBytes/binary, After/bits>> = Bin,
-    <<Before/binary, V:SizeBits/little, After/bits>>.
+    <<_:Off/binary, _:SizeBytes/binary, After/bits>> = Bin,
+    <<Bin:Off/binary, V:SizeBits/little, After/bits>>.
 
 get_float(Bin, Off, f32) ->
     <<_:Off/binary, B:32/little, _/bits>> = Bin,

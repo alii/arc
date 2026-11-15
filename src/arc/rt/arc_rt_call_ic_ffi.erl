@@ -26,7 +26,7 @@ call_by_kind3(St, F, This, A, B, C) ->
     dispatch_kind(St, F, This, 3, A, B, C).
 
 dispatch_kind(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+    case arc_rt_arena_ffi:get(Id, element(?AGENT_CELLS, St)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Cell) of
                 ?COMPILEDFN(Code, Home, Flags, _, DirectEntry) when ?IS_PLAIN_FN(Flags) ->
@@ -98,10 +98,9 @@ call_method_ic3(St, Recv, K, Site, RSite, A, B, C) ->
     call_via_ic(St, Recv, K, Site, RSite, 3, A, B, C).
 
 call_via_ic(St, Recv = {?HANDLE_TAG, RId}, K, Site, RSite, N, A, B, C) ->
-    Store = element(?AGENT_STORE, St),
-    Cells = element(?STORE_CELLS, Store),
+    Cells = element(?AGENT_CELLS, St),
     RCell = arc_rt_arena_ffi:get(RId, Cells),
-    case element(?STORE_ICS, Store) of
+    case ?STORED(?STORE_ICS, St) of
         #{Site := {?IC_CALL, K, _, Shaped}}
           when element(1, RCell) =:= ?SSHAPEDOBJECT_TAG ->
             %% shaped ways nest sid then proto id, so there is no tuple key to build
@@ -168,11 +167,10 @@ prim_wrapper(Recv, _) when is_number(Recv) -> ?REALM_NUMBER;
 prim_wrapper(_, _) -> none.
 
 call_on_primitive(St, Recv, W, K, Site, RSite, N, A, B, C) ->
-    Store = element(?AGENT_STORE, St),
-    Cells = element(?STORE_CELLS, Store),
+    Cells = element(?AGENT_CELLS, St),
     Proto = {?SOME, {?HANDLE_TAG, PId}} =
         {?SOME, element(?BUILTINPAIR_PROTOTYPE, element(W, element(?AGENT_REALM, St)))},
-    Probe = case element(?STORE_ICS, Store) of
+    Probe = case ?STORED(?STORE_ICS, St) of
         #{Site := {?IC_CALL, K, Ways, _}} ->
             case Ways of
                 #{{?ICPRIM_TAG, W, PId} := {Chain, Fn0, Kind0}} ->
@@ -299,8 +297,7 @@ ic_chain_ok(_, _, _) -> false.
 %% resolves keybin along a plain chain, filling site when one is given
 call_via_walk(St, Recv = {?HANDLE_TAG, RId}, RCell, K, Args, Site)
   when is_tuple(RCell) ->
-    Store = element(?AGENT_STORE, St),
-    Cells = element(?STORE_CELLS, Store),
+    Cells = element(?AGENT_CELLS, St),
     {Own, Ic} = case element(1, RCell) of
         ?SOBJECT_TAG when Site =:= none ->
             {own_named(RCell, K), none};
@@ -381,10 +378,8 @@ ic_hop(none, _, _) -> none;
 ic_hop({Site, Match, Chain}, Id, Cell) -> {Site, Match, [{Id, Cell} | Chain]}.
 
 ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, K)
-  when tuple_size(St) =:= ?AGENT_SIZE,
-       tuple_size(element(?AGENT_STORE, St)) =:= ?STORE_SIZE ->
-    Store = element(?AGENT_STORE, St),
-    Ics = element(?STORE_ICS, Store),
+  when tuple_size(St) =:= ?AGENT_SIZE ->
+    Ics = ?STORED(?STORE_ICS, St),
     Chain = lists:reverse(RevChain),
     {Ways, Shaped} = case Ics of
         #{Site := {?IC_CALL, K, Ways0, Shaped0}} -> {Ways0, Shaped0};
@@ -417,8 +412,7 @@ ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, K)
     case IcE of
         full -> St;
         _ ->
-            setelement(?AGENT_STORE, St,
-                       setelement(?STORE_ICS, Store, Ics#{Site => IcE}))
+            ?SET_STORED(?STORE_ICS, St, Ics#{Site => IcE})
     end.
 
 ways_put(K, Ways, Shaped, Match, Way) ->
@@ -479,8 +473,7 @@ apply_this(DirectCode, St, Recv, [A, B, C]) -> DirectCode(St, Recv, A, B, C);
 apply_this(DirectCode, St, Recv, Args) -> erlang:apply(DirectCode, [St, Recv | Args]).
 
 new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
-    Store = element(?AGENT_STORE, St),
-    Cells = element(?STORE_CELLS, Store),
+    Cells = element(?AGENT_CELLS, St),
     case arc_rt_arena_ffi:get(CId, Cells) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Cell) of
@@ -490,11 +483,11 @@ new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
                        element(?FNFLAGS_IS_GENERATOR, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
                     case element(?SOBJECT_PROPS, Cell) of
-                        #{?KEY_ID(?PROTOTYPE_KEY) := {<<"prototype">>, Prop}}
+                        #{?KEY_ID(?PROTOTYPE_KEY) := {_, Prop}}
                           when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                             case element(?DATAPROPERTY_VALUE, Prop) of
                                 Proto = {?HANDLE_TAG, _} ->
-                                    new_direct_apply(St, Store, Cells, Ctor,
+                                    new_direct_apply(St, Cells, Ctor,
                                                      Kind, Proto, Args);
                                 _ -> {miss, St}
                             end;
@@ -506,12 +499,12 @@ new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     end;
 new_direct(St, _, _) -> {miss, St}.
 
-new_direct_apply(St, Store, Cells, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Proto,
+new_direct_apply(St, Cells, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Proto,
                  Args)
-  when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
+  when tuple_size(St) =:= ?AGENT_SIZE ->
     NewCell = {?SSHAPEDOBJECT_TAG, 0, {?SOME, Proto}, {}, #{}},
-    NewId = element(?STORE_NEXT_ID, Store),
-    St2 = setelement(?AGENT_STORE, St, ?ALLOC_CELL(Store, Cells, NewId, NewCell)),
+    NewId = element(?AGENT_NEXT_ID, St),
+    St2 = ?ALLOC_CELL(St, Cells, NewId, NewCell),
     NewThis = {?HANDLE_TAG, NewId},
     {V, St3} = case DirectEntry of
         {?SOME, ?DIRECT_ENTRY(DirectCode, Arity, true)} when length(Args) =:= Arity ->

@@ -1,7 +1,6 @@
 import arc/engine.{type Engine, Returned}
 import arc/host.{Context}
 import arc/rt/gc as rt_gc
-import arc/rt/types.{Agent, Store}
 import rt_helpers
 
 const threshold = 256
@@ -12,7 +11,7 @@ fn small_engine() -> Engine(Nil) {
   let #(Nil, eng) =
     engine.with_context(eng, fn(ctx) {
       let st = rt_gc.collect(ctx.agent, [])
-      let st = Agent(..st, store: Store(..st.store, gc_threshold: threshold))
+      let st = rt_gc.set_threshold(st, threshold)
       #(Nil, Context(..ctx, agent: st))
     })
   eng

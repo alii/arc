@@ -1,4 +1,5 @@
 import arc/rt/arena
+import arc/rt/types.{type Cell, SBox, mk_int}
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -47,33 +48,36 @@ pub fn overwrite_and_free_test() {
   assert arena.count(a) == 298
 }
 
-pub fn fold_and_rebuild_round_trip_test() {
-  let live = [2, 3, 40, 41, 42, 1000, 1001, 5000]
+@external(erlang, "arc_rt_gc_ffi", "mark")
+fn mark(
+  cells: arena.Arena(Cell),
+  roots: List(Int),
+  watermark: Int,
+  weak: List(Int),
+) -> #(arena.Marks, Int, List(Int), Int)
+
+pub fn keep_marked_test() {
+  let live = [2, 3, 40, 41, 42, 1000, 1001, 5000, 20_001]
+  let cell = fn(id) { SBox(mk_int(id)) }
   let a =
-    int.range(from: 0, to: 6000, with: arena.new(), run: fn(a, id) {
-      arena.set(id, id + 1, a)
+    int.range(from: 0, to: 600_000, with: arena.new(), run: fn(a, id) {
+      arena.set(id, cell(id), a)
     })
-  let kept =
-    arena.fold(
-      fn(id, v, acc) {
-        case list.contains(live, id) {
-          True -> [#(id, v), ..acc]
-          False -> acc
-        }
-      },
-      [],
-      a,
-    )
-  assert list.map(kept, fn(p) { p.0 }) == list.reverse(live)
-  let b = arena.from_descending(kept)
-  let model = list.map(live, fn(id) { #(id, id + 1) }) |> dict.from_list
-  check(b, model, 6100)
-  assert arena.count(b) == list.length(live)
-  let b = arena.set(5001, 9, arena.set(20_000, 8, b))
-  assert arena.get(5001, b) == 9
-  assert arena.get(20_000, b) == 8
-  assert arena.get(1000, b) == 1001
-  assert arena.count(arena.from_descending([])) == 0
+  use watermark <- list.each([0, 41, 2047, 2048, 4099])
+  let #(marks, count, weak, past) = mark(a, live, watermark, [])
+  let young = list.filter(live, fn(id) { id >= watermark })
+  assert count == list.length(young)
+  assert weak == []
+  assert past == 20_002
+  let b = arena.keep_marked(watermark, marks, past, a)
+  let kept = arena.fold(fn(id, _, acc) { [id, ..acc] }, [], b)
+  let old = int.range(from: 0, to: watermark, with: [], run: list.prepend)
+  assert kept == list.append(list.reverse(young), old)
+  assert arena.diff_below(watermark, a, b) == []
+  let b = arena.set(20_002, cell(9), arena.set(700_000, cell(8), b))
+  assert arena.get(20_002, b) == cell(9)
+  assert arena.get(700_000, b) == cell(8)
+  assert arena.get(5000, b) == cell(5000)
 }
 
 pub fn ascending_fold_order_test() {

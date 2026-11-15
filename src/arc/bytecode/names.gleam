@@ -6,7 +6,7 @@ import arc/bytecode/key.{type PropertyKey, Named}
 
 pub const add = Named(92_639_634, "add")
 
-pub const calendar = Named(416_148_655_292_561_992, "calendar")
+pub const calendar = Named(2_876_788_806_590_922, "calendar")
 
 pub const callee = Named(1_562_980_234_925_462, "callee")
 
@@ -30,15 +30,17 @@ pub const has = Named(94_471_630, "has")
 
 pub const index = Named(6_209_341_068_770, "index")
 
-pub const infinity = Named(203_493_090_797_992_356, "Infinity")
+pub const input = Named(6_209_344_230_866, "input")
 
-pub const iterator = Named(425_897_015_423_828_148, "iterator")
+pub const infinity = Named(2_422_939_880_944_870, "Infinity")
+
+pub const iterator = Named(2_987_535_397_367_754, "iterator")
 
 pub const join = Named(24_322_614_714, "join")
 
 pub const keys = Named(24_387_118_542, "keys")
 
-pub const last_index = Named(95_666_154_611_911_752, "lastIndex")
+pub const last_index = Named(122_191_974_842_836_450, "lastIndex")
 
 pub const length = Named(1_602_631_505_924_514, "length")
 
@@ -48,7 +50,7 @@ pub const message = Named(411_399_652_123_188_630, "message")
 
 pub const mode = Named(24_523_936_150, "mode")
 
-pub const month_code = Named(6_081_454_441_373_912, "monthCode")
+pub const month_code = Named(123_562_793_000_232_086, "monthCode")
 
 pub const name = Named(24_587_384_214, "name")
 
@@ -62,11 +64,11 @@ pub const offset = Named(1_615_842_291_586_514, "offset")
 
 pub const padding = Named(414_759_500_955_105_694, "padding")
 
-pub const plain_time = Named(65_047_404_117_846_008, "plainTime")
+pub const plain_time = Named(126_884_095_925_579_158, "plainTime")
 
-pub const proto = Named(285_587_656_632_664_716, "__proto__")
+pub const proto = Named(107_519_261_014_744_958, "__proto__")
 
-pub const prototype = Named(351_306_839_192_840_528, "prototype")
+pub const prototype = Named(126_993_544_678_109_334, "prototype")
 
 pub const raw = Named(97_093_086, "raw")
 
@@ -92,7 +94,7 @@ pub const then = Named(24_991_864_250, "then")
 
 pub const throw = Named(6_397_920_656_862, "throw")
 
-pub const time_zone = Named(240_941_977_526_539_172, "timeZone")
+pub const time_zone = Named(3_178_059_266_780_822, "timeZone")
 
 pub const to_iso_string = Named(224_288_002_643_020_276, "toISOString")
 
@@ -100,7 +102,7 @@ pub const to_json = Named(1_637_985_255_505_210, "toJSON")
 
 pub const to_locale_string = Named(493_285_335_970_630_320, "toLocaleString")
 
-pub const to_string = Named(567_970_273_839_592_496, "toString")
+pub const to_string = Named(3_179_597_896_773_278, "toString")
 
 pub const value = Named(6_431_809_066_390, "value")
 
@@ -120,6 +122,7 @@ pub const all: List(PropertyKey) = [
   groups,
   has,
   index,
+  input,
   infinity,
   iterator,
   join,

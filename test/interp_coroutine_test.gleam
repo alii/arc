@@ -382,7 +382,9 @@ pub fn unhandled_rejections_reported_by_drain_test() {
     run_on(
       st,
       "async function f() { await 0; throw new Error('handled') } f().catch(() => {});
-       Promise.reject('also handled').then(null, () => {});",
+       Promise.reject('also handled').then(null, () => {});
+       const first = Promise.reject(1), second = Promise.reject(2);
+       first.catch(() => {}); second.catch(() => {});",
     )
   let assert [] = rt_helpers.recorded()
   let #(_, _st) =

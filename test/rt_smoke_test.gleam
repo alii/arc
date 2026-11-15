@@ -69,6 +69,7 @@ fn slots(vals: List(JsVal)) -> types.ShapeSlots
 
 pub fn shaped_set_transitions_test() {
   let st = agent()
+  let first_shape = st.store.next_shape
   let proto = st.realm.object.prototype
   let #(a, st) =
     rt_store.cell_new(
@@ -104,8 +105,8 @@ pub fn shaped_set_transitions_test() {
     rt_store.cell_get(st, a)
   let assert types.SShapedObject(shape_id: shape_b, ..) =
     rt_store.cell_get(st, b)
-  assert shape_a == 3
-  assert shape_b == 2
+  assert shape_a == first_shape + 1
+  assert shape_b == first_shape
   let #(ax, st) = rt_obj.get_prop(st, mk_object(a), x)
   let #(ay, st) = rt_obj.get_prop(st, mk_object(a), y)
   let #(bx, st) = rt_obj.get_prop(st, mk_object(b), x)

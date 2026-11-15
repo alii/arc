@@ -1,0 +1,25 @@
+diff --git a/src/libAtomVM/opcodesswitch.h b/src/libAtomVM/opcodesswitch.h
+index 8afb307..bb67ba6 100644
+--- a/src/libAtomVM/opcodesswitch.h
++++ b/src/libAtomVM/opcodesswitch.h
+@@ -1474,7 +1474,20 @@ static void destroy_extended_registers(Context *ctx, unsigned int live)
+         dreg_t ext_reg = extended_register_ptr(ctx, i);                 \
+         *ext_reg = boxed_value[i - fun_arity + 3];                      \
+     }                                                                   \
++    /* arc/playground patch: there is no opcode for a fun call in tail  \
++     * position. It compiles to call_fun, deallocate, return, which the \
++     * BEAM loader turns into a tail call; do the same here, or code    \
++     * that loops through funs grows the stack without end. */          \
+     ctx->cp = module_address(mod->module_index, pc - code);             \
++    if (*pc == OP_DEALLOCATE) {                                         \
++        const uint8_t *after_call = pc + 1;                             \
++        uint32_t frame_words;                                           \
++        DECODE_LITERAL(frame_words, after_call);                        \
++        if (*after_call == OP_RETURN) {                                 \
++            ctx->cp = ctx->e[frame_words];                              \
++            ctx->e += frame_words + 1;                                  \
++        }                                                               \
++    }                                                                   \
+     JUMP_TO_LABEL(fun_module, label);
+ 
+ #define DECODE_FLAGS_LIST(flags_value, flags, opcode)                   \

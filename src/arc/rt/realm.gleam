@@ -33,9 +33,14 @@ pub fn with_realm(
 }
 
 fn enter(st: Agent, id: Int) -> Agent {
-  let realms = dict.insert(st.realms, st.realm.id, st.realm)
+  let realms = dict.insert(st.store.meta.realms, st.realm.id, st.realm)
   case dict.get(realms, id) {
-    Ok(realm) -> Agent(..st, realm:, realms:)
+    Ok(realm) ->
+      Agent(
+        ..rt_store.with_meta(st, types.StoreMeta(..st.store.meta, realms:)),
+        realm:,
+        globals: dict.new(),
+      )
     Error(Nil) ->
       panic as { "rt/realm.enter: no realm with id " <> int.to_string(id) }
   }

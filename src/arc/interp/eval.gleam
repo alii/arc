@@ -6,7 +6,7 @@ import arc/compiler
 import arc/compiler/compile_task
 import arc/compiler/scope_builder
 import arc/internal/tuple_array.{type TupleArray}
-import arc/interp/state.{type State, State}
+import arc/interp/state.{type State, Frame, Outermost, State}
 import arc/parser
 import arc/parser/ast
 import arc/rt/async as rt_async
@@ -58,9 +58,12 @@ fn compile_source(
           |> result.map_error(compiler.error_message)
       }
     })
-  result.map_error(compiled, fn(msg) {
-    rt_val.new_error(agent, SyntaxError, msg)
-  })
+  // a few lines have little to share and are mostly run the once
+  case string.byte_size(source) < 4096 {
+    True -> compiled
+    False -> result.map(compiled, bytecode.shared)
+  }
+  |> result.map_error(rt_val.new_error(agent, SyntaxError, _))
 }
 
 fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
@@ -75,33 +78,32 @@ fn top_level_activation(
   agent: Agent,
   template: FuncTemplate,
   locals: TupleArray(JsVal),
-  this: JsVal,
   eval_env: Option(Handle),
 ) -> State {
   let #(unit_id, agent) = rt_store.next_unit_id(agent)
   State(
     agent:,
-    pc: 0,
+    pc: 1,
     stack: [],
     locals:,
-    func: template,
-    unit_id:,
-    call_stack: [],
-    outer_depth: agent.call_depth,
-    depth: agent.call_depth,
-    try_stack: [],
-    this:,
-    new_target: mk_undefined(),
-    home_object: mk_undefined(),
-    call_args: [],
-    eval_env:,
+    frame: Frame(
+      func: template,
+      unit_id:,
+      return_to: Outermost,
+      outer_depth: agent.call_depth,
+      depth: agent.call_depth,
+      try_stack: [],
+      call_args: [],
+      eval_env:,
+      realm: agent.realm.id,
+    ),
   )
 }
 
 pub fn script_activation(agent: Agent, template: FuncTemplate) -> State {
   let global = mk_object(agent.realm.global_object)
   let locals = top_level_locals(template, global)
-  top_level_activation(agent, template, locals, global, None)
+  top_level_activation(agent, template, locals, None)
 }
 
 // holds one call_depth unit, caller frame is not a gc root
@@ -142,11 +144,15 @@ pub fn hook(
       parser.parse_script,
       compile,
     ))
+    // compiled code calls builtins at no depth, and its values are no gc roots
+    let depth = agent.call_depth
+    let agent = Agent(..agent, call_depth: int.max(depth, 1))
     let #(res, agent) = run(script_activation(agent, template))
     let agent = case kind {
       ScriptEval -> rt_async.drain(agent)
       IndirectEval | DynamicFunction -> agent
     }
+    let agent = Agent(..agent, call_depth: depth)
     case res {
       Ok(v) -> Ok(#(v, agent))
       Error(thrown) -> Error(#(thrown, agent))
@@ -194,7 +200,7 @@ pub fn direct(
     [x, ..] -> x
     [] -> mk_undefined()
   }
-  case classify(source), caller.func.local_names {
+  case classify(source), caller.frame.func.local_names {
     KStr(source), Some(names) ->
       run_direct_eval(
         caller,
@@ -215,7 +221,7 @@ pub fn direct(
         ))
         run_bracketed(caller.agent, script_activation(_, template), run)
       }
-      return_to_caller(caller, outcome, caller.eval_env)
+      return_to_caller(caller, outcome, caller.frame.eval_env)
     }
     _, _ -> #(Ok(source), caller)
   }
@@ -231,7 +237,7 @@ fn run_direct_eval(
   run: Run,
 ) -> #(Result(JsVal, JsVal), State) {
   let EvalNameTable(var_env:, names: name_table) = names
-  let func = caller.func
+  let func = caller.frame.func
   let code_kind = func.code_kind
   let eval_caller =
     compiler.DirectEvalCaller(
@@ -271,7 +277,11 @@ fn run_direct_eval(
     let locals =
       list.append(boxes, list.repeat(mk_undefined(), padding))
       |> tuple_array.from_list
-    let #(eval_env, agent) = case func.is_strict, var_env, caller.eval_env {
+    let #(eval_env, agent) = case
+      func.is_strict,
+      var_env,
+      caller.frame.eval_env
+    {
       True, _, _ | _, GlobalVarEnv, _ -> #(None, caller.agent)
       False, FrameVarEnv, Some(h) -> #(Some(h), caller.agent)
       False, FrameVarEnv, None -> {
@@ -282,7 +292,7 @@ fn run_direct_eval(
     let #(res, agent) =
       run_bracketed(
         agent,
-        top_level_activation(_, template, locals, caller.this, eval_env),
+        top_level_activation(_, template, locals, eval_env),
         run,
       )
     Ok(#(res, eval_env, agent))
@@ -292,9 +302,9 @@ fn run_direct_eval(
       return_to_caller(
         caller,
         Ok(#(res, agent)),
-        option.or(eval_env, caller.eval_env),
+        option.or(eval_env, caller.frame.eval_env),
       )
-    Error(err) -> return_to_caller(caller, Error(err), caller.eval_env)
+    Error(err) -> return_to_caller(caller, Error(err), caller.frame.eval_env)
   }
 }
 
@@ -304,10 +314,13 @@ fn return_to_caller(
   eval_env: Option(Handle),
 ) -> #(Result(JsVal, JsVal), State) {
   case outcome {
-    Ok(#(res, agent)) -> #(res, State(..caller, agent:, eval_env:))
+    Ok(#(res, agent)) -> #(
+      res,
+      State(..caller, agent:, frame: Frame(..caller.frame, eval_env:)),
+    )
     Error(#(thrown, agent)) -> #(
       Error(thrown),
-      State(..caller, agent:, eval_env:),
+      State(..caller, agent:, frame: Frame(..caller.frame, eval_env:)),
     )
   }
 }
@@ -329,7 +342,7 @@ fn caller_boxes(
     use lex <- result.map(
       lexical.all_lexical_refs
       |> list.filter_map(fn(ref) {
-        lexical.slot_of(caller.func.lexical, ref) |> option.to_result(Nil)
+        lexical.slot_of(caller.frame.func.lexical, ref) |> option.to_result(Nil)
       })
       |> list.try_map(read),
     )

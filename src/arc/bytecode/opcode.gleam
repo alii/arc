@@ -1,5 +1,7 @@
-import arc/bytecode/binop.{type ClassifiedBinOp, type PureBinOp}
+import arc/bytecode/binop
 import arc/bytecode/key.{type PropertyKey}
+import arc/rt/wire.{type JsVal}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -12,9 +14,9 @@ pub type LabelId {
   LabelId(id: Int)
 }
 
-pub type Pc {
-  Pc(pc: Int)
-}
+// an op's position in its function's bytecode, counted from 1
+pub type Pc =
+  Int
 
 pub type TryKind(target) {
   CatchOnly
@@ -24,7 +26,7 @@ pub type TryKind(target) {
 }
 
 pub type Op {
-  PushConst(index: Int)
+  PushConst(value: JsVal)
   Pop
   Dup
   Swap
@@ -96,7 +98,7 @@ pub type Op {
   // keys stored last key first, the order values pop
   NewObjectWith(keys: List(PropertyKey), count: Int)
   // the whole literal, keys first key first; site is unique within its unit
-  NewObjectShaped(keys: List(PropertyKey), count: Int, site: Int)
+  NewObjectShaped(keys: List(PropertyKey), count: Int)
   DefineField(key: PropertyKey)
   DefineFieldComputed
   ToPropertyKey
@@ -198,7 +200,7 @@ pub type Op {
   GetEnv(index: Int)
 
   // build with bin_op, never classify at execution time
-  BinOp(kind: ClassifiedBinOp)
+  BinOp(kind: binop.BinOp)
   UnaryOp(kind: UnaryOpKind)
   TypeOf
   TypeofGlobal(key: PropertyKey)
@@ -206,44 +208,44 @@ pub type Op {
   // statement-position i++ on a plain local
   IncLocal(index: Int)
   DecLocal(index: Int)
-  // jumps when local truthiness equals when
-  JumpIfLocal(index: Int, target: Pc, when: Bool)
+  // these go to `then` when the test holds, else to `otherwise`
+  JumpIfLocal(index: Int, then: Pc, otherwise: Pc)
   IncLocalJump(index: Int, target: Pc)
   // by is the step, 1 or -1
   IncLocalCmpConstJump(
     index: Int,
     by: Int,
-    const_index: Int,
-    kind: PureBinOp,
-    target: Pc,
-    when: Bool,
+    value: JsVal,
+    kind: binop.BinOp,
+    then: Pc,
+    otherwise: Pc,
   )
   IncLocalCmpLocalJump(
     index: Int,
     by: Int,
     right: Int,
-    kind: PureBinOp,
-    target: Pc,
-    when: Bool,
+    kind: binop.BinOp,
+    then: Pc,
+    otherwise: Pc,
   )
   CmpLocalLocalJump(
     left: Int,
     right: Int,
-    kind: PureBinOp,
-    target: Pc,
-    when: Bool,
+    kind: binop.BinOp,
+    then: Pc,
+    otherwise: Pc,
   )
   CmpLocalConstJump(
     left: Int,
-    const_index: Int,
-    kind: PureBinOp,
-    target: Pc,
-    when: Bool,
+    value: JsVal,
+    kind: binop.BinOp,
+    then: Pc,
+    otherwise: Pc,
   )
   // [right, left] -> []
-  CmpJump(kind: PureBinOp, target: Pc, when: Bool)
+  CmpJump(kind: binop.BinOp, then: Pc, otherwise: Pc)
   // [left] -> []
-  CmpConstJump(const_index: Int, kind: PureBinOp, target: Pc, when: Bool)
+  CmpConstJump(value: JsVal, kind: binop.BinOp, then: Pc, otherwise: Pc)
   GetLocalField(index: Int, key: PropertyKey)
   // [] -> [val, obj]
   GetLocalFieldKeep(index: Int, key: PropertyKey)
@@ -255,11 +257,11 @@ pub type Op {
   // [val, obj] -> []
   PutFieldPop(key: PropertyKey)
   PutLocalLocalField(obj: Int, value: Int, key: PropertyKey)
-  PutLocalConstField(obj: Int, const_index: Int, key: PropertyKey)
-  BinOpConst(kind: ClassifiedBinOp, const_index: Int)
-  BinOpLocal(kind: ClassifiedBinOp, index: Int)
-  BinOpLocalLocal(kind: ClassifiedBinOp, left: Int, right: Int)
-  BinOpLocalConst(kind: ClassifiedBinOp, left: Int, const_index: Int)
+  PutLocalConstField(obj: Int, value: JsVal, key: PropertyKey)
+  BinOpConst(kind: binop.BinOp, value: JsVal)
+  BinOpLocal(kind: binop.BinOp, index: Int)
+  BinOpLocalLocal(kind: binop.BinOp, left: Int, right: Int)
+  BinOpLocalConst(kind: binop.BinOp, left: Int, value: JsVal)
   // [] -> [tonumber(old)], local becomes old + 1
   PostIncLocal(index: Int)
   PostDecLocal(index: Int)
@@ -268,12 +270,12 @@ pub type Op {
   GetElemLocals(obj: Int, key: Int)
   // obj[key++] with both plain locals
   GetElemPostInc(obj: Int, key: Int)
-  BinOpLocalField(kind: ClassifiedBinOp, index: Int, key: PropertyKey)
+  BinOpLocalField(kind: binop.BinOp, index: Int, key: PropertyKey)
   // [right, left] -> []
-  BinOpPut(kind: ClassifiedBinOp, dst: Int)
-  BinOpConstPut(kind: ClassifiedBinOp, const_index: Int, dst: Int)
-  BinOpLocalPut(kind: ClassifiedBinOp, index: Int, dst: Int)
-  BinOpLocalLocalPut(kind: ClassifiedBinOp, left: Int, right: Int, dst: Int)
+  BinOpPut(kind: binop.BinOp, dst: Int)
+  BinOpConstPut(kind: binop.BinOp, value: JsVal, dst: Int)
+  BinOpLocalPut(kind: binop.BinOp, index: Int, dst: Int)
+  BinOpLocalLocalPut(kind: binop.BinOp, left: Int, right: Int, dst: Int)
 
   ForInStart
   ForInNext
@@ -395,31 +397,31 @@ pub type IrOp {
   IrDefineMethod(name: String)
   IrDefineAccessor(name: String, kind: AccessorKind, enumerable: Bool)
 
-  IrBinOp(kind: ClassifiedBinOp)
+  IrBinOp(kind: binop.BinOp)
 
   IrCmpLocalLocalJump(
     left: Int,
     right: Int,
-    kind: PureBinOp,
+    kind: binop.BinOp,
     label: LabelId,
     when: Bool,
   )
   IrCmpLocalConstJump(
     left: Int,
-    const_index: Int,
-    kind: PureBinOp,
+    value: JsVal,
+    kind: binop.BinOp,
     label: LabelId,
     when: Bool,
   )
-  IrCmpJump(kind: PureBinOp, label: LabelId, when: Bool)
-  IrCmpConstJump(const_index: Int, kind: PureBinOp, label: LabelId, when: Bool)
+  IrCmpJump(kind: binop.BinOp, label: LabelId, when: Bool)
+  IrCmpConstJump(value: JsVal, kind: binop.BinOp, label: LabelId, when: Bool)
   IrIncLocalJump(index: Int, label: LabelId)
   IrJumpIfLocal(index: Int, label: LabelId, when: Bool)
   IrIncLocalCmpConstJump(
     index: Int,
     by: Int,
-    const_index: Int,
-    kind: PureBinOp,
+    value: JsVal,
+    kind: binop.BinOp,
     label: LabelId,
     when: Bool,
   )
@@ -427,7 +429,7 @@ pub type IrOp {
     index: Int,
     by: Int,
     right: Int,
-    kind: PureBinOp,
+    kind: binop.BinOp,
     label: LabelId,
     when: Bool,
   )
@@ -551,26 +553,48 @@ pub fn map_slots(op: Op, f: fn(Int) -> Int) -> Op {
   }
 }
 
+/// Turns every slot the op names into its position in the tuple that holds
+/// it, counted from 1, which is what a finished template's ops carry.
+pub fn to_positions(op: Op, position: fn(Int) -> Int) -> Op {
+  case op {
+    PutLocalCheckInit(i) -> PutLocalCheckInit(position(i))
+    ApplyArguments(slot:, simple_params:) ->
+      ApplyArguments(slot: position(slot), simple_params:)
+    BoxLocal(i) -> BoxLocal(position(i))
+    BoxLocals(slots:, uninit:) ->
+      BoxLocals(slots: list.map(slots, position), uninit:)
+    GetBoxed(i) -> GetBoxed(position(i))
+    PutBoxed(i) -> PutBoxed(position(i))
+    PutBoxedCheckInit(i) -> PutBoxedCheckInit(position(i))
+    GetEnvBoxed(i) -> GetEnvBoxed(i + 1)
+    PutEnvBoxed(i) -> PutEnvBoxed(i + 1)
+    PutEnvBoxedCheckInit(i) -> PutEnvBoxedCheckInit(i + 1)
+    GetEnv(i) -> GetEnv(i + 1)
+    _ -> map_slots(op, position)
+  }
+}
+
 // backward edges only, enough to find loops
 pub fn jump_target(op: Op) -> Option(Int) {
   case op {
-    Jump(Pc(t))
-    | JumpIfFalse(Pc(t))
-    | JumpIfTrue(Pc(t))
-    | JumpIfNullish(Pc(t))
-    | JumpIfNotNullish(Pc(t))
-    | JumpIfFalseOrPop(Pc(t))
-    | JumpIfTrueOrPop(Pc(t))
-    | JumpIfNotNullishOrPop(Pc(t))
-    | JumpUndefinedIfNullish(Pc(t))
-    | JumpIfLocal(_, Pc(t), _)
-    | IncLocalJump(_, Pc(t))
-    | IncLocalCmpConstJump(_, _, _, _, Pc(t), _)
-    | IncLocalCmpLocalJump(_, _, _, _, Pc(t), _)
-    | CmpLocalLocalJump(_, _, _, Pc(t), _)
-    | CmpLocalConstJump(_, _, _, Pc(t), _)
-    | CmpJump(_, Pc(t), _)
-    | CmpConstJump(_, _, Pc(t), _) -> Some(t)
+    Jump(t)
+    | JumpIfFalse(t)
+    | JumpIfTrue(t)
+    | JumpIfNullish(t)
+    | JumpIfNotNullish(t)
+    | JumpIfFalseOrPop(t)
+    | JumpIfTrueOrPop(t)
+    | JumpIfNotNullishOrPop(t)
+    | JumpUndefinedIfNullish(t)
+    | IncLocalJump(_, t) -> Some(t)
+    // one of the two is the next op, so the lower is the only backward one
+    JumpIfLocal(_, a, b)
+    | IncLocalCmpConstJump(_, _, _, _, a, b)
+    | IncLocalCmpLocalJump(_, _, _, _, a, b)
+    | CmpLocalLocalJump(_, _, _, a, b)
+    | CmpLocalConstJump(_, _, _, a, b)
+    | CmpJump(_, a, b)
+    | CmpConstJump(_, _, a, b) -> Some(int.min(a, b))
     _ -> None
   }
 }

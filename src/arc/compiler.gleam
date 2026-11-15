@@ -16,7 +16,6 @@ import arc/rt/bytecode.{
   type EvalNameTable, type FuncTemplate, type VarEnvKind, EvalNameTable,
   FrameVarEnv, FuncTemplate, GlobalVarEnv,
 }
-import arc/rt/types.{type JsVal}
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/list
@@ -372,7 +371,6 @@ fn finish_top_level(
   }
   build_template(
     out.code,
-    out.constants,
     info,
     functions,
     [],
@@ -382,6 +380,7 @@ fn finish_top_level(
     // a module that awaits parks with raw locals, as every coroutine frame does
     use_registers: option.is_none(local_names)
       && !list.contains(out.code, opcode.IrFinal(opcode.Await)),
+    trims: False,
   )
 }
 
@@ -394,7 +393,6 @@ fn eval_name_table(
 
 fn build_template(
   code: List(opcode.IrOp),
-  constants: List(JsVal),
   info: scope.FunctionInfo,
   functions: List(FuncTemplate),
   env_descriptors: List(Int),
@@ -402,13 +400,15 @@ fn build_template(
   is_strict is_strict: Bool,
   code_kind code_kind: CodeKind,
   use_registers use_registers: Bool,
+  // whether calls are all that lay the frame out and look into it
+  trims trims: Bool,
 ) -> FuncTemplate {
-  let #(assemble.Assembled(bytecode:, constants:, lines:), nested_captures) = case
+  let #(assemble.Assembled(bytecode:, lines:), nested_captures) = case
     local_names
   {
     // a direct eval finds its caller's variables by slot
-    Some(_) -> #(assemble.assemble(code, constants), 0)
-    None -> assemble_nesting(code, constants, list.length(info.captures))
+    Some(_) -> #(assemble.assemble(code), 0)
+    None -> assemble_nesting(code, list.length(info.captures))
   }
   // where a slot of the flat layout went, if it is still a slot
   let moved = fn(slot) {
@@ -417,23 +417,29 @@ fn build_template(
       nested -> slot - nested + 1
     }
   }
-  let #(bytecode, regs) = case use_registers {
-    True ->
-      registers.assign_regs(
-        bytecode,
-        set.union(captured_slots(functions), lazily_captured_slots(bytecode))
-          |> set.filter(fn(slot) { slot >= nested_captures })
-          |> set.map(moved),
-      )
-    False -> #(bytecode, bytecode.NoRegs)
+  let captured =
+    set.union(captured_slots(functions), lazily_captured_slots(bytecode))
+    |> set.filter(fn(slot) { slot >= nested_captures })
+    |> set.map(moved)
+  let ops = tuple_array.to_list(bytecode)
+  let lexical = lexical.map_slots(info.lexical, moved)
+  let lexical = case trims {
+    True -> trimmed(lexical, ops, captured)
+    False -> lexical
+  }
+  let position = fn(slot) { lexical.trimmed_slot(lexical, slot) + 1 }
+  let bytecode =
+    list.map(ops, opcode.to_positions(_, position)) |> tuple_array.from_list
+  let regs = case use_registers {
+    True -> registers.assign_regs(bytecode, set.map(captured, position))
+    False -> bytecode.NoRegs
   }
   FuncTemplate(
     name: None,
     arity: 0,
     length: 0,
-    local_count: moved(info.local_count),
+    local_count: lexical.trimmed_slot(lexical, moved(info.local_count)),
     bytecode:,
-    constants:,
     lines:,
     functions: tuple_array.from_list(functions),
     env_descriptors:,
@@ -445,11 +451,53 @@ fn build_template(
     is_constructor: False,
     is_class_constructor: False,
     local_names:,
-    lexical: lexical.map_slots(info.lexical, moved),
+    lexical:,
     code_kind:,
     regs:,
     nested_captures:,
+    code: tuple_array.from_list([]),
+    id: 0,
   )
+}
+
+// every call fills the lexical slots in, and most code never reads them
+fn trimmed(
+  slots: lexical.LexicalSlots,
+  ops: List(opcode.Op),
+  captured: Set(Int),
+) -> lexical.LexicalSlots {
+  case slots {
+    lexical.OwnedLexicalSlots(base:) -> {
+      let note = fn(read, slot) {
+        case slot >= base && slot < base + lexical.owned_lexical_slot_count {
+          True -> set.insert(read, slot)
+          False -> read
+        }
+      }
+      let read = {
+        use read, op <- list.fold(ops, captured)
+        case op {
+          // the arguments object names the function
+          opcode.CreateArguments(..) | opcode.ApplyArguments(..) ->
+            set.insert(read, base + lexical.ref_offset(lexical.ActiveFuncRef))
+          _ ->
+            list.fold(opcode.pinned_slots(op), read, note)
+            |> list.fold(opcode.slot_uses(op), _, fn(read, used) {
+              note(read, used.0)
+            })
+        }
+      }
+      case list.any([1, 2, 3], fn(i) { set.contains(read, base + i) }) {
+        True -> slots
+        False ->
+          lexical.TrimmedLexicalSlots(
+            base:,
+            keeps_this: set.contains(read, base),
+          )
+      }
+    }
+    _ -> slots
+  }
 }
 
 // fewer captures than this stay spread over the frame's first slots
@@ -459,10 +507,9 @@ const fewest_nested_captures = 2
 // so captures, which never change, live outside it in one tuple
 fn assemble_nesting(
   code: List(opcode.IrOp),
-  constants: List(JsVal),
   captures: Int,
 ) -> #(assemble.Assembled, Int) {
-  let flat = fn() { #(assemble.assemble(code, constants), 0) }
+  let flat = fn() { #(assemble.assemble(code), 0) }
   use <- bool.lazy_guard(captures < fewest_nested_captures, flat)
   // rewrite capture reads first so none gets fused into an op that wants a slot
   let assembled =
@@ -473,7 +520,7 @@ fn assemble_nesting(
         _ -> ir
       }
     })
-    |> assemble.assemble(constants)
+    |> assemble.assemble
   case
     tuple_array.to_list(assembled.bytecode)
     |> list.try_map(opcode.nest_captures(_, captures))
@@ -526,20 +573,17 @@ fn compile_child(
     False -> None
   }
   let functions = compile_children(child.functions, tree, child.scope_id)
-  // coroutine frames park with raw locals, so they never get registers
-  let use_registers =
-    option.is_none(local_names) && !child.is_generator && !child.is_async
   let template =
     build_template(
       child.code,
-      child.constants,
       info,
       functions,
       env_descriptors,
       local_names,
       is_strict: child.is_strict,
       code_kind: child.code_kind,
-      use_registers:,
+      use_registers: option.is_none(local_names),
+      trims: option.is_none(local_names) && !child.is_derived_constructor,
     )
   FuncTemplate(
     ..template,
@@ -577,7 +621,6 @@ fn stub_template(child: emit.CompiledChild, env_size: Int) -> FuncTemplate {
       opcode.CompileSelf,
       opcode.Return,
     ]),
-    constants: tuple_array.from_list([]),
     lines: tuple_array.from_list([0, 0]),
     functions: tuple_array.from_list([]),
     env_descriptors: [],
@@ -593,6 +636,8 @@ fn stub_template(child: emit.CompiledChild, env_size: Int) -> FuncTemplate {
     code_kind: child.code_kind,
     regs: bytecode.NoRegs,
     nested_captures: 0,
+    code: tuple_array.from_list([]),
+    id: 0,
   )
 }
 

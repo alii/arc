@@ -20,7 +20,6 @@ import arc/rt/types.{
 }
 import arc/rt/utf8
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
@@ -480,7 +479,7 @@ pub fn new_receiver(st: Agent, proto: Handle) -> #(Handle, Agent) {
 }
 
 pub fn new_object_literal(st: Agent) -> #(JsVal, Agent) {
-  let #(h, st) = new_object(st, Some(st.realm.object.prototype))
+  let #(h, st) = new_object(st, st.realm.shared.object_proto)
   #(types.mk_object(h), st)
 }
 
@@ -1118,16 +1117,9 @@ pub fn literal_shape(
   let assert Ok(ShapeDesc(transitions:, ..) as empty) =
     dict.get(store.shapes, 0)
     as "rt_obj: the empty shape is missing (engine invariant)"
-  let step =
-    list.fold(keys, <<>>, fn(joined, k) {
-      <<joined:bits, 255, key.to_text(k):utf8>>
-    })
+  let step = literal_step(keys)
   let known =
-    dict.get(transitions, step)
-    |> result.try(fn(to) {
-      dict.get(store.shapes, to)
-      |> result.map(fn(desc) { #(to, desc.offsets, st) })
-    })
+    dict.get(transitions, step) |> result.map(fn(to) { #(to.0, to.1, st) })
   use <- result.lazy_unwrap(known)
   let to = store.next_shape
   let offsets =
@@ -1138,7 +1130,10 @@ pub fn literal_shape(
     store.shapes
     |> dict.insert(
       0,
-      ShapeDesc(..empty, transitions: dict.insert(transitions, step, to)),
+      ShapeDesc(
+        ..empty,
+        transitions: dict.insert(transitions, step, #(to, offsets)),
+      ),
     )
     |> dict.insert(
       to,
@@ -1155,6 +1150,20 @@ pub fn literal_shape(
   )
 }
 
+// called by name from threaded code
+pub fn literal_step(keys: List(PropertyKey)) -> types.ShapeStep {
+  list.fold(keys, <<>>, fn(joined, k) {
+    <<joined:bits, 255, key.to_text(k):utf8>>
+  })
+  |> joined_step
+}
+
+@external(erlang, "gleam_stdlib", "identity")
+fn joined_step(joined_keys: BitArray) -> types.ShapeStep
+
+@external(erlang, "arc_rt_obj_ffi", "shape_step")
+pub fn shape_step(key: PropertyKey) -> types.ShapeStep
+
 // the shape one appended key away, made on first use; also called by name
 // from arc_rt_obj_ic_ffi
 pub fn shape_after(
@@ -1162,17 +1171,13 @@ pub fn shape_after(
   shape_id: Int,
   pk: PropertyKey,
 ) -> Option(#(Int, types.ShapeOffsets, Agent)) {
-  let key_bin = bit_array.from_string(key.to_text(pk))
+  let step = shape_step(pk)
   let store = st.store
   use ShapeDesc(slot_count:, offsets:, transitions:) as from <- option.map(
     dict.get(store.shapes, shape_id) |> option.from_result,
   )
   let known =
-    dict.get(transitions, key_bin)
-    |> result.try(fn(to) {
-      dict.get(store.shapes, to)
-      |> result.map(fn(desc) { #(to, desc.offsets, st) })
-    })
+    dict.get(transitions, step) |> result.map(fn(to) { #(to.0, to.1, st) })
   use <- result.lazy_unwrap(known)
   let to = store.next_shape
   let offsets = dict.insert(offsets, key.id(pk), #(pk, slot_count))
@@ -1180,7 +1185,10 @@ pub fn shape_after(
     store.shapes
     |> dict.insert(
       shape_id,
-      ShapeDesc(..from, transitions: dict.insert(transitions, key_bin, to)),
+      ShapeDesc(
+        ..from,
+        transitions: dict.insert(transitions, step, #(to, offsets)),
+      ),
     )
     |> dict.insert(
       to,
@@ -3547,7 +3555,7 @@ pub fn new_arguments(
     }
     SObject(
       kind: ArgumentsObj(length: len, mapped: mapped_boxes),
-      proto: Some(realm.object.prototype),
+      proto: realm.shared.object_proto,
       props: prop_map.from_list([
         #(names.length, length_prop),
         #(names.callee, callee_prop),
@@ -3569,7 +3577,7 @@ pub fn new_array(st: Agent, elems: List(JsVal)) -> #(JsVal, Agent) {
       st,
       SObject(
         kind: ArrayObj(length: len),
-        proto: Some(st.realm.array.prototype),
+        proto: st.realm.shared.array_proto,
         props: prop_map.new(),
         symbol_props: [],
         elements: Dense(elements),

@@ -4,7 +4,7 @@
 -compile({no_auto_import, [length/1]}).
 -export([char_at/2, length/1,
          char_at_offset/2, replacement_codepoint/0]).
--export([index_of/3, last_index_of/3, contains/2,
+-export([find/3, index_of/3, last_index_of/3, contains/2,
          has_byte/2, last_index_of_all/2]).
 -export([slice/3, drop_start/2, explode/1]).
 -export([split/3, repeat/2, replace_literal/4]).
@@ -13,6 +13,7 @@
 
 %% match window bytes per backward step
 -define(LAST_INDEX_CHUNK, 65536).
+-define(SHORT_SEARCH, 64).
 
 char_at(Bin, Idx) ->
     case string_codepoint_at(Bin, Idx) of
@@ -66,15 +67,35 @@ has_byte(<<_, R/binary>>, C) -> has_byte(R, C);
 has_byte(<<>>, _) -> false.
 
 contains(_Hay, <<>>) -> true;
-contains(Hay, Needle) -> binary:match(Hay, Needle) =/= nomatch.
+contains(Hay, Needle) -> find(Hay, Needle, 0) =/= nomatch.
+
+%% byte offset of a non-empty Needle at or after byte From. binary:match/3
+%% compiles its pattern every time, which a short search does not make up for
+find(Hay, <<First, Rest/binary>>, From) when byte_size(Hay) - From =< ?SHORT_SEARCH ->
+    <<_:From/binary, Tail/binary>> = Hay,
+    scan(Tail, First, Rest, byte_size(Rest), From);
+find(Hay, Needle, From) ->
+    case binary:match(Hay, Needle, [{scope, {From, byte_size(Hay) - From}}]) of
+        {At, _} -> At;
+        nomatch -> nomatch
+    end.
+
+scan(<<First, _/binary>>, First, _, 0, At) -> At;
+scan(<<First, Tail/binary>>, First, Rest, Size, At) ->
+    case Tail of
+        <<Rest:Size/binary, _/binary>> -> At;
+        _ -> scan(Tail, First, Rest, Size, At + 1)
+    end;
+scan(<<_, Tail/binary>>, First, Rest, Size, At) -> scan(Tail, First, Rest, Size, At + 1);
+scan(<<>>, _, _, _, _) -> nomatch.
 
 index_of(Hay, <<>>, From) ->
     {some, clamp_cp(Hay, From)};
 index_of(Hay, Needle, From) ->
     Start = cp_off(Hay, max(From, 0)),
-    case binary:match(Hay, Needle, [{scope, {Start, byte_size(Hay) - Start}}]) of
+    case find(Hay, Needle, Start) of
         nomatch -> none;
-        {BytePos, _} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
+        BytePos -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
     end.
 
 last_index_of_all(Hay, <<>>) ->
@@ -90,12 +111,23 @@ last_index_of(Hay, Needle, From) ->
 
 %% end is a byte offset
 last_index_before(_Hay, Needle, End) when End < byte_size(Needle) -> none;
+last_index_before(Hay, Needle, End) when End =< ?SHORT_SEARCH ->
+    case last_find(binary:part(Hay, 0, End), Needle, 0, none) of
+        none -> none;
+        BytePos -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
+    end;
 last_index_before(Hay, Needle, End) ->
     HighestStart = End - byte_size(Needle),
     Chunk = max(?LAST_INDEX_CHUNK, 2 * byte_size(Needle)),
     case scan_back(Hay, Needle, max(0, HighestStart - Chunk + 1), HighestStart, Chunk) of
         none -> none;
         {some, BytePos} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
+    end.
+
+last_find(Hay, Needle, From, Last) ->
+    case find(Hay, Needle, From) of
+        nomatch -> Last;
+        At -> last_find(Hay, Needle, At + 1, At)
     end.
 
 scan_back(Hay, Needle, Lo, Hi, Chunk) ->
@@ -133,17 +165,32 @@ cp_explode(<<>>, Acc) -> lists:reverse(Acc);
 cp_explode(<<C/utf8, Rest/binary>>, Acc) -> cp_explode(Rest, [<<C/utf8>> | Acc]).
 
 split(Hay, Sep, Lim) ->
-    Parts = binary:split(Hay, Sep, [global]),
+    Parts = case byte_size(Hay) =< ?SHORT_SEARCH of
+        true -> parts(Hay, Sep, 0);
+        false -> binary:split(Hay, Sep, [global])
+    end,
     case erlang:length(Parts) > Lim of
         true -> lists:sublist(Parts, Lim);
         false -> Parts
+    end.
+
+parts(Hay, Sep, From) ->
+    case find(Hay, Sep, From) of
+        nomatch -> [binary:part(Hay, From, byte_size(Hay) - From)];
+        At -> [binary:part(Hay, From, At - From) | parts(Hay, Sep, At + byte_size(Sep))]
     end.
 
 %% search is non-empty
 replace_literal(Hay, Search, Repl, true) ->
     binary:replace(Hay, Search, Repl, [global]);
 replace_literal(Hay, Search, Repl, false) ->
-    binary:replace(Hay, Search, Repl, []).
+    case find(Hay, Search, 0) of
+        nomatch -> Hay;
+        At ->
+            Past = At + byte_size(Search),
+            <<_:Past/binary, Rest/binary>> = Hay,
+            <<Hay:At/binary, Repl/binary, Rest/binary>>
+    end.
 
 repeat(Bin, N) when N > 1024, byte_size(Bin) < 1024 ->
     Block = binary:copy(Bin, 1024),
@@ -172,10 +219,27 @@ cp_off(<<C, _, _, _, R/binary>>, N, Off) when N >= 1, C >= 16#F0 ->
 cp_off(<<>>, _N, Off) -> Off;
 cp_off(_Bin, 0, Off) -> Off.
 
-ascii_upper(Bin) ->
-    ascii_map(Bin, 16#1F1F1F1F1F1F1F, 16#05050505050505, <<>>).
-ascii_lower(Bin) ->
-    ascii_map(Bin, 16#3F3F3F3F3F3F3F, 16#25252525252525, <<>>).
+ascii_upper(Bin) -> ascii_map(Bin, 16#1F1F1F1F1F1F1F, 16#05050505050505).
+ascii_lower(Bin) -> ascii_map(Bin, 16#3F3F3F3F3F3F3F, 16#25252525252525).
+
+-define(IS_ASCII(W), (W) band 16#80808080808080 =:= 0).
+-define(RECASED(W), ((W) bxor (((((W) + Lo) band (bnot ((W) + Hi))) band 16#80808080808080) bsr 2))).
+
+%% a word or two is made at once, with no binary to grow
+ascii_map(Bin, Lo, Hi) when byte_size(Bin) =< 7 ->
+    Bits = bit_size(Bin),
+    case Bin of
+        <<W:Bits>> when ?IS_ASCII(W) -> {some, <<?RECASED(W):Bits>>};
+        _ -> none
+    end;
+ascii_map(Bin, Lo, Hi) when byte_size(Bin) =< 14 ->
+    Bits = bit_size(Bin) - 56,
+    case Bin of
+        <<W1:56, W2:Bits>> when ?IS_ASCII(W1 bor W2) ->
+            {some, <<?RECASED(W1):56, ?RECASED(W2):Bits>>};
+        _ -> none
+    end;
+ascii_map(Bin, Lo, Hi) -> ascii_map(Bin, Lo, Hi, <<>>).
 
 ascii_map(<<W:56, Rest/binary>>, Lo, Hi, Acc) when W band 16#80808080808080 =:= 0 ->
     M = ((W + Lo) band (bnot (W + Hi))) band 16#80808080808080,

@@ -15,14 +15,11 @@ import arc/rt/intl_data.{
   type BoundGetterService, type ConstructibleService, type IntlData,
   type IntlService,
 }
-import arc/rt/limits
 import arc/rt/prop_map.{type PropMap}
 import arc/rt/temporal_data.{type TemporalData}
 import arc/rt/wire
 import arc/time_zone
 import gleam/dict.{type Dict}
-import gleam/float
-import gleam/int
 import gleam/option.{type Option, Some}
 import gleam/set.{type Set}
 
@@ -253,13 +250,16 @@ pub type BufferStorage {
   // a big buffer becomes a tree of pieces once an element is written, so a
   // write copies one piece and not the whole buffer
   Chunked(
-    pieces: TreeArray(BitArray),
+    pieces: TreeArray(BufferBlock),
     byte_length: Int,
     max_byte_length: Option(Int),
   )
   Immutable(bytes: BitArray)
   Shared(block: SharedBlock, max_byte_length: Option(Int))
 }
+
+// see arc_rt_buffer_ffi
+pub type BufferBlock
 
 pub type SharedBlock {
   LocalBlock(bytes: BitArray)
@@ -370,67 +370,14 @@ pub type FnBirth {
   BirthSettled
 }
 
-pub type MapKey {
-  MapKeyString(String)
-  MapKeyNumber(Float)
-  MapKeyNan
-  MapKeyInfinity
-  MapKeyNegInfinity
-  MapKeyBool(Bool)
-  MapKeyNull
-  MapKeyUndefined
-  MapKeyObject(Handle)
-  MapKeySymbol(SymbolId)
-  MapKeyBigInt(Int)
-}
+// one term for all the values samevaluezero calls the same
+pub type MapKey
 
-pub fn js_to_map_key(v: JsVal) -> MapKey {
-  case classify(v) {
-    KStr(s) -> MapKeyString(s)
-    KNum(JNan) -> MapKeyNan
-    KNum(JPosInf) -> MapKeyInfinity
-    KNum(JNegInf) -> MapKeyNegInfinity
-    // +. 0.0 turns -0.0 into +0.0
-    KNum(JFloat(f)) -> MapKeyNumber(f +. 0.0)
-    KNum(JInt(n)) -> MapKeyNumber(int.to_float(n) +. 0.0)
-    KBool(b) -> MapKeyBool(b)
-    KNull -> MapKeyNull
-    KUndef -> MapKeyUndefined
-    KHandle(h) -> MapKeyObject(h)
-    KSym(id) -> MapKeySymbol(id)
-    KBig(n) -> MapKeyBigInt(n)
-    KTdz -> panic as "js_to_map_key on the TDZ sentinel"
-  }
-}
+@external(erlang, "arc_rt_val_ffi", "map_key")
+pub fn js_to_map_key(v: JsVal) -> MapKey
 
-// called by name from arc_rt_lang_ffi
-pub fn map_key_to_js(key: MapKey) -> JsVal {
-  case key {
-    MapKeyString(s) -> mk_string(s)
-    MapKeyNumber(f) -> mk_number(integral_key_number(f))
-    MapKeyNan -> mk_number(JNan)
-    MapKeyInfinity -> mk_number(JPosInf)
-    MapKeyNegInfinity -> mk_number(JNegInf)
-    MapKeyBool(b) -> mk_bool(b)
-    MapKeyNull -> mk_null()
-    MapKeyUndefined -> mk_undefined()
-    MapKeyObject(h) -> mk_object(h)
-    MapKeySymbol(id) -> mk_symbol(id)
-    MapKeyBigInt(n) -> mk_bigint(n)
-  }
-}
-
-fn integral_key_number(f: Float) -> JsNum {
-  let n = float.truncate(f)
-  let exact =
-    int.to_float(n) == f
-    && n <= limits.max_safe_integer
-    && n >= -limits.max_safe_integer
-  case exact {
-    True -> JInt(n)
-    False -> JFloat(f)
-  }
-}
+@external(erlang, "arc_rt_val_ffi", "map_key_value")
+pub fn map_key_to_js(key: MapKey) -> JsVal
 
 pub type ArrayIterKind {
   ArrayIterKeys
@@ -1841,9 +1788,15 @@ pub type ShapeDesc {
   ShapeDesc(
     slot_count: Int,
     offsets: ShapeOffsets,
-    transitions: Dict(BitArray, Int),
+    transitions: Dict(ShapeStep, #(Int, ShapeOffsets)),
   )
 }
+
+// what a shape files a transition under
+pub type ShapeStep
+
+// what of a prototype chain gets in the way of a plain named write
+pub type WriteMemo
 
 // droppable cache, not a gc root; see arc_rt_call_ic_ffi
 pub type IcEntry {
@@ -1978,6 +1931,13 @@ pub fn job_queue_pop(queue: JobQueue) -> Option(#(Job, JobQueue))
 @external(erlang, "arc_rt_job_queue_ffi", "job_queue_to_list")
 pub fn job_queue_to_list(queue: JobQueue) -> List(Job)
 
+// every job queued since job_queue_aged, in no order and maybe with older ones
+@external(erlang, "arc_rt_job_queue_ffi", "job_queue_fresh")
+pub fn job_queue_fresh(queue: JobQueue) -> List(Job)
+
+@external(erlang, "arc_rt_job_queue_ffi", "job_queue_aged")
+pub fn job_queue_aged(queue: JobQueue) -> JobQueue
+
 pub type BuiltinPair {
   BuiltinPair(prototype: Handle, constructor: Handle)
 }
@@ -2061,14 +2021,16 @@ pub type Realm {
     id: Int,
     lexical_globals: PropMap(LexicalGlobal),
     suppressed_error: BuiltinPair,
-    fn_shared: FnShared,
+    shared: RealmShared,
   )
 }
 
-// built once per realm, every new plain function points at these
-pub type FnShared {
-  FnShared(
-    proto: Option(Handle),
+// built once per realm, so that the cells made most often all point at these
+pub type RealmShared {
+  RealmShared(
+    object_proto: Option(Handle),
+    array_proto: Option(Handle),
+    function_proto: Option(Handle),
     async_proto: Option(Handle),
     constructor_birth: FnBirth,
   )
@@ -2132,8 +2094,10 @@ pub fn unset_realm() -> Realm {
     id: -1,
     lexical_globals: prop_map.new(),
     suppressed_error: p,
-    fn_shared: FnShared(
-      proto: option.None,
+    shared: RealmShared(
+      object_proto: option.None,
+      array_proto: option.None,
+      function_proto: option.None,
       async_proto: option.None,
       constructor_birth: BirthPending(option.None),
     ),
@@ -2165,18 +2129,16 @@ pub type JsOps {
 }
 
 // field order is abi (arc_rt_layout.hrl); hot fields only, rest in meta
+// what a heap write leaves alone, kept out of the record it copies
 pub type Store {
   Store(
-    cells: Arena(Cell),
-    next_id: Int,
-    alloc_since_gc: Int,
+    // how many cells may be made between collections
     gc_threshold: Int,
-    prop_seq: Int,
     shapes: Dict(Int, ShapeDesc),
     next_shape: Int,
     ics: Dict(Int, IcEntry),
-    // proto id to whether its chain takes plain named writes
-    plain_write_protos: Dict(Int, Nil),
+    // by proto id, for the chains nothing exotic is on
+    plain_write_protos: Dict(Int, WriteMemo),
     // bumped on any write to a global object cell, for global read caches
     global_epoch: Int,
     ops: JsOps,
@@ -2186,21 +2148,22 @@ pub type Store {
   )
 }
 
-// rarely written, kept out of the record every heap write copies
+// written even less often
 pub type StoreMeta {
   StoreMeta(
+    // in cells, a long array or a large map or set counting as many
     live_count: Int,
     next_private_id: Int,
     next_symbol_id: Int,
     next_unit_id: Int,
+    // may also hold some that were handled since
     unhandled_rejections: List(Int),
     // cells as of the last gc, ids below young_start are the old generation
     old_gen: Arena(Cell),
     young_start: Int,
-    // old cells holding weak refs, pruned each minor gc
-    old_weak_ids: List(Int),
     // live_count right after the last major gc
     major_live: Int,
+    // one put off for longer counts for more
     minors_since_major: Int,
     // proto id to whether its chain takes plain index writes
     plain_index_protos: Dict(Int, Nil),
@@ -2208,16 +2171,42 @@ pub type StoreMeta {
     async_context_mapping: JsVal,
     // functions compiled on first call, by unit and where their text starts
     lazy_code: Dict(#(Int, Int), FuncTemplate),
+    // threaded forms by template id. A full gc moves them to `threaded_before`
+    // and the next drops those that nothing asked for in between
+    threaded: Dict(Int, FuncTemplate),
+    threaded_before: Dict(Int, FuncTemplate),
+    // the names threaded code shares, and how often each first draft has run;
+    // a full gc drops both
+    thread_keys: Dict(Int, PropertyKey),
+    draft_runs: Dict(Int, Int),
+    next_template_id: Int,
     // the text of each unit that left functions for their first calls
     unit_texts: Dict(Int, UnitText),
     kept: Kept,
+    template_objects: Dict(String, Handle),
+    host_fns: Dict(Int, HostFnEntry),
+    // stale for the current realm, read the agent's `realm` instead
+    realms: Dict(Int, Realm),
+    import_hook: Option(HostFnEntry),
+    waiters: List(AsyncWaiter),
+    // zones loaded through hooks.load_time_zone, by proper id
+    tz_zones: Dict(String, time_zone.Zone),
+    // the long string a regexp last ran on, known to be well formed
+    checked_subject: String,
   )
 }
 
 /// cells an embedder asked to keep for good: ids below `below`, as `cells`
 /// held them then; a full gc leaves them alone. `below` 0 is nothing kept
 pub type Kept {
-  Kept(below: Int, cells: Arena(Cell), weak_ids: List(Int), count: Int)
+  Kept(
+    below: Int,
+    cells: Arena(Cell),
+    weak_ids: List(Int),
+    count: Int,
+    // how many roots were pinned then
+    pins: Int,
+  )
 }
 
 /// what a function left for its first call is compiled from
@@ -2225,23 +2214,24 @@ pub type UnitText {
   UnitText(bytes: BitArray, is_module: Bool)
 }
 
-// field order is abi (arc_rt_layout.hrl), append only
+// every heap write copies this, so it holds little; field order is abi
+// (arc_rt_layout.hrl)
 pub type Agent {
   Agent(
-    store: Store,
-    realm: Realm,
-    template_objects: Dict(String, Handle),
-    frames: List(FrameInfo),
-    hooks: HostHooks,
-    host_fns: Dict(Int, HostFnEntry),
-    // stale for the current realm, read `realm` instead
-    realms: Dict(Int, Realm),
-    import_hook: Option(HostFnEntry),
-    waiters: List(AsyncWaiter),
+    cells: Arena(Cell),
+    next_id: Int,
+    // a collection is due once next_id gets here
+    gc_at: Int,
+    prop_seq: Int,
     // gc only collects when this is 0
     call_depth: Int,
-    // zones loaded through hooks.load_time_zone, by proper id
-    tz_zones: Dict(String, time_zone.Zone),
+    frames: List(FrameInfo),
+    realm: Realm,
+    store: Store,
+    hooks: HostHooks,
+    // what the running realm's global names were last read as, by key id;
+    // emptied by whatever could change an answer
+    globals: Dict(Int, #(String, JsVal)),
   )
 }
 
@@ -2256,7 +2246,11 @@ pub type AsyncWaiter {
 
 pub type FrameInfo {
   FrameInfo(name: String, script: String, line: Int)
+  // the interpreter's `behind` innermost frames, which nothing has looked at yet
+  Unlisted(innermost: RunningFrame, line: Int, behind: Int)
 }
+
+pub type RunningFrame
 
 pub type HostTerm
 

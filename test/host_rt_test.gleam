@@ -52,7 +52,7 @@ pub fn define_fn_installs_a_callable_global_test() {
   let #(f, st) = global(st, "twice")
   let assert SObject(kind: NativeFn(token: types.HostFn(0), ..), ..) =
     rt_store.cell_get(st, handle(f))
-  assert dict.size(st.host_fns) == 1
+  assert dict.size(st.store.meta.host_fns) == 1
   let #(c, st) = rt_call.try_call(st, f, mk_undefined(), [mk_int(21)])
   assert c == NormalCompletion(mk_int(42))
   assert str(get(st, f, "name").0) == "twice"

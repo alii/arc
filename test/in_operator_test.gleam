@@ -1,8 +1,8 @@
 import arc/engine.{Returned}
-import arc/interp/kernel
 import arc/rt/obj as rt_obj
 import arc/rt/types.{mk_int, mk_string}
 import arc/rt/val.{is_miss}
+import erlang_kernels
 import rt_helpers
 
 fn run(source: String) -> String {
@@ -77,9 +77,9 @@ pub fn in_still_throws_where_it_must_test() {
 pub fn kernel_answers_plain_chains_and_misses_the_rest_test() {
   let st = rt_helpers.agent()
   let #(obj, st) = rt_obj.new_object_literal(st)
-  assert !is_miss(kernel.has_property(st, mk_string("toString"), obj))
-  assert !is_miss(kernel.has_property(st, mk_string("absent"), obj))
-  assert is_miss(kernel.has_property(st, mk_int(0), obj))
-  assert is_miss(kernel.has_property(st, obj, obj))
-  assert is_miss(kernel.has_property(st, mk_string("a"), mk_int(1)))
+  assert !is_miss(erlang_kernels.has_property(st, mk_string("toString"), obj))
+  assert !is_miss(erlang_kernels.has_property(st, mk_string("absent"), obj))
+  assert is_miss(erlang_kernels.has_property(st, mk_int(0), obj))
+  assert is_miss(erlang_kernels.has_property(st, obj, obj))
+  assert is_miss(erlang_kernels.has_property(st, mk_string("a"), mk_int(1)))
 }

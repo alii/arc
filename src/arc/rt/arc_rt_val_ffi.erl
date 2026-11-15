@@ -9,7 +9,7 @@
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
     to_boolean_i32/1, to_boolean/1, logical_not/1, is_nullish/1,
     strict_eq/2, same_value_zero/2,
-    property_key_of/1,
+    property_key_of/1, map_key/1, map_key_value/1,
     js_format_float/1,
     to_string/2, to_number/2, to_integer_or_infinity/2, to_length/2,
     string_to_number/1,
@@ -43,7 +43,7 @@ type_of(_, B) when is_boolean(B) -> <<"boolean">>;
 type_of(_, N) when is_number(N) -> <<"number">>;
 type_of(_, B) when is_binary(B) -> <<"string">>;
 type_of(St, {?HANDLE_TAG, Id} = V) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+    case arc_rt_arena_ffi:get(Id, element(?AGENT_CELLS, St)) of
         {?SSHAPEDOBJECT_TAG, _, _, _, _} -> <<"object">>;
         {?SOBJECT_TAG, Kind, _, _, _, _, _} when is_atom(Kind) -> <<"object">>;
         {?SOBJECT_TAG, Kind, _, _, _, _, _} ->
@@ -147,6 +147,19 @@ mk_undefined() -> undefined.
 mk_null() -> null.
 
 mk_bool(B) -> B.
+
+%% most values are their own key. a whole float goes as the integer, which also
+%% makes -0 into 0, and a string as no more than its text
+map_key(F) when is_float(F), F >= -?MAX_SAFE_INT, F =< ?MAX_SAFE_INT ->
+    case trunc(F) of
+        N when N == F -> N;
+        _ -> F
+    end;
+map_key({?STR_TAG, Text, _, _}) -> {?STR_TAG, Text};
+map_key(V) -> V.
+
+map_key_value({?STR_TAG, Text}) -> arc_rt_js_string_ffi:from_text(Text);
+map_key_value(V) -> V.
 
 mk_number({j_int, N}) -> mk_int(N);
 mk_number({j_float, F}) -> F;

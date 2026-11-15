@@ -1,6 +1,4 @@
-import arc/bytecode/binop.{
-  type ClassifiedBinOp, AddOp, InOp, InstanceOfOp, PureOp,
-}
+import arc/bytecode/binop
 import arc/bytecode/opcode
 import arc/parser/ast
 import arc/rt/types.{
@@ -75,37 +73,37 @@ pub fn fold_unary(op: ast.UnaryOp, arg: ast.Expression) -> Option(JsVal) {
   }
 }
 
-pub fn translate_binop(op: ast.BinaryOp) -> ClassifiedBinOp {
+pub fn translate_binop(op: ast.BinaryOp) -> binop.BinOp {
   case op {
-    ast.Add -> AddOp
-    ast.Subtract -> PureOp(binop.Arith(binop.Sub))
-    ast.Multiply -> PureOp(binop.Arith(binop.Mul))
-    ast.Divide -> PureOp(binop.Arith(binop.Div))
-    ast.Modulo -> PureOp(binop.Arith(binop.Mod))
-    ast.Exponentiation -> PureOp(binop.Arith(binop.Exp))
-    ast.StrictEqual -> PureOp(binop.Equality(binop.StrictEq))
-    ast.StrictNotEqual -> PureOp(binop.Equality(binop.StrictNotEq))
-    ast.Equal -> PureOp(binop.Equality(binop.LooseEq))
-    ast.NotEqual -> PureOp(binop.Equality(binop.LooseNotEq))
-    ast.LessThan -> PureOp(binop.Compare(binop.Less))
-    ast.GreaterThan -> PureOp(binop.Compare(binop.Greater))
-    ast.LessThanEqual -> PureOp(binop.Compare(binop.LessEq))
-    ast.GreaterThanEqual -> PureOp(binop.Compare(binop.GreaterEq))
-    ast.LeftShift -> PureOp(binop.Bitwise(binop.ShiftLeft))
-    ast.RightShift -> PureOp(binop.Bitwise(binop.ShiftRight))
-    ast.UnsignedRightShift -> PureOp(binop.Bitwise(binop.ShiftRightUnsigned))
-    ast.BitwiseAnd -> PureOp(binop.Bitwise(binop.BitAnd))
-    ast.BitwiseOr -> PureOp(binop.Bitwise(binop.BitOr))
-    ast.BitwiseXor -> PureOp(binop.Bitwise(binop.BitXor))
-    ast.In -> InOp
-    ast.InstanceOf -> InstanceOfOp
+    ast.Add -> binop.Add
+    ast.Subtract -> binop.Sub
+    ast.Multiply -> binop.Mul
+    ast.Divide -> binop.Div
+    ast.Modulo -> binop.Mod
+    ast.Exponentiation -> binop.Exp
+    ast.StrictEqual -> binop.StrictEq
+    ast.StrictNotEqual -> binop.StrictNotEq
+    ast.Equal -> binop.LooseEq
+    ast.NotEqual -> binop.LooseNotEq
+    ast.LessThan -> binop.Less
+    ast.GreaterThan -> binop.Greater
+    ast.LessThanEqual -> binop.LessEq
+    ast.GreaterThanEqual -> binop.GreaterEq
+    ast.LeftShift -> binop.ShiftLeft
+    ast.RightShift -> binop.ShiftRight
+    ast.UnsignedRightShift -> binop.ShiftRightUnsigned
+    ast.BitwiseAnd -> binop.BitAnd
+    ast.BitwiseOr -> binop.BitOr
+    ast.BitwiseXor -> binop.BitXor
+    ast.In -> binop.In
+    ast.InstanceOf -> binop.InstanceOf
   }
 }
 
-pub fn update_binop(op: ast.UpdateOp) -> ClassifiedBinOp {
+pub fn update_binop(op: ast.UpdateOp) -> binop.BinOp {
   case op {
-    ast.Increment -> AddOp
-    ast.Decrement -> PureOp(binop.Arith(binop.Sub))
+    ast.Increment -> binop.Add
+    ast.Decrement -> binop.Sub
   }
 }
 
@@ -121,21 +119,20 @@ pub fn translate_unaryop(op: ast.UnaryOp) -> Option(opcode.UnaryOpKind) {
   }
 }
 
-pub fn compound_to_binop(op: ast.AssignmentOp) -> Option(ClassifiedBinOp) {
+pub fn compound_to_binop(op: ast.AssignmentOp) -> Option(binop.BinOp) {
   case op {
-    ast.AddAssign -> Some(AddOp)
-    ast.SubtractAssign -> Some(PureOp(binop.Arith(binop.Sub)))
-    ast.MultiplyAssign -> Some(PureOp(binop.Arith(binop.Mul)))
-    ast.DivideAssign -> Some(PureOp(binop.Arith(binop.Div)))
-    ast.ModuloAssign -> Some(PureOp(binop.Arith(binop.Mod)))
-    ast.ExponentiationAssign -> Some(PureOp(binop.Arith(binop.Exp)))
-    ast.LeftShiftAssign -> Some(PureOp(binop.Bitwise(binop.ShiftLeft)))
-    ast.RightShiftAssign -> Some(PureOp(binop.Bitwise(binop.ShiftRight)))
-    ast.UnsignedRightShiftAssign ->
-      Some(PureOp(binop.Bitwise(binop.ShiftRightUnsigned)))
-    ast.BitwiseAndAssign -> Some(PureOp(binop.Bitwise(binop.BitAnd)))
-    ast.BitwiseOrAssign -> Some(PureOp(binop.Bitwise(binop.BitOr)))
-    ast.BitwiseXorAssign -> Some(PureOp(binop.Bitwise(binop.BitXor)))
+    ast.AddAssign -> Some(binop.Add)
+    ast.SubtractAssign -> Some(binop.Sub)
+    ast.MultiplyAssign -> Some(binop.Mul)
+    ast.DivideAssign -> Some(binop.Div)
+    ast.ModuloAssign -> Some(binop.Mod)
+    ast.ExponentiationAssign -> Some(binop.Exp)
+    ast.LeftShiftAssign -> Some(binop.ShiftLeft)
+    ast.RightShiftAssign -> Some(binop.ShiftRight)
+    ast.UnsignedRightShiftAssign -> Some(binop.ShiftRightUnsigned)
+    ast.BitwiseAndAssign -> Some(binop.BitAnd)
+    ast.BitwiseOrAssign -> Some(binop.BitOr)
+    ast.BitwiseXorAssign -> Some(binop.BitXor)
     ast.Assign -> None
     ast.LogicalAndAssign | ast.LogicalOrAssign | ast.NullishCoalesceAssign ->
       None

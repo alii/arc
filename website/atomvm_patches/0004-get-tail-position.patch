@@ -1,0 +1,15 @@
+diff --git a/src/libAtomVM/opcodesswitch.h b/src/libAtomVM/opcodesswitch.h
+index bb67ba6..8441b7c 100644
+--- a/src/libAtomVM/opcodesswitch.h
++++ b/src/libAtomVM/opcodesswitch.h
+@@ -7764,8 +7764,9 @@ wait_timeout_trap_handler:
+                             DECODE_DEST_REGISTER(dreg, pc);
+                             j++;
+                             #ifdef IMPL_EXECUTE_LOOP
++                                // arc/playground patch: the position stays where it is, as
++                                // the compiler may go on matching from the same context
+                                 WRITE_REGISTER(dreg, t);
+-                                bs_offset = total_bytes * 8;
+                             #endif
+                             break;
+                         }

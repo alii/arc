@@ -407,11 +407,9 @@ fn buffer_slice(
           case first < current_len {
             False -> #(new_val, st)
             True -> {
-              let bits = require_live_bits(st, buf, "slice")
-              let new_bits = require_live_bits(st, new_buf, "slice")
               let count = int.min(new_len, current_len - first)
-              let copied = copy_into(bits, first, count, new_bits)
-              #(new_val, buffer.store_region(st, new_buf.h, copied, 0, count))
+              let part = buffer.read_region_clamped(st, buf.h, first, count)
+              #(new_val, buffer.write_region(st, new_buf.h, 0, part))
             }
           }
         }
@@ -664,13 +662,6 @@ fn require_live(st: Agent, buf: LiveBuffer, method: String) -> BufferStorage {
   }
 }
 
-fn require_live_bits(st: Agent, buf: LiveBuffer, method: String) -> BitArray {
-  case buffer.storage_bits(buf.storage) {
-    Some(bits) -> bits
-    None -> detached_error(st, method)
-  }
-}
-
 fn require_unshared_bytes(
   st: Agent,
   buf: LiveBuffer,
@@ -754,18 +745,6 @@ fn resize_data(data: BitArray, new_len: Int) -> BitArray {
     }
     False -> bit_array.append(data, zero_block(new_len - old_len))
   }
-}
-
-fn copy_into(
-  source: BitArray,
-  offset: Int,
-  count: Int,
-  target: BitArray,
-) -> BitArray {
-  let target_len = bit_array.byte_size(target)
-  let assert Ok(part) = bit_array.slice(source, offset, count)
-  let assert Ok(rest) = bit_array.slice(target, count, target_len - count)
-  bit_array.append(part, rest)
 }
 
 // §7.3.22 speciesconstructor

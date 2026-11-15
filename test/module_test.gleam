@@ -135,7 +135,7 @@ fn settled(st: Agent, promise: JsVal) -> Result(JsVal, JsVal) {
 pub fn import_without_a_hook_rejects_with_type_error_test() {
   let #(p, st) =
     dynamic_import.import_call(agent(), mk_string("./x.js"), mk_undefined())
-  let st = rt_async.drain(st)
+  let st = rt_helpers.end_turn(st, [p])
   let assert Error(e) = settled(st, p)
   assert string.starts_with(rt_inspect.format_error(st, e), "TypeError")
 }
@@ -149,7 +149,7 @@ pub fn import_with_bad_options_rejects_synchronously_test() {
 
 pub fn import_source_rejects_with_syntax_error_test() {
   let #(p, st) = dynamic_import.source_import_call(agent(), mk_string("./x.js"))
-  let st = rt_async.drain(st)
+  let st = rt_helpers.end_turn(st, [p])
   let assert Error(e) = settled(st, p)
   assert string.starts_with(rt_inspect.format_error(st, e), "SyntaxError")
 }
@@ -170,7 +170,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
   let st = import_hook.install(agent(), "/main.js", resolve, load)
   let #(p, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
-  let st = rt_async.drain(st)
+  let st = rt_helpers.end_turn(st, [p])
   let assert Ok(ns) = settled(st, p)
   let assert Some(registered) = registry.read_namespace(st, "/lib.js")
   assert classify(ns) == types.KHandle(registered)
@@ -185,7 +185,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
     })
   let #(p2, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
-  let st = rt_async.drain(st)
+  let st = rt_helpers.end_turn(st, [p2])
   let assert Ok(ns2) = settled(st, p2)
   assert ns2 == ns
 }
@@ -195,7 +195,7 @@ pub fn import_of_an_unresolvable_specifier_rejects_test() {
   let st = import_hook.install(agent(), "/main.js", resolve, load)
   let #(p, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
-  let st = rt_async.drain(st)
+  let st = rt_helpers.end_turn(st, [p])
   let assert Error(e) = settled(st, p)
   let msg = rt_inspect.format_error(st, e)
   assert string.starts_with(msg, "TypeError")

@@ -78,14 +78,13 @@ fn sync_fallback_template() -> FuncTemplate {
     length: 0,
     local_count: 2,
     bytecode: tuple_array.from_list([
+      GetLocal(2),
       GetLocal(1),
-      GetLocal(0),
       CallMethod(0),
       Pop,
-      PushConst(0),
+      PushConst(mk_undefined()),
       Return,
     ]),
-    constants: tuple_array.from_list([mk_undefined()]),
     lines: tuple_array.from_list([0, 0, 0, 0, 0, 0]),
     functions: tuple_array.from_list([]),
     env_descriptors: [0, 1],
@@ -101,5 +100,8 @@ fn sync_fallback_template() -> FuncTemplate {
     code_kind: lexical.FunctionCode,
     regs: bytecode.NoRegs,
     nested_captures: 0,
+    code: tuple_array.from_list([]),
+    // no id handed out is below 1
+    id: -1,
   )
 }

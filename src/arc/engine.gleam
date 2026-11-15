@@ -10,6 +10,7 @@ import arc/module/loader
 import arc/parser
 import arc/rt/async.{type Drain} as rt_async
 import arc/rt/builtins as rt_builtins
+import arc/rt/bytecode
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
@@ -74,6 +75,10 @@ pub type EvaluatedModule {
 /// BEAM process holds more of those than its `min_bin_vheap_size`, every other
 /// collection it does is a full one. Raise it with `erlang:process_flag` in
 /// the process that runs the engine.
+///
+/// While it runs code, an engine raises its process's `min_heap_size` to
+/// about 370KB, and puts it back after. The builtins are made once for the
+/// whole VM and kept in `persistent_term`, where every engine shares them.
 pub fn new() -> Engine(host) {
   from_agent(rt_builtins.new_agent(host_hooks.default()))
 }
@@ -249,13 +254,15 @@ pub fn eval_with(
   source: String,
   drain: Drain,
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
+  use <- rt_store.with_room
   use template <- result.map(
     compile_task.run(string.byte_size(source), fn() {
       use #(body, scopes) <- result.try(
         parser.parse_script(source) |> result.map_error(ParseError),
       )
       compiler.compile_script(body, scopes) |> result.map_error(CompileError)
-    }),
+    })
+    |> result.map(bytecode.shared),
   )
   let #(completion, st) = entry.run_script(engine.agent, template)
   settle(engine, completion, st, drain)
@@ -269,6 +276,7 @@ pub fn eval_script(
   compile_functions functions: FunctionCompile,
   drain drain: Drain,
 ) -> Result(#(Outcome, Script, Engine(host)), EvalError(host)) {
+  use <- rt_store.with_room
   let fingerprint = hints.fingerprint(source)
   let compile_now = case functions {
     AtLoad -> None
@@ -284,7 +292,8 @@ pub fn eval_script(
         |> result.map_error(ParseError),
       )
       compiler.compile_script(body, scopes) |> result.map_error(CompileError)
-    }),
+    })
+    |> result.map(bytecode.shared),
   )
   let unit_id = rt_store.upcoming_unit_id(engine.agent)
   let #(completion, st) = entry.run_script(engine.agent, template)
@@ -343,6 +352,7 @@ pub fn eval_module_with(
   load: loader.LoadFn,
   drain: Drain,
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
+  use <- rt_store.with_room
   use bundle <- result.try(
     module.compile_bundle_with_hosts(
       specifier,
@@ -393,7 +403,9 @@ pub fn repl_eval(
     parser.parse_script(source) |> result.map_error(ParseError),
   )
   use template <- result.map(
-    compiler.compile_repl(body, scopes) |> result.map_error(CompileError),
+    compiler.compile_repl(body, scopes)
+    |> result.map_error(CompileError)
+    |> result.map(bytecode.shared),
   )
   let engine = repl.engine
   let #(completion, st) = entry.run_script(engine.agent, template)
@@ -417,7 +429,10 @@ pub fn call_with(
   args: List(JsVal),
   drain: Drain,
 ) -> #(Outcome, Engine(host)) {
-  let #(completion, st) = rt_call.try_call(engine.agent, callee, this, args)
+  let #(completion, st) = {
+    use <- rt_store.with_room
+    rt_call.try_call(engine.agent, callee, this, args)
+  }
   settle(engine, completion, st, drain)
 }
 

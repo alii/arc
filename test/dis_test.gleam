@@ -15,7 +15,7 @@ pub fn disassemble_shape_test() {
   assert string.contains(text, "MakeClosure(0)")
   assert string.contains(text, "; add")
   assert string.contains(text, "function [0] add (arity 2,")
-  assert string.contains(text, "BinOpLocalLocal(AddOp, 4, 5)")
+  assert string.contains(text, "BinOpLocalLocal(Add, 1, 2)")
   assert string.contains(text, "; 2")
 }
 
@@ -29,12 +29,12 @@ pub fn disassemble_fused_ops_test() {
     dis_js(
       "function f(o) { if (o === 1) return; while (o != null) o = o.next; this.count = o.size; o.run(1) }",
     )
-  assert string.contains(text, "[regs 4]")
-  assert string.contains(text, "CmpLocalConstJump(-1, 0, Equality(StrictEq)")
-  assert string.contains(text, "GetLocalField(-1, " <> named("next") <> ")")
-  assert string.contains(text, "GetLocalField(-1, " <> named("size") <> ")")
+  assert string.contains(text, "[regs 2]")
+  assert string.contains(text, "CmpLocalConstJump(2, 1, StrictEq")
+  assert string.contains(text, "GetLocalField(2, " <> named("next") <> ")")
+  assert string.contains(text, "GetLocalField(2, " <> named("size") <> ")")
   assert string.contains(text, "PutFieldPop(" <> named("count") <> ")")
-  assert string.contains(text, "GetLocalFieldKeep(-1, " <> named("run") <> ")")
+  assert string.contains(text, "GetLocalFieldKeep(2, " <> named("run") <> ")")
 }
 
 fn named(name: String) -> String {

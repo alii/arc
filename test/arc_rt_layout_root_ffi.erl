@@ -3,22 +3,20 @@
          compiled_fn_parts/1, direct_entry/3, is_plain_fn/1, plain_property/2,
          slot_at/2, slot_set/3, frame/4, is_js_number/1, is_inf/1, is_str/1,
          is_nullish/1, elem_at/2, elem_write_grow/3, native_token/1,
-         named_plain/2, birth_plain/2, shaped_next/3]).
+         named_plain/2, birth_plain/2, shaped_next/3, thread_records/0,
+         gleam_record/1]).
 
 -compile({inline, [birth_plain/2]}).
 
--include("arc/rt/arc_rt_layout.hrl").
+-include("arc/interp/arc_interp_thread.hrl").
 
 idx(<<"AGENT_SIZE">>) -> ?AGENT_SIZE;
 idx(<<"AGENT_STORE">>) -> ?AGENT_STORE;
 idx(<<"AGENT_REALM">>) -> ?AGENT_REALM;
-idx(<<"AGENT_HOST_FNS">>) -> ?AGENT_HOST_FNS;
-idx(<<"AGENT_REALMS">>) -> ?AGENT_REALMS;
-idx(<<"STORE_CELLS">>) -> ?STORE_CELLS;
-idx(<<"STORE_NEXT_ID">>) -> ?STORE_NEXT_ID;
+idx(<<"AGENT_CELLS">>) -> ?AGENT_CELLS;
+idx(<<"AGENT_NEXT_ID">>) -> ?AGENT_NEXT_ID;
 idx(<<"STORE_PINNED_ROOTS">>) -> ?STORE_PINNED_ROOTS;
-idx(<<"STORE_ALLOC_SINCE_GC">>) -> ?STORE_ALLOC_SINCE_GC;
-idx(<<"STORE_PROP_SEQ">>) -> ?STORE_PROP_SEQ;
+idx(<<"AGENT_PROP_SEQ">>) -> ?AGENT_PROP_SEQ;
 idx(<<"STORE_SHAPES">>) -> ?STORE_SHAPES;
 idx(<<"STORE_NEXT_SHAPE">>) -> ?STORE_NEXT_SHAPE;
 idx(<<"STORE_SIZE">>) -> ?STORE_SIZE;
@@ -115,7 +113,28 @@ idx(<<"CELL_PROTO">>) -> ?CELL_PROTO;
 idx(<<"MAX_ARRAY_INDEX">>) -> ?MAX_ARRAY_INDEX;
 idx(<<"MAX_SAFE_INT">>) -> ?MAX_SAFE_INT;
 idx(<<"MAX_DENSE_INDEX">>) -> ?MAX_DENSE_INDEX;
-idx(<<"MAX_GAP">>) -> ?MAX_GAP.
+idx(<<"MAX_GAP">>) -> ?MAX_GAP;
+idx(<<"AGENT_GC_AT">>) -> ?AGENT_GC_AT;
+idx(<<"AGENT_HOOKS">>) -> ?AGENT_HOOKS;
+idx(<<"AGENT_GLOBALS">>) -> ?AGENT_GLOBALS;
+idx(<<"STORE_OPS">>) -> ?STORE_OPS;
+idx(<<"REALM_LEXICAL_GLOBALS">>) -> ?REALM_LEXICAL_GLOBALS;
+idx(<<"REALM_SHARED">>) -> ?REALM_SHARED;
+idx(<<"REALMSHARED_OBJECT_PROTO">>) -> ?REALMSHARED_OBJECT_PROTO;
+idx(<<"REALMSHARED_ARRAY_PROTO">>) -> ?REALMSHARED_ARRAY_PROTO;
+idx(<<"REALMSHARED_FUNCTION_PROTO">>) -> ?REALMSHARED_FUNCTION_PROTO;
+idx(<<"REALMSHARED_ASYNC_PROTO">>) -> ?REALMSHARED_ASYNC_PROTO;
+idx(<<"REALMSHARED_CONSTRUCTOR_BIRTH">>) -> ?REALMSHARED_CONSTRUCTOR_BIRTH;
+idx(<<"PLAIN_EMPTY_SHAPE">>) -> ?PLAIN_EMPTY_SHAPE;
+idx(<<"ITER_RESULT_SHAPE">>) -> ?ITER_RESULT_SHAPE;
+idx(<<"FUNCTEMPLATE_NAME">>) -> ?FUNCTEMPLATE_NAME;
+idx(<<"FUNCTEMPLATE_BYTECODE">>) -> ?FUNCTEMPLATE_BYTECODE;
+idx(<<"FUNCTEMPLATE_FUNCTIONS">>) -> ?FUNCTEMPLATE_FUNCTIONS;
+idx(<<"FUNCTEMPLATE_LEXICAL">>) -> ?FUNCTEMPLATE_LEXICAL;
+idx(<<"FUNCTEMPLATE_SIZE">>) -> ?FUNCTEMPLATE_SIZE;
+idx(<<"ORDERED_ENTRIES">>) -> ?ORDERED_ENTRIES;
+idx(<<"ORDERED_NEXT_SEQ">>) -> ?ORDERED_NEXT_SEQ;
+idx(<<"MAX_CALL_DEPTH">>) -> ?MAX_CALL_DEPTH.
 
 tag(<<"AGENT_TAG">>) -> ?AGENT_TAG;
 tag(<<"SOME">>) -> ?SOME;
@@ -204,6 +223,7 @@ tag(<<"CALLEE_KEY">>) -> ?CALLEE_KEY;
 tag(<<"PROTO_KEY">>) -> ?PROTO_KEY;
 tag(<<"TO_JSON_KEY">>) -> ?TO_JSON_KEY;
 tag(<<"DONE_KEY">>) -> ?DONE_KEY;
+tag(<<"VALUE_KEY">>) -> ?VALUE_KEY;
 tag(<<"ITERATOR_KEY">>) -> ?ITERATOR_KEY;
 tag(<<"NEXT_KEY">>) -> ?NEXT_KEY;
 tag(<<"KEYS_KEY">>) -> ?KEYS_KEY;
@@ -219,7 +239,38 @@ tag(<<"IC_GLOBAL">>) -> ?IC_GLOBAL;
 tag(<<"IC_OFF">>) -> ?IC_OFF;
 tag(<<"ICPLAIN_TAG">>) -> ?ICPLAIN_TAG;
 tag(<<"ICOWN_TAG">>) -> ?ICOWN_TAG;
-tag(<<"ICPRIM_TAG">>) -> ?ICPRIM_TAG.
+tag(<<"ICPRIM_TAG">>) -> ?ICPRIM_TAG;
+tag(<<"FUNCTEMPLATE_TAG">>) -> ?FUNCTEMPLATE_TAG;
+tag(<<"PROMISEOBJ_TAG">>) -> ?PROMISEOBJ_TAG;
+tag(<<"ARRAYBUFFEROBJ_TAG">>) -> ?ARRAYBUFFEROBJ_TAG.
+
+-define(FIELDS(Header, Record), {<<Header>>, {Record, record_info(fields, Record)}}).
+
+%% each record threaded code declares, by the header gleam writes for it
+thread_records() ->
+    [?FIELDS("arc@rt@types_Agent", agent),
+     ?FIELDS("arc@rt@types_Store", store),
+     ?FIELDS("arc@rt@types_StoreMeta", store_meta),
+     ?FIELDS("arc@rt@types_BytecodeFn", bytecode_fn),
+     ?FIELDS("arc@rt@types_FrameInfo", frame_info),
+     ?FIELDS("arc@rt@bytecode_FuncTemplate", func_template),
+     ?FIELDS("arc@rt@bytecode_SuspendedFrame", suspended_frame),
+     ?FIELDS("arc@interp@state_State", state),
+     ?FIELDS("arc@interp@state_Frame", frame),
+     ?FIELDS("arc@interp@state_SavedFrame", saved_frame),
+     ?FIELDS("arc@interp@state_SavedThread", saved_thread),
+     ?FIELDS("arc@interp@state_SavedRegs", saved_regs),
+     ?FIELDS("arc@interp@state_SavedCont", saved_cont),
+     ?FIELDS("arc@interp@state_Resumption", resumption)].
+
+gleam_record(Header) ->
+    Ebin = filename:dirname(code:which(?MODULE)),
+    Path = filename:join([Ebin, "..", "include", binary_to_list(Header) ++ ".hrl"]),
+    {ok, Forms} = epp:parse_file(Path, []),
+    [Record] = [{Name, [Field || {typed_record_field, {record_field, _, {atom, _, Field}}, _}
+                                     <- Fields]}
+                || {attribute, _, record, {Name, Fields}} <- Forms],
+    Record.
 
 element_of(N, T) -> element(N, T).
 

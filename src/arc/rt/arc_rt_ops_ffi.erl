@@ -2,7 +2,7 @@
 %% float ops raise badarith past 1.8e308, which we catch and turn into infinity
 -module(arc_rt_ops_ffi).
 -export([add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
-         lt/2, eq/2, neq/2, classified_binop/3, pure_binop/3,
+         lt/2, eq/2, neq/2, binop/3, str_of/1,
          add_general/3, sub_general/3, mul_general/3, div_general/3,
          mod_general/3, neg_general/2,
          pow_total/2, fmod_total/2, fadd/2, fsub/2, fmul/2, fdiv/2,
@@ -20,15 +20,29 @@
 norm(R) when R > ?MAX_SAFE_INT; R < -?MAX_SAFE_INT -> arc_rt_val_ffi:mk_int(R);
 norm(R) -> R.
 
+%% safe integers are exact as floats, so the float op rounds as it should
+-define(OR_FLOAT(Exact, Rounded),
+        (case Exact of
+             Safe when Safe =< ?MAX_SAFE_INT, Safe >= -?MAX_SAFE_INT -> Safe;
+             _ -> Rounded
+         end)).
+
 inf_jsval(false) -> js_inf;
 inf_jsval(true) -> js_neg_inf.
 
-add(A, B) when is_integer(A), is_integer(B) -> norm(A + B);
+add(A, B) when is_integer(A), is_integer(B) -> ?OR_FLOAT(A + B, float(A) + float(B));
+add(A, B) when is_float(A), is_float(B) ->
+    try A + B
+    catch error:badarith -> inf_jsval(A < 0)
+    end;
 add(A, B) when is_number(A), is_number(B) ->
     try A + B
     catch error:badarith -> inf_jsval(A < 0)
     end;
-add(A, B) when is_binary(A), is_binary(B) -> <<A/binary, B/binary>>;
+add(A, B) when is_binary(A), is_binary(B) -> ?JOINED(A, B);
+add(A, B) when is_binary(A), is_integer(B) ->
+    Digits = integer_to_binary(B),
+    ?JOINED(A, Digits);
 add(A, B) when ?IS_STR(A) ->
     case str_of(B) of
         miss -> miss;
@@ -65,7 +79,11 @@ str_of(js_neg_inf) -> <<"-Infinity">>;
 str_of({js_bigint, N}) -> integer_to_binary(N);
 str_of(_) -> miss.
 
-sub(A, B) when is_integer(A), is_integer(B) -> norm(A - B);
+sub(A, B) when is_integer(A), is_integer(B) -> ?OR_FLOAT(A - B, float(A) - float(B));
+sub(A, B) when is_float(A), is_float(B) ->
+    try A - B
+    catch error:badarith -> inf_jsval(A < 0)
+    end;
 sub(A, B) when is_number(A), is_number(B) ->
     try A - B
     catch error:badarith -> inf_jsval(A < 0)
@@ -79,7 +97,11 @@ sub(_, _) -> miss.
 mul(A, B) when is_integer(A), is_integer(B) ->
     case A * B of
         0 when A < 0; B < 0 -> -0.0;
-        R -> norm(R)
+        R -> ?OR_FLOAT(R, float(A) * float(B))
+    end;
+mul(A, B) when is_float(A), is_float(B) ->
+    try A * B
+    catch error:badarith -> inf_jsval((A < 0) =/= (B < 0))
     end;
 mul(A, B) when is_number(A), is_number(B) ->
     try A * B
@@ -273,34 +295,29 @@ neq(A, B) ->
         R -> not R
     end.
 
--define(PURE_BINOP(Op, A, B),
+binop(Op, A, B) ->
     case Op of
-        {arith, sub} -> sub(A, B);
-        {arith, mul} -> mul(A, B);
-        {arith, 'div'} -> 'div'(A, B);
-        {arith, mod} -> mod(A, B);
-        {bitwise, bit_and} -> bitand(A, B);
-        {bitwise, bit_or} -> bitor(A, B);
-        {bitwise, bit_xor} -> bitxor(A, B);
-        {bitwise, shift_left} -> shl(A, B);
-        {bitwise, shift_right} -> shr(A, B);
-        {bitwise, shift_right_unsigned} -> ushr(A, B);
-        {compare, less} -> lt(A, B);
-        {compare, less_eq} -> le(A, B);
-        {compare, greater} -> gt(A, B);
-        {compare, greater_eq} -> ge(A, B);
-        {equality, strict_eq} -> strict_eq(A, B);
-        {equality, strict_not_eq} -> strict_neq(A, B);
-        {equality, loose_eq} -> eq(A, B);
-        {equality, loose_not_eq} -> neq(A, B);
+        add -> add(A, B);
+        sub -> sub(A, B);
+        mul -> mul(A, B);
+        'div' -> 'div'(A, B);
+        mod -> mod(A, B);
+        bit_and -> bitand(A, B);
+        bit_or -> bitor(A, B);
+        bit_xor -> bitxor(A, B);
+        shift_left -> shl(A, B);
+        shift_right -> shr(A, B);
+        shift_right_unsigned -> ushr(A, B);
+        less -> lt(A, B);
+        less_eq -> le(A, B);
+        greater -> gt(A, B);
+        greater_eq -> ge(A, B);
+        strict_eq -> strict_eq(A, B);
+        strict_not_eq -> strict_neq(A, B);
+        loose_eq -> eq(A, B);
+        loose_not_eq -> neq(A, B);
         _ -> miss
-    end).
-
-classified_binop(add_op, A, B) -> add(A, B);
-classified_binop({pure_op, Op}, A, B) -> ?PURE_BINOP(Op, A, B);
-classified_binop(_, _, _) -> miss.
-
-pure_binop(Op, A, B) -> ?PURE_BINOP(Op, A, B).
+    end.
 
 add_general(St, A, B) when is_number(A), is_number(B) -> {add(A, B), St};
 add_general(St, A, B) -> 'arc@rt@ops':add(St, A, B).

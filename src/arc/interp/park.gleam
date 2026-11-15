@@ -1,27 +1,23 @@
 import arc/internal/tuple_array
+import arc/interp/frames
 import arc/interp/kernel
-import arc/interp/state.{type State, State}
+import arc/interp/state.{type State, Frame, Outermost, State}
 import arc/rt/bytecode.{type ParkedAt, type SuspendedFrame, SuspendedFrame}
-import arc/rt/types.{type Agent, type JsVal, Agent, FrameInfo, Handle}
-import gleam/option.{None, Some}
+import arc/rt/types.{type Agent, type JsVal, Agent, FrameInfo, mk_object}
+import gleam/option
 
 pub fn park(state: State, parked: ParkedAt) -> SuspendedFrame {
   SuspendedFrame(
-    template: state.func,
+    template: state.frame.func,
     pc: state.pc,
     locals: state.locals,
     stack: state.stack,
-    try_stack: state.try_stack,
-    this: state.this,
-    home_object: state.home_object,
-    eval_env: case state.eval_env {
-      Some(h) -> Some(h.id)
-      None -> None
-    },
+    try_stack: state.frame.try_stack,
+    eval_env: option.map(state.frame.eval_env, mk_object),
     parked:,
-    call_args: state.call_args,
-    realm: state.agent.realm.id,
-    unit_id: state.unit_id,
+    call_args: state.frame.call_args,
+    realm: state.frame.realm,
+    unit_id: state.frame.unit_id,
   )
 }
 
@@ -40,19 +36,17 @@ pub fn unpark_with(
     locals:,
     stack: _,
     try_stack:,
-    this:,
-    home_object:,
     eval_env:,
     parked: _,
     call_args:,
     realm: _,
     unit_id:,
   ) = frame
-  let line = tuple_array.element(pc + 1, template.lines)
+  let line = tuple_array.element(pc, template.lines)
   // callers push this frame first
   let agent = case agent.frames {
     [FrameInfo(line: l, ..), ..] if l == line -> agent
-    [top, ..rest] -> Agent(..agent, frames: [FrameInfo(..top, line:), ..rest])
+    [_, ..] -> Agent(..agent, frames: frames.set_top_line(agent.frames, line))
     [] -> agent
   }
   State(
@@ -60,19 +54,18 @@ pub fn unpark_with(
     pc:,
     stack:,
     locals:,
-    func: template,
-    unit_id:,
-    call_stack: [],
-    outer_depth: agent.call_depth,
-    depth: agent.call_depth,
-    try_stack:,
-    this:,
-    new_target: kernel.literal([kernel.Undefined]),
-    home_object:,
-    call_args:,
-    eval_env: case eval_env {
-      Some(id) -> Some(Handle(id))
-      None -> None
-    },
+    frame: Frame(
+      func: template,
+      unit_id:,
+      return_to: Outermost,
+      outer_depth: agent.call_depth,
+      depth: agent.call_depth,
+      try_stack:,
+      call_args:,
+      eval_env: option.map(eval_env, fn(env) {
+        kernel.to_handle_unchecked([env])
+      }),
+      realm: agent.realm.id,
+    ),
   )
 }

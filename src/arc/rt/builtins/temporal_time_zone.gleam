@@ -10,7 +10,7 @@ import arc/rt/temporal_data.{
   type TemporalZone, IanaZone, OffsetZone, TemporalZonedDateTime, UtcZone,
 }
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, KHandle, KStr, SObject, TemporalObj, classify,
+  type Agent, type JsVal, KHandle, KStr, SObject, TemporalObj, classify,
 }
 import arc/rt/val as rt_val
 import arc/time_zone
@@ -67,8 +67,11 @@ pub fn lookup_zone(
   st: Agent,
   name: String,
 ) -> #(Result(time_zone.Zone, time_zone.ZoneLookupError), Agent) {
-  case time_zone.lookup(name, st.tz_zones, st.hooks.load_time_zone) {
-    Ok(#(zone, tz_zones)) -> #(Ok(zone), Agent(..st, tz_zones:))
+  case time_zone.lookup(name, st.store.meta.tz_zones, st.hooks.load_time_zone) {
+    Ok(#(zone, tz_zones)) -> #(
+      Ok(zone),
+      rt_store.with_meta(st, types.StoreMeta(..st.store.meta, tz_zones:)),
+    )
     Error(err) -> #(Error(err), st)
   }
 }

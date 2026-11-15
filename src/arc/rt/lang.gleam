@@ -12,10 +12,9 @@ import arc/rt/prop_map.{type PropMap}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type IteratorNative, type IteratorRecord, type JsVal,
-  type ObjectKey, type Store, Agent, DataProperty, GeneratorN, GeneratorNext,
-  GeneratorObj, IteratorN, IteratorRecord, KHandle, KNull, KUndef, NativeFn,
-  Ordinary, SObject, Store, StringKey, classify, mk_bool, mk_object, mk_string,
-  mk_undefined,
+  type ObjectKey, Agent, DataProperty, GeneratorN, GeneratorNext, GeneratorObj,
+  IteratorN, IteratorRecord, KHandle, KNull, KUndef, NativeFn, Ordinary, SObject,
+  StringKey, classify, mk_bool, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -40,8 +39,7 @@ const next_key = StringKey(names.next)
 const done_key = StringKey(names.done)
 
 pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
-  let store = st.store
-  let seq = store.prop_seq
+  let seq = st.prop_seq
   let props =
     prop_map.from_list([
       #(
@@ -75,7 +73,7 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
         ),
       ),
     ])
-  let st = Agent(..st, store: Store(..store, prop_seq: seq + 3))
+  let st = Agent(..st, prop_seq: seq + 3)
   let #(h, st) =
     rt_store.cell_new(
       st,
@@ -352,7 +350,7 @@ pub fn object_rest(
   source: JsVal,
   excluded: List(k),
 ) -> #(JsVal, Agent) {
-  let #(h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
+  let #(h, st) = rt_obj.new_object(st, st.realm.shared.object_proto)
   let excluded = list.map(excluded, rt_store.as_object_key)
   #(mk_object(h), copy_data_properties(st, h, source, excluded))
 }
@@ -402,7 +400,7 @@ pub fn get_template_object(
   raw: List(String),
 ) -> #(JsVal, Agent) {
   let site = int.to_string(st.realm.id) <> ":" <> site
-  case dict.get(st.template_objects, site) {
+  case dict.get(st.store.meta.template_objects, site) {
     Ok(h) -> #(mk_object(h), st)
     Error(Nil) -> {
       let #(raw_v, st) = rt_obj.new_array(st, list.map(raw, mk_string))
@@ -423,9 +421,16 @@ pub fn get_template_object(
       let st = b_object.freeze(st, tpl_h)
       let st = rt_store.pin_root(st, tpl_h)
       let st =
-        Agent(
-          ..st,
-          template_objects: dict.insert(st.template_objects, site, tpl_h),
+        rt_store.with_meta(
+          st,
+          types.StoreMeta(
+            ..st.store.meta,
+            template_objects: dict.insert(
+              st.store.meta.template_objects,
+              site,
+              tpl_h,
+            ),
+          ),
         )
       #(tpl_v, st)
     }
@@ -449,7 +454,7 @@ pub type ArrayIterStep {
 pub fn array_iter_start(st: Agent, iterable: JsVal) -> JsVal
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_next")
-pub fn array_iter_next(store: Store, rec: JsVal) -> ArrayIterStep
+pub fn array_iter_next(st: Agent, rec: JsVal) -> ArrayIterStep
 
 @external(erlang, "arc_rt_lang_ffi", "is_array_iter")
 pub fn is_array_iter(v: JsVal) -> Bool

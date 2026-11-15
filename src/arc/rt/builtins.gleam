@@ -42,6 +42,7 @@ import arc/rt/builtins/typed_array
 import arc/rt/builtins/weak
 import arc/rt/builtins/weak_ref as b_weak_ref
 import arc/rt/call as rt_call
+import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/prop_map
 import arc/rt/realm as rt_realm
@@ -66,28 +67,23 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 
 pub fn new_agent(hooks: HostHooks) -> Agent {
-  let st =
-    Agent(
-      store: rt_store.new(),
-      realm: types.unset_realm(),
-      template_objects: dict.new(),
-      frames: [],
-      hooks:,
-      host_fns: dict.new(),
-      realms: dict.new(),
-      import_hook: None,
-      waiters: [],
-      call_depth: 0,
-      tz_zones: dict.new(),
-    )
-  let #(_realm, st) = init_realm(seed_ops(st))
-  st
+  let st = {
+    use <- shared_start
+    let #(_realm, st) = init_realm(seed_ops(rt_store.new_agent(hooks)))
+    rt_gc.keep_all(st)
+  }
+  seed_ops(Agent(..st, hooks:))
 }
+
+// every agent starts out the same, so where the vm can share a term between
+// processes this makes it once. the hooks and ops are for the caller to fill in
+@external(erlang, "arc_rt_store_ffi", "shared_start")
+fn shared_start(make: fn() -> Agent) -> Agent
 
 // allocation order matters for prototype wiring
 fn init_realm(st: Agent) -> #(Realm, Agent) {
   let id =
-    dict.fold(st.realms, st.realm.id + 1, fn(next, known, _realm) {
+    dict.fold(st.store.meta.realms, st.realm.id + 1, fn(next, known, _realm) {
       int.max(next, known + 1)
     })
   let #(object_proto, st) = common.alloc_proto(st, None, prop_map.new())
@@ -256,14 +252,18 @@ fn init_realm(st: Agent) -> #(Realm, Agent) {
       id:,
       lexical_globals: prop_map.new(),
       suppressed_error: errors.suppressed_error,
-      fn_shared: types.FnShared(
-        proto: Some(function.prototype),
+      shared: types.RealmShared(
+        object_proto: Some(object.prototype),
+        array_proto: Some(array.prototype),
+        function_proto: Some(function.prototype),
         async_proto: Some(async_fn.prototype),
         constructor_birth: types.BirthPending(Some(object.prototype)),
       ),
     )
   let st = list.fold(realm_handles(realm), st, rt_store.pin_root)
-  let st = Agent(..st, realm:, realms: dict.insert(st.realms, id, realm))
+  let realms = dict.insert(st.store.meta.realms, id, realm)
+  let st = rt_store.with_meta(st, types.StoreMeta(..st.store.meta, realms:))
+  let st = Agent(..st, realm:, globals: dict.new())
   #(realm, st)
 }
 
@@ -333,7 +333,7 @@ fn realm_handles(r: Realm) -> List(Handle) {
 pub fn create_realm(st: Agent) -> #(Realm, Agent) {
   let origin = st.realm
   let #(realm, st) = init_realm(Agent(..st, realm: types.unset_realm()))
-  #(realm, Agent(..st, realm: origin))
+  #(realm, Agent(..st, realm: origin, globals: dict.new()))
 }
 
 pub fn seed_ops(st: Agent) -> Agent {
@@ -527,9 +527,6 @@ pub fn plain_answer(
       b_string.plain_char_code_at(this, idx)
     WeakN(types.WeakMapGet), [key] -> weak.plain_map_get(st, this, key)
     WeakN(types.WeakMapHas), [key] -> weak.plain_map_has(st, this, key)
-    MapN(types.MapGet), [key] -> b_map.plain_get(st, this, key)
-    MapN(types.MapHas), [key] -> b_map.plain_has(st, this, key)
-    SetN(types.SetHas), [key] -> b_set.plain_has(st, this, key)
     MapN(types.MapGetSize), [] -> b_map.plain_size(st, this)
     SetN(types.SetGetSize), [] -> b_set.plain_size(st, this)
     ArrayN(types.ArrayPrototypeIncludes), [search] ->
@@ -756,7 +753,7 @@ fn call_host_fn(
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
-  case dict.get(st.host_fns, id) {
+  case dict.get(st.store.meta.host_fns, id) {
     Ok(HostFnEntry(call:)) ->
       case call(st, args, this, new_target) {
         #(Ok(v), st) -> #(v, st)

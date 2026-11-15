@@ -11,28 +11,32 @@
 
 %% Agent
 -define(AGENT_TAG, agent).
--define(AGENT_STORE, 2).
--define(AGENT_REALM, 3).
--define(AGENT_HOST_FNS, 7).
--define(AGENT_REALMS, 8).
--define(AGENT_SIZE, 12).
+-define(AGENT_CELLS, 2).
+-define(AGENT_NEXT_ID, 3).
+-define(AGENT_GC_AT, 4).
+-define(AGENT_PROP_SEQ, 5).
+-define(AGENT_REALM, 8).
+-define(AGENT_STORE, 9).
+-define(AGENT_HOOKS, 10).
+-define(AGENT_GLOBALS, 11).
+-define(AGENT_SIZE, 11).
 
 %% Store
 -define(STORE_TAG, store).
--define(STORE_CELLS, 2).
--define(STORE_NEXT_ID, 3).
--define(STORE_ALLOC_SINCE_GC, 4).
--define(STORE_PROP_SEQ, 6).
--define(STORE_SHAPES, 7).
--define(STORE_NEXT_SHAPE, 8).
--define(STORE_ICS, 9).
--define(STORE_PLAIN_WRITE_PROTOS, 10).
--define(STORE_GLOBAL_EPOCH, 11).
--define(STORE_PINNED_ROOTS, 14).
--define(STORE_META, 15).
--define(STORE_SIZE, 15).
--define(STOREMETA_PLAIN_INDEX_PROTOS, 12).
--define(STOREMETA_SIZE, 16).
+-define(STORE_SHAPES, 3).
+-define(STORE_NEXT_SHAPE, 4).
+-define(STORE_ICS, 5).
+-define(STORE_PLAIN_WRITE_PROTOS, 6).
+-define(STORE_GLOBAL_EPOCH, 7).
+-define(STORE_OPS, 8).
+-define(STORE_PINNED_ROOTS, 10).
+-define(STORE_META, 11).
+-define(STORE_SIZE, 11).
+-define(STOREMETA_PLAIN_INDEX_PROTOS, 11).
+-define(STOREMETA_SIZE, 27).
+%% a field of an agent's store, and the agent with it set
+-define(STORED(Field, St), element(Field, element(?AGENT_STORE, St))).
+-define(SET_STORED(Field, St, V), arc_rt_store_ffi:set_stored(Field, St, V)).
 %% arena marker for a freed cell id
 -define(STORE_FREE_CELL, js_free).
 
@@ -52,7 +56,17 @@
 -define(REALM_SET_ITER_PROTO, 40).
 -define(REALM_GLOBAL_OBJECT, 51).
 -define(REALM_ID, 53).
+-define(REALM_LEXICAL_GLOBALS, 54).
+-define(REALM_SHARED, 56).
 -define(REALM_SIZE, 56).
+
+%% RealmShared
+-define(REALMSHARED_OBJECT_PROTO, 2).
+-define(REALMSHARED_ARRAY_PROTO, 3).
+-define(REALMSHARED_FUNCTION_PROTO, 4).
+-define(REALMSHARED_ASYNC_PROTO, 5).
+-define(REALMSHARED_CONSTRUCTOR_BIRTH, 6).
+-define(REALM_SHARES(Field, Realm), element(Field, element(?REALM_SHARED, Realm))).
 -define(BUILTINPAIR_TAG, builtin_pair).
 -define(BUILTINPAIR_PROTOTYPE, 2).
 -define(BUILTINPAIR_CONSTRUCTOR, 3).
@@ -67,6 +81,14 @@
 -define(IS_STR(V), (is_binary(V) orelse
                     (is_tuple(V) andalso tuple_size(V) =:= 4
                      andalso element(1, V) =:= ?STR_TAG))).
+%% appending moves A off the heap, into room to grow. that only pays for what
+%% looks like a long string being built up; a sized segment is a plain copy
+-define(JOINED(A, B),
+        (case byte_size(A) of
+             JoinedSize when JoinedSize + byte_size(B) =< 64; JoinedSize < byte_size(B) ->
+                 <<A:JoinedSize/binary, B/binary>>;
+             _ -> <<A/binary, B/binary>>
+         end)).
 -define(IS_INF(V), (V =:= js_inf orelse V =:= js_neg_inf)).
 -define(IS_NULLISH(V), (V =:= undefined orelse V =:= null)).
 -define(IS_JS_NUMBER(V),
@@ -97,6 +119,7 @@
 
 %% the shape an empty `{}` is born on; `new` receivers are born on 0
 -define(PLAIN_EMPTY_SHAPE, 1).
+-define(ITER_RESULT_SHAPE, 2).
 %% ShapeDesc and the shape slots tuple
 -define(SHAPE_TAG, shape_desc).
 -define(SHAPE_SLOT_COUNT, 2).
@@ -132,6 +155,13 @@
 -define(BYTECODEFN_TAG, bytecode_fn).
 -define(BYTECODEFN_BIRTH, 9).
 -define(BYTECODEFN_SIZE, 9).
+
+-define(FUNCTEMPLATE_TAG, func_template).
+-define(FUNCTEMPLATE_NAME, 2).
+-define(FUNCTEMPLATE_BYTECODE, 6).
+-define(FUNCTEMPLATE_FUNCTIONS, 8).
+-define(FUNCTEMPLATE_LEXICAL, 18).
+-define(FUNCTEMPLATE_SIZE, 23).
 
 -define(BIRTH_SETTLED, birth_settled).
 -define(BIRTHPENDING_TAG, birth_pending).
@@ -169,12 +199,18 @@
 -define(SETITERATOR_TAG, set_iterator).
 -define(SETITER_VALUES, set_iter_values).
 
+-define(PROMISEOBJ_TAG, promise_obj).
+
 -define(GENERATOROBJ_TAG, generator_obj).
 -define(GENERATOROBJ_DATA, 2).
 -define(GENERATOROBJ_SIZE, 2).
 
 -define(MAPOBJ_TAG, map_obj).
 -define(SETOBJ_TAG, set_obj).
+%% where an OrderedEntries has its entries by key
+-define(ORDERED_ENTRIES, 2).
+%% and how many it has ever been given
+-define(ORDERED_NEXT_SEQ, 4).
 -define(PROXYOBJ_TAG, proxy_obj).
 -define(STRINGOBJ_TAG, string_obj).
 -define(STRINGOBJ_VALUE, 2).
@@ -257,12 +293,13 @@
 % matches length by id alone, since the id tells it apart
 -define(LENGTH_KEY_BY_ID, {_, 1602631505924514, _}).
 -define(NAME_KEY, {?KEY_NAMED, 24587384214, <<"name">>}).
--define(PROTOTYPE_KEY, {?KEY_NAMED, 351306839192840528, <<"prototype">>}).
+-define(PROTOTYPE_KEY, {?KEY_NAMED, 126993544678109334, <<"prototype">>}).
 -define(CALLEE_KEY, {?KEY_NAMED, 1562980234925462, <<"callee">>}).
--define(PROTO_KEY, {?KEY_NAMED, 285587656632664716, <<"__proto__">>}).
+-define(PROTO_KEY, {?KEY_NAMED, 107519261014744958, <<"__proto__">>}).
 -define(TO_JSON_KEY, {?KEY_NAMED, 1637985255505210, <<"toJSON">>}).
 -define(DONE_KEY, {?KEY_NAMED, 23919966614, <<"done">>}).
--define(ITERATOR_KEY, {?KEY_NAMED, 425897015423828148, <<"iterator">>}).
+-define(VALUE_KEY, {?KEY_NAMED, 6431809066390, <<"value">>}).
+-define(ITERATOR_KEY, {?KEY_NAMED, 2987535397367754, <<"iterator">>}).
 -define(NEXT_KEY, {?KEY_NAMED, 24588444114, <<"next">>}).
 -define(KEYS_KEY, {?KEY_NAMED, 24387118542, <<"keys">>}).
 -define(VALUES_KEY, {?KEY_NAMED, 1646543120995790, <<"values">>}).
@@ -277,6 +314,8 @@
 -define(ELEMS_SPARSE, sparse).
 -define(ELEMS_HOLE, js_hole).
 -define(VEC_TAG, js_vec).
+%% a step down its trie, as arc_tree_array_ffi lays it out
+-define(IN_NODE(I, Shift, Node), element((((I) bsr (Shift)) band 15) + 1, Node)).
 
 %% Completion, coroutine steps, iterator records
 -define(COMPLETION_NORMAL, normal_completion).
@@ -311,16 +350,41 @@
 -define(MAX_GAP, 1024).
 -define(MAX_DENSE_INDEX, 10000000).
 
+%% the agent after a write to a global object, which its readers have to hear of
+-define(GLOBAL_WRITTEN(St), arc_rt_store_ffi:global_written(St)).
+
+%% this many elements count as one cell towards the next collection
+-define(ELEMENTS_PER_CELL_BITS, 4).
+
+%% the agent after an array grew, which brings the next collection nearer
+-define(GROWN(St, Was, Len),
+        (case (Len) bsr 8 =:= (Was) bsr 8 of
+             true -> St;
+             false -> arc_rt_store_ffi:weighed(St, max((Len) - (Was), 256))
+         end)).
+
+%% the same after a map or set went from one OrderedEntries to another
+-define(TABLE_GROWN(St, Was, Table),
+        (case (element(?ORDERED_NEXT_SEQ, Table) bsr 6) - (element(?ORDERED_NEXT_SEQ, Was) bsr 6) of
+             0 -> St;
+             Sixtyfours -> arc_rt_store_ffi:weighed(St, Sixtyfours bsl 8)
+         end)).
+
 %% shared kernels; each module instantiates them as one-line locals
 
-%% store with Cell written at Id, next_id and alloc_since_gc bumped
--define(ALLOC_CELL(Store, Cells, Id, Cell),
-        setelement(?STORE_ALLOC_SINCE_GC,
-                   setelement(?STORE_NEXT_ID,
-                              setelement(?STORE_CELLS, Store,
-                                         arc_rt_arena_ffi:set(Id, Cell, Cells)),
-                              Id + 1),
-                   element(?STORE_ALLOC_SINCE_GC, Store) + 1)).
+%% the agent with Cell written at Id and next_id bumped
+-define(ALLOC_CELL(St, Cells, Id, Cell),
+        setelement(?AGENT_NEXT_ID,
+                   setelement(?AGENT_CELLS, St, arc_rt_arena_ffi:set(Id, Cell, Cells)),
+                   Id + 1)).
+
+%% §7.4.16 the cell createiteratorresultobject makes
+-define(ITER_RESULT_OFFSETS,
+        #{?KEY_ID(?VALUE_KEY) => {?VALUE_KEY, 0}, ?KEY_ID(?DONE_KEY) => {?DONE_KEY, 1}}).
+-define(ITER_RESULT(St, V, Done),
+        {?SSHAPEDOBJECT_TAG, ?ITER_RESULT_SHAPE,
+         ?REALM_SHARES(?REALMSHARED_OBJECT_PROTO, element(?AGENT_REALM, St)), {V, Done},
+         ?ITER_RESULT_OFFSETS}).
 
 %% which builtin a native fn cell dispatches to, else none
 -define(NATIVE_TOKEN(Cell),
@@ -358,17 +422,24 @@
              _ -> miss
          end)).
 
-%% known successor shape for adding keybin, as {To, ToOffsets}, else miss
--define(SHAPED_NEXT(Shapes, Sid, KeyBin),
+%% what a shape files the transition for adding K under
+-define(SHAPE_STEP(K),
+        (case ?ID_IS_EXACT(?KEY_ID(K)) of
+             true -> ?KEY_ID(K);
+             false -> ?KEY_TEXT(K)
+         end)).
+%% known successor shape for a step, as {To, ToOffsets}, else miss
+-define(SHAPED_NEXT(Shapes, Sid, Step),
         (case Shapes of
-             #{Sid := NextFromDesc} ->
-                 case element(?SHAPE_TRANSITIONS, NextFromDesc) of
-                     #{KeyBin := NextTo} ->
-                         {NextTo, element(?SHAPE_OFFSETS, map_get(NextTo, Shapes))};
-                     _ -> miss
-                 end;
+             #{Sid := {?SHAPE_TAG, _, _, #{Step := NextShape}}} -> NextShape;
              _ -> miss
          end)).
+
+%% Memo is what plain_write_protos holds for a proto: does its chain leave a
+%% write under this id alone?
+-define(LETS_WRITE(Memo, Id),
+        ((Memo =:= nil andalso Id =/= ?KEY_ID(?PROTO_KEY))
+         orelse (is_map(Memo) andalso not is_map_key(Id, Memo)))).
 
 %% false for exotic or virtual named keys; needs a local birth_plain/2
 %% length and name are short, so their ids alone tell them apart
@@ -406,8 +477,7 @@
              ?BIRTH_SETTLED -> true;
              _ when ?KEY_ID(K) =:= ?KEY_ID(?LENGTH_KEY) -> false;
              _ when ?KEY_ID(K) =:= ?KEY_ID(?NAME_KEY) -> false;
-             _ when ?KEY_ID(K) =:= ?KEY_ID(?PROTOTYPE_KEY),
-                    ?KEY_TEXT(K) =:= ?KEY_TEXT(?PROTOTYPE_KEY) ->
+             _ when ?KEY_ID(K) =:= ?KEY_ID(?PROTOTYPE_KEY) ->
                  element(?BIRTHPENDING_PROTOTYPE_PARENT, Birth) =:= ?NONE;
              _ -> true
          end)).

@@ -18,7 +18,18 @@ fn compile(source: String) -> FuncTemplate {
 }
 
 fn constant_kinds(t: FuncTemplate) -> List(JsValKind) {
-  tuple_array.to_list(t.constants) |> list.map(classify)
+  use op <- list.filter_map(tuple_array.to_list(t.bytecode))
+  case op {
+    opcode.PushConst(value:)
+    | opcode.IncLocalCmpConstJump(value:, ..)
+    | opcode.CmpLocalConstJump(value:, ..)
+    | opcode.CmpConstJump(value:, ..)
+    | opcode.PutLocalConstField(value:, ..)
+    | opcode.BinOpConst(value:, ..)
+    | opcode.BinOpLocalConst(value:, ..)
+    | opcode.BinOpConstPut(value:, ..) -> Ok(classify(value))
+    _ -> Error(Nil)
+  }
 }
 
 fn all_constant_kinds(t: FuncTemplate) -> List(JsValKind) {
@@ -69,7 +80,7 @@ pub fn binding_seeds_classify_as_undefined_and_tdz_test() {
   assert list.contains(kinds, KNum(JInt(1)))
 }
 
-pub fn constant_pool_never_holds_heap_references_test() {
+pub fn constants_never_hold_heap_references_test() {
   let kinds =
     all_constant_kinds(compile(
       "var o = {a: [1, 2.5, 'x']}; class C { m() { return `t${o}`; } }",

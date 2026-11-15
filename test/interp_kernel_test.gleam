@@ -1,44 +1,51 @@
 import arc/bytecode/key.{Index, named}
 import arc/bytecode/names
 import arc/interp/guard
-import arc/interp/kernel
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type JsVal, JFloat, JInt, KHandle, KNum, KStr, KUndef, StringKey, classify,
   mk_int, mk_number, mk_string, mk_undefined,
 }
 import arc/rt/val.{is_miss} as rt_val
+import erlang_kernels
 import gleam/option.{None, Some}
 import rt_helpers
 
 pub fn add_numbers_and_strings_test() {
-  assert classify(kernel.add(mk_int(1), mk_int(2))) == KNum(JInt(3))
-  assert classify(kernel.add(mk_int(1), mk_number(JFloat(0.5))))
+  assert classify(erlang_kernels.add(mk_int(1), mk_int(2))) == KNum(JInt(3))
+  assert classify(erlang_kernels.add(mk_int(1), mk_number(JFloat(0.5))))
     == KNum(JFloat(1.5))
-  assert classify(kernel.add(mk_string("a"), mk_int(1))) == KStr("a1")
-  assert !is_miss(kernel.add(mk_int(1), mk_int(2)))
+  assert classify(erlang_kernels.add(mk_string("a"), mk_int(1))) == KStr("a1")
+  assert !is_miss(erlang_kernels.add(mk_int(1), mk_int(2)))
 }
 
 pub fn add_object_misses_test() {
   let st = rt_helpers.agent()
   let #(obj, _st) = rt_obj.new_object_literal(st)
-  assert is_miss(kernel.add(obj, mk_int(1)))
-  assert is_miss(kernel.sub(mk_string("3"), mk_int(1)))
+  assert is_miss(erlang_kernels.add(obj, mk_int(1)))
+  assert is_miss(erlang_kernels.sub(mk_string("3"), mk_int(1)))
 }
 
 pub fn compare_and_equality_test() {
-  assert rt_val.to_boolean(kernel.lt(mk_int(1), mk_number(JFloat(1.5))))
-  assert !is_miss(kernel.lt(mk_int(1), mk_int(2)))
-  assert is_miss(kernel.lt(mk_string("1"), mk_int(2)))
-  assert rt_val.to_boolean(kernel.strict_eq(mk_int(1), mk_number(JFloat(1.0))))
-  assert !rt_val.to_boolean(kernel.strict_eq(mk_int(1), mk_string("1")))
-  assert rt_val.to_boolean(kernel.strict_neq(mk_int(1), mk_string("1")))
-  assert is_miss(kernel.neq(mk_int(1), mk_string("1")))
-  assert !rt_val.to_boolean(kernel.neq(mk_int(1), mk_number(JFloat(1.0))))
-  assert classify(kernel.step(mk_int(1), 1)) == KNum(JInt(2))
-  assert classify(kernel.step(mk_number(JFloat(1.5)), -1)) == KNum(JFloat(0.5))
-  assert is_miss(kernel.step(mk_string("1"), 1))
-  assert is_miss(kernel.eq(mk_int(1), mk_string("1")))
+  assert rt_val.to_boolean(erlang_kernels.lt(mk_int(1), mk_number(JFloat(1.5))))
+  assert !is_miss(erlang_kernels.lt(mk_int(1), mk_int(2)))
+  assert is_miss(erlang_kernels.lt(mk_string("1"), mk_int(2)))
+  assert rt_val.to_boolean(erlang_kernels.strict_eq(
+    mk_int(1),
+    mk_number(JFloat(1.0)),
+  ))
+  assert !rt_val.to_boolean(erlang_kernels.strict_eq(mk_int(1), mk_string("1")))
+  assert rt_val.to_boolean(erlang_kernels.strict_neq(mk_int(1), mk_string("1")))
+  assert is_miss(erlang_kernels.neq(mk_int(1), mk_string("1")))
+  assert !rt_val.to_boolean(erlang_kernels.neq(
+    mk_int(1),
+    mk_number(JFloat(1.0)),
+  ))
+  assert classify(erlang_kernels.step(mk_int(1), 1)) == KNum(JInt(2))
+  assert classify(erlang_kernels.step(mk_number(JFloat(1.5)), -1))
+    == KNum(JFloat(0.5))
+  assert is_miss(erlang_kernels.step(mk_string("1"), 1))
+  assert is_miss(erlang_kernels.eq(mk_int(1), mk_string("1")))
   assert rt_val.to_boolean(mk_string("x"))
   assert !rt_val.to_boolean(mk_int(0))
   assert rt_val.is_nullish(mk_undefined())
@@ -48,32 +55,37 @@ pub fn get_and_put_field_test() {
   let st = rt_helpers.agent()
   let #(obj, st) = rt_obj.new_object_literal(st)
   let #(_, st) = rt_obj.set_prop(st, obj, StringKey(named("x")), mk_int(42))
-  assert classify(kernel.get_field(st, obj, key.named("x"))) == KNum(JInt(42))
-  assert classify(kernel.get_field(st, obj, key.named("missing"))) == KUndef
-  let assert KHandle(_) = classify(kernel.get_field(st, obj, names.constructor))
-  assert is_miss(kernel.get_field(st, obj, names.proto))
-  assert classify(kernel.get_field(st, mk_string("héllo"), names.length))
-    == KNum(JInt(5))
-  let assert KHandle(_) =
-    classify(kernel.get_field(st, mk_string("s"), key.named("slice")))
-  assert classify(kernel.get_field(st, mk_string("s"), key.named("nope")))
+  assert classify(erlang_kernels.get_field(st, obj, key.named("x")))
+    == KNum(JInt(42))
+  assert classify(erlang_kernels.get_field(st, obj, key.named("missing")))
     == KUndef
   let assert KHandle(_) =
-    classify(kernel.get_field(st, mk_int(1), key.named("toFixed")))
-  assert is_miss(kernel.get_field(st, mk_string("s"), names.proto))
-  assert is_miss(kernel.get_field(st, mk_undefined(), key.named("x")))
-  assert kernel.type_of(st.store, obj) == "object"
-  assert kernel.type_of(st.store, mk_int(0)) == "number"
-  let store =
-    kernel.put_field(st.store, obj, key.named("x"), mk_int(43), create: True)
-  assert !is_miss(store)
-  let st = types.Agent(..st, store:)
+    classify(erlang_kernels.get_field(st, obj, names.constructor))
+  assert is_miss(erlang_kernels.get_field(st, obj, names.proto))
+  assert classify(erlang_kernels.get_field(st, mk_string("héllo"), names.length))
+    == KNum(JInt(5))
+  let assert KHandle(_) =
+    classify(erlang_kernels.get_field(st, mk_string("s"), key.named("slice")))
+  assert classify(erlang_kernels.get_field(
+      st,
+      mk_string("s"),
+      key.named("nope"),
+    ))
+    == KUndef
+  let assert KHandle(_) =
+    classify(erlang_kernels.get_field(st, mk_int(1), key.named("toFixed")))
+  assert is_miss(erlang_kernels.get_field(st, mk_string("s"), names.proto))
+  assert is_miss(erlang_kernels.get_field(st, mk_undefined(), key.named("x")))
+  assert erlang_kernels.type_of(st, obj) == "object"
+  assert erlang_kernels.type_of(st, mk_int(0)) == "number"
+  let st =
+    erlang_kernels.put_field(st, obj, key.named("x"), mk_int(43), create: True)
+  assert !is_miss(st)
   let #(v, st) = rt_obj.get_prop(st, obj, StringKey(named("x")))
   assert classify(v) == KNum(JInt(43))
-  let store =
-    kernel.put_field(st.store, obj, key.named("y"), mk_int(1), create: True)
-  assert !is_miss(store)
-  let st = types.Agent(..st, store:)
+  let st =
+    erlang_kernels.put_field(st, obj, key.named("y"), mk_int(1), create: True)
+  assert !is_miss(st)
   let #(keys, st) = rt_obj.own_keys(st, handle_of(obj))
   assert keys == [StringKey(named("x")), StringKey(named("y"))]
   let #(desc, st) =
@@ -84,16 +96,16 @@ pub fn get_and_put_field_test() {
     configurable: True,
     ..,
   )) = desc
-  assert is_miss(kernel.put_field(
-    st.store,
+  assert is_miss(erlang_kernels.put_field(
+    st,
     obj,
     names.proto,
     mk_int(1),
     create: True,
   ))
   let #(_, st) = rt_obj.prevent_extensions(st, handle_of(obj))
-  assert is_miss(kernel.put_field(
-    st.store,
+  assert is_miss(erlang_kernels.put_field(
+    st,
     obj,
     key.named("z"),
     mk_int(1),
@@ -104,16 +116,15 @@ pub fn get_and_put_field_test() {
 pub fn get_and_put_elem_test() {
   let st = rt_helpers.agent()
   let #(arr, st) = rt_obj.new_array(st, [mk_int(10), mk_int(20)])
-  assert classify(kernel.get_elem(st.store, arr, mk_int(1))) == KNum(JInt(20))
-  assert is_miss(kernel.get_elem(st.store, arr, mk_int(2)))
-  assert classify(kernel.get_elem(st.store, arr, mk_string("0")))
+  assert classify(erlang_kernels.get_elem(st, arr, mk_int(1))) == KNum(JInt(20))
+  assert is_miss(erlang_kernels.get_elem(st, arr, mk_int(2)))
+  assert classify(erlang_kernels.get_elem(st, arr, mk_string("0")))
     == KNum(JInt(10))
-  let store = kernel.put_elem(st.store, arr, mk_int(2), mk_int(30))
-  assert !is_miss(store)
-  let st = types.Agent(..st, store:)
+  let st = erlang_kernels.put_elem(st, arr, mk_int(2), mk_int(30))
+  assert !is_miss(st)
   let #(len, st) = rt_obj.get_prop(st, arr, StringKey(names.length))
   assert classify(len) == KNum(JInt(3))
-  assert is_miss(kernel.put_elem(st.store, arr, mk_int(5), mk_int(1)))
+  assert is_miss(erlang_kernels.put_elem(st, arr, mk_int(5), mk_int(1)))
 }
 
 fn handle_of(v: JsVal) -> types.Handle {
@@ -145,15 +156,15 @@ pub fn put_elem_inherited_setter_on_append_misses_test() {
       Some(setter),
       enumerable: True,
     )
-  assert is_miss(kernel.put_elem(st.store, arr, mk_int(2), mk_int(30)))
-  assert !is_miss(kernel.put_elem(st.store, arr, mk_int(1), mk_int(21)))
+  assert is_miss(erlang_kernels.put_elem(st, arr, mk_int(2), mk_int(30)))
+  assert !is_miss(erlang_kernels.put_elem(st, arr, mk_int(1), mk_int(21)))
 }
 
 pub fn put_elem_inherited_readonly_on_hole_fill_misses_test() {
   let st = rt_helpers.agent()
   let #(arr, st) = rt_obj.new_array(st, [mk_int(0), mk_int(1), mk_int(2)])
   let #(_, st) = rt_obj.delete_prop(st, handle_of(arr), StringKey(Index(1)))
-  assert !is_miss(kernel.put_elem(st.store, arr, mk_int(1), mk_int(9)))
+  assert !is_miss(erlang_kernels.put_elem(st, arr, mk_int(1), mk_int(9)))
   let #(proto, st) = array_prototype(st, arr)
   let #(_, st) =
     rt_obj.define_own_data(
@@ -165,7 +176,7 @@ pub fn put_elem_inherited_readonly_on_hole_fill_misses_test() {
       enumerable: True,
       configurable: True,
     )
-  assert is_miss(kernel.put_elem(st.store, arr, mk_int(1), mk_int(9)))
+  assert is_miss(erlang_kernels.put_elem(st, arr, mk_int(1), mk_int(9)))
 }
 
 pub fn put_elem_frozen_length_on_append_misses_test() {
@@ -181,15 +192,15 @@ pub fn put_elem_frozen_length_on_append_misses_test() {
       enumerable: False,
       configurable: False,
     )
-  assert is_miss(kernel.put_elem(st.store, arr, mk_int(2), mk_int(3)))
-  assert !is_miss(kernel.put_elem(st.store, arr, mk_int(0), mk_int(7)))
+  assert is_miss(erlang_kernels.put_elem(st, arr, mk_int(2), mk_int(3)))
+  assert !is_miss(erlang_kernels.put_elem(st, arr, mk_int(0), mk_int(7)))
 }
 
 pub fn put_elem_sparse_hole_walks_chain_test() {
   let st = rt_helpers.agent()
   let #(arr, st) = rt_obj.new_array(st, [])
   let #(_, st) = rt_obj.set_prop(st, arr, StringKey(Index(100_000)), mk_int(1))
-  assert !is_miss(kernel.put_elem(st.store, arr, mk_int(5), mk_int(7)))
+  assert !is_miss(erlang_kernels.put_elem(st, arr, mk_int(5), mk_int(7)))
   let #(object_ctor, st) = rt_helpers.global(st, "Object")
   let #(object_proto, st) = rt_helpers.get(st, object_ctor, "prototype")
   let #(setter, st) =
@@ -203,7 +214,7 @@ pub fn put_elem_sparse_hole_walks_chain_test() {
       Some(setter),
       enumerable: True,
     )
-  assert is_miss(kernel.put_elem(st.store, arr, mk_int(5), mk_int(7)))
+  assert is_miss(erlang_kernels.put_elem(st, arr, mk_int(5), mk_int(7)))
 }
 
 pub fn put_elem_past_index_range_misses_test() {
@@ -212,14 +223,14 @@ pub fn put_elem_past_index_range_misses_test() {
   let #(_, st) = rt_obj.set_prop(st, arr, StringKey(Index(100_000)), mk_int(1))
   let #(_, st) =
     rt_obj.set_prop(st, arr, StringKey(names.length), mk_int(4_294_967_295))
-  assert is_miss(kernel.put_elem(
-    st.store,
+  assert is_miss(erlang_kernels.put_elem(
+    st,
     arr,
     mk_int(4_294_967_295),
     mk_int(1),
   ))
-  assert !is_miss(kernel.put_elem(
-    st.store,
+  assert !is_miss(erlang_kernels.put_elem(
+    st,
     arr,
     mk_int(4_294_967_294),
     mk_int(1),

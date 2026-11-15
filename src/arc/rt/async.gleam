@@ -19,13 +19,13 @@ import arc/rt/types.{
   AsyncGenSuspendedStart, AsyncGenSuspendedYield, AsyncGeneratorObj, AsyncWaiter,
   AwaitingReturnKind, DataProperty, GenCompleted, GenExecuting, GenNext,
   GenReturn, GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj,
-  Handle, Handler, HostJob, IdentityPassThrough, KHandle, Ordinary,
-  PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
-  PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob,
-  ResumeCompiled, ResumeFrame, ReturnUnwindKind, SAsyncContext, SAsyncGen, SBox,
-  SGenerator, SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield,
-  Store, StoreMeta, StringKey, ThrowerPassThrough, classify, job_queue_pop,
-  job_queue_push, mk_bool, mk_object, mk_string, mk_undefined,
+  Handle, Handler, HostJob, IdentityPassThrough, KHandle, PromiseFulfilled,
+  PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn, PromiseRejected,
+  PromiseResolveFn, ReactionJob, ResolveThenableJob, ResumeCompiled, ResumeFrame,
+  ReturnUnwindKind, SAsyncContext, SAsyncGen, SBox, SGenerator, SObject,
+  SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, Store, StoreMeta,
+  StringKey, ThrowerPassThrough, classify, job_queue_pop, job_queue_push,
+  mk_bool, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val.{is_callable} as rt_val
 import gleam/int
@@ -124,7 +124,12 @@ pub fn no_drain(st: Agent) -> Agent {
 
 // gc safepoint between jobs only; called by name from arc_aot_run_ffi
 pub fn drain(st: Agent) -> Agent {
-  let st = case st.waiters {
+  use <- rt_store.with_room
+  drain_jobs(st)
+}
+
+fn drain_jobs(st: Agent) -> Agent {
+  let st = case st.store.meta.waiters {
     [] -> st
     [_, ..] -> service_waiters(st)
   }
@@ -132,14 +137,14 @@ pub fn drain(st: Agent) -> Agent {
   case job_queue_pop(store.microtasks) {
     None ->
       case earliest_deadline(st) {
-        Some(deadline) -> drain(idle_until(st, deadline))
+        Some(deadline) -> drain_jobs(idle_until(st, deadline))
         None -> finish_drain(st)
       }
     Some(#(job, rest)) -> {
       let st = Agent(..st, store: Store(..store, microtasks: rest))
       let st = run_job(st, job)
       let st = rt_gc.maybe_collect(st)
-      drain(st)
+      drain_jobs(st)
     }
   }
 }
@@ -183,7 +188,16 @@ pub fn add_waiter(
 ) -> #(Handle, Agent) {
   let #(promise, st) = new_promise(st)
   let waiter = AsyncWaiter(owner:, ref:, promise:, deadline:)
-  #(promise, Agent(..st, waiters: list.append(st.waiters, [waiter])))
+  #(
+    promise,
+    rt_store.with_meta(
+      st,
+      types.StoreMeta(
+        ..st.store.meta,
+        waiters: list.append(st.store.meta.waiters, [waiter]),
+      ),
+    ),
+  )
 }
 
 fn service_waiters(st: Agent) -> Agent {
@@ -191,7 +205,7 @@ fn service_waiters(st: Agent) -> Agent {
 }
 
 fn pending_refs(st: Agent) -> List(WaiterRef) {
-  list.map(st.waiters, fn(w) { w.ref })
+  list.map(st.store.meta.waiters, fn(w) { w.ref })
 }
 
 fn apply_pending_wakes(st: Agent) -> Agent {
@@ -212,9 +226,13 @@ fn idle_until(st: Agent, deadline: Int) -> Agent {
 }
 
 pub fn wake_waiter(st: Agent, ref: WaiterRef) -> Agent {
-  case list.partition(st.waiters, fn(w) { w.ref == ref }) {
+  case list.partition(st.store.meta.waiters, fn(w) { w.ref == ref }) {
     #([], _) -> st
-    #([w, ..], kept) -> enqueue_resolve_ok(Agent(..st, waiters: kept), w)
+    #([w, ..], kept) ->
+      enqueue_resolve_ok(
+        rt_store.with_meta(st, types.StoreMeta(..st.store.meta, waiters: kept)),
+        w,
+      )
   }
 }
 
@@ -233,26 +251,27 @@ fn enqueue_resolve_ok(st: Agent, w: AsyncWaiter) -> Agent {
 
 fn fire_due_waiters(st: Agent, cutoff: Int) -> Agent {
   let #(due, pending) =
-    list.partition(st.waiters, fn(w) {
+    list.partition(st.store.meta.waiters, fn(w) {
       case w.deadline {
         Some(d) -> d <= cutoff
         None -> False
       }
     })
-  list.fold(due, Agent(..st, waiters: pending), fn(st, w) {
-    case cancel(w.owner, w.ref) {
-      Cancelled ->
-        settle(st, mk_object(w.promise), Fulfil, wait_result_js(TimedOut))
-      AlreadyWoken -> {
-        let Nil = await_wake(w.ref)
-        enqueue_resolve_ok(st, w)
-      }
+  let st =
+    rt_store.with_meta(st, types.StoreMeta(..st.store.meta, waiters: pending))
+  use st, w <- list.fold(due, st)
+  case cancel(w.owner, w.ref) {
+    Cancelled ->
+      settle(st, mk_object(w.promise), Fulfil, wait_result_js(TimedOut))
+    AlreadyWoken -> {
+      let Nil = await_wake(w.ref)
+      enqueue_resolve_ok(st, w)
     }
-  })
+  }
 }
 
 fn earliest_deadline(st: Agent) -> Option(Int) {
-  list.fold(st.waiters, None, fn(acc, w) {
+  list.fold(st.store.meta.waiters, None, fn(acc, w) {
     case acc, w.deadline {
       None, d -> d
       Some(a), Some(d) -> Some(int.min(a, d))
@@ -265,7 +284,7 @@ fn finish_drain(st: Agent) -> Agent {
   let store = st.store
   list.each(store.meta.unhandled_rejections, fn(id) {
     case rt_store.cell_get(st, Handle(id)) {
-      SPromiseData(state: PromiseRejected(reason), ..) ->
+      SPromiseData(state: PromiseRejected(reason), is_handled: False) ->
         st.hooks.report_uncaught(
           "Uncaught (in promise) " <> describe_thrown(st, reason),
         )
@@ -406,39 +425,7 @@ pub fn alloc_iter_result(
   value: JsVal,
   done done: Bool,
 ) -> #(Handle, Agent) {
-  let object_proto = st.realm.object.prototype
-  use seq <- rt_store.cell_new_with(st, 2)
-  let props =
-    prop_map.from_list([
-      #(
-        names.value,
-        types.DataProperty(
-          value: value,
-          writable: True,
-          enumerable: True,
-          configurable: True,
-          seq: seq,
-        ),
-      ),
-      #(
-        names.done,
-        types.DataProperty(
-          value: mk_bool(done),
-          writable: True,
-          enumerable: True,
-          configurable: True,
-          seq: seq + 1,
-        ),
-      ),
-    ])
-  types.SObject(
-    kind: Ordinary,
-    proto: Some(object_proto),
-    props: props,
-    symbol_props: [],
-    elements: types.NoElements,
-    extensible: True,
-  )
+  rt_store.new_iter_result(st, value, mk_bool(done))
 }
 
 fn alloc_shell(
@@ -946,21 +933,14 @@ fn to_handler(
   }
 }
 
+// one further back stays listed, as handled, until the drain or a full gc
 fn untrack_rejection(st: Agent, data: Handle) -> Agent {
-  let store = st.store
-  Agent(
-    ..st,
-    store: Store(
-      ..store,
-      meta: StoreMeta(
-        ..store.meta,
-        unhandled_rejections: list.filter(
-          store.meta.unhandled_rejections,
-          fn(r) { r != data.id },
-        ),
-      ),
-    ),
-  )
+  let meta = st.store.meta
+  case meta.unhandled_rejections {
+    [newest, ..rest] if newest == data.id ->
+      rt_store.with_meta(st, StoreMeta(..meta, unhandled_rejections: rest))
+    _ -> st
+  }
 }
 
 // §27.6.3.1 asyncgeneratorstart

@@ -1,6 +1,5 @@
 import arc/bytecode/key
 import arc/internal/unsafe
-import arc/interp/kernel
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, FnFlags}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
@@ -17,6 +16,7 @@ import arc/rt/types.{
   plain_object,
 }
 import arc/rt/val as rt_val
+import erlang_kernels
 import gleam/option.{None}
 import rt_helpers.{as_code, frame_at}
 
@@ -161,10 +161,10 @@ pub fn float_overflow_is_infinity_test() {
   assert num(g) == JNegInf
   let #(h, st) = rt_ops.pow(st, mk_int(-10), mk_int(401))
   assert num(h) == JNegInf
-  assert num(kernel.add(big, big)) == JPosInf
-  assert num(kernel.sub(mk_number(JFloat(-1.0e308)), big)) == JNegInf
-  assert num(kernel.mul(big, mk_number(JFloat(-10.0)))) == JNegInf
-  assert num(kernel.mul(mk_int(3), mk_int(4))) == JInt(12)
+  assert num(erlang_kernels.add(big, big)) == JPosInf
+  assert num(erlang_kernels.sub(mk_number(JFloat(-1.0e308)), big)) == JNegInf
+  assert num(erlang_kernels.mul(big, mk_number(JFloat(-10.0)))) == JNegInf
+  assert num(erlang_kernels.mul(mk_int(3), mk_int(4))) == JInt(12)
   assert show(st, a) == "Infinity"
 }
 

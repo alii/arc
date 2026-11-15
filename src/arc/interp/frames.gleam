@@ -1,10 +1,15 @@
 import arc/internal/tuple_array
-import arc/interp/state.{type State}
+import arc/interp/state.{
+  type Frame, Direct, Outermost, SavedCont, SavedFrame, SavedRegs, SavedThread,
+}
 import arc/rt/bytecode.{type FuncTemplate}
-import arc/rt/types.{type Agent, type FrameInfo, Agent, FrameInfo}
+import arc/rt/types.{type Agent, type FrameInfo, Agent, FrameInfo, Unlisted}
 import gleam/option
 
 pub const stack_source = "script"
+
+// more than can be pending
+const all_frames = 1_000_000
 
 pub fn frame_info_at(template: FuncTemplate, line: Int) -> FrameInfo {
   FrameInfo(name: option.unwrap(template.name, ""), script: stack_source, line:)
@@ -22,10 +27,10 @@ pub fn pop_frame_info(agent: Agent) -> Agent {
   }
 }
 
-// catch frames and call_depth up with the in-loop calls
-pub fn sync(state: State, agent: Agent, pc: Int) -> Agent {
-  let depth = state.depth
-  let line = tuple_array.element(pc + 1, state.func.lines)
+// catch frames and call_depth up with the calls threaded code made
+pub fn sync(frame: Frame, agent: Agent, pc: Int) -> Agent {
+  let depth = frame.depth
+  let line = tuple_array.element(pc, frame.func.lines)
   case depth - agent.call_depth {
     0 ->
       case agent.frames {
@@ -42,57 +47,51 @@ pub fn sync(state: State, agent: Agent, pc: Int) -> Agent {
       Agent(
         ..agent,
         call_depth: depth,
-        frames: pending_frames(agent.frames, state, line, behind),
+        frames: pending_frames(agent.frames, frame, line, behind, all_frames),
       )
   }
 }
 
-// syncs like sync, then counts the frame being entered
-pub fn sync_entering(state: State, agent: Agent, pc: Int) -> Agent {
-  let depth = state.depth
-  let line = tuple_array.element(pc + 1, state.func.lines)
-  case depth - agent.call_depth {
-    behind if behind <= 0 ->
-      Agent(
-        ..agent,
-        call_depth: depth + 1,
-        frames: set_top_line(agent.frames, line),
-      )
-    behind ->
-      Agent(
-        ..agent,
-        call_depth: depth + 1,
-        frames: pending_frames(agent.frames, state, line, behind),
-      )
-  }
-}
-
-fn set_top_line(frames: List(FrameInfo), line: Int) -> List(FrameInfo) {
+pub fn set_top_line(frames: List(FrameInfo), line: Int) -> List(FrameInfo) {
   case frames {
     [FrameInfo(line: l, ..), ..] if l == line -> frames
-    [top, ..rest] -> [FrameInfo(..top, line:), ..rest]
+    [FrameInfo(..) as top, ..rest] -> [FrameInfo(..top, line:), ..rest]
+    [Unlisted(innermost:, line: at, behind:), ..rest] ->
+      pending_frames(rest, running(innermost), at, behind, all_frames)
+      |> set_top_line(line)
     [] -> [FrameInfo("", stack_source, line)]
   }
 }
 
-fn pending_frames(
+@external(erlang, "gleam_stdlib", "identity")
+fn running(frame: types.RunningFrame) -> Frame
+
+// called by name from rt/builtins/error
+pub fn pending_frames(
   frames: List(FrameInfo),
-  state: State,
+  frame: Frame,
   line: Int,
   behind: Int,
+  wanted: Int,
 ) -> List(FrameInfo) {
-  case behind, state.call_stack {
-    0, _ -> set_top_line(frames, line)
-    _, [saved, ..] -> [
-      frame_info_at(state.func, line),
+  case behind, frame.return_to {
+    _, _ if wanted <= 0 -> []
+    _, _ if behind <= 0 -> set_top_line(frames, line)
+    _, Outermost | _, Direct -> [frame_info_at(frame.func, line), ..frames]
+    _, SavedFrame(caller:, pc:, ..)
+    | _, SavedThread(caller:, pc:, ..)
+    | _, SavedRegs(caller:, pc:, ..)
+    | _, SavedCont(caller:, pc:, ..)
+    -> [
+      frame_info_at(frame.func, line),
       ..pending_frames(
         frames,
-        saved.caller,
-        tuple_array.element(saved.pc, saved.caller.func.lines),
+        caller,
+        tuple_array.element(pc - 1, caller.func.lines),
         behind - 1,
+        wanted - 1,
       )
     ]
-    _, [] -> [frame_info_at(state.func, line), ..frames]
   }
 }
 

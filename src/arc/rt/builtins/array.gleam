@@ -1404,7 +1404,9 @@ fn species_general(
 
 fn is_foreign_array_ctor(st: Agent, ctor: Handle) -> Bool {
   ctor != st.realm.array.constructor
-  && list.any(dict.values(st.realms), fn(r) { r.array.constructor == ctor })
+  && list.any(dict.values(st.store.meta.realms), fn(r) {
+    r.array.constructor == ctor
+  })
 }
 
 fn species_construct(

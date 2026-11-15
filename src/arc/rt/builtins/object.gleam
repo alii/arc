@@ -957,7 +957,7 @@ fn from_entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(iterable) {
     KNull | KUndef -> rt_val.throw_type_error(st, cannot_convert)
     _ -> {
-      let #(obj_h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
+      let #(obj_h, st) = rt_obj.new_object(st, st.realm.shared.object_proto)
       use st, k, v <- iter_protocol.add_entries_with_sink(
         st,
         mk_object(obj_h),

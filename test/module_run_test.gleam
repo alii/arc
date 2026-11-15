@@ -13,8 +13,8 @@ import arc/rt/call.{NormalCompletion}
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, JInt, KNum, KStr, PromiseFulfilled,
-  PromisePending, PromiseRejected, Store, classify, mk_object,
+  type Agent, type JsVal, JInt, KNum, KStr, PromiseFulfilled, PromisePending,
+  PromiseRejected, classify, mk_object,
 }
 import gleam/dict
 import gleam/list
@@ -30,7 +30,7 @@ fn agent() -> Agent {
 
 fn small_gc_agent() -> Agent {
   let st = agent() |> rt_gc.collect([])
-  Agent(..st, store: Store(..st.store, gc_threshold: 64))
+  rt_gc.set_threshold(st, 64)
 }
 
 fn churning_module(tag: String) -> String {
@@ -566,7 +566,7 @@ pub fn rejected_import_promise_reports_nothing_uncaught_test() {
       types.mk_string("/x.js"),
       types.mk_undefined(),
     )
-  let st = rt_async.drain(st)
+  let st = rt_helpers.end_turn(st, [p])
   let assert Some(h) = rt_async.as_promise(st, p)
   let assert PromiseRejected(_) = rt_async.promise_data(st, h).state
 }

@@ -5,8 +5,7 @@ import arc/rt/types.{type Agent, type JsVal}
 
 // only the outermost activation can see every frame root
 pub fn maybe_collect_at_return(state: State) -> State {
-  let store = state.agent.store
-  case state.outer_depth == 0 && store.alloc_since_gc >= store.gc_threshold {
+  case state.frame.outer_depth == 0 && rt_gc.is_due(state.agent) {
     True ->
       State(
         ..state,

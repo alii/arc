@@ -12,12 +12,12 @@
 
 plain_iter_record(St, {?ITERATORRECORD_TAG, Iter, Next} = R) ->
     {plain_record, false, R,
-     native(element(?STORE_CELLS, element(?AGENT_STORE, St)), Iter, Next)};
+     native(element(?AGENT_CELLS, St), Iter, Next)};
 plain_iter_record(St, {?HANDLE_TAG, Id}) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Cells = element(?AGENT_CELLS, St),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _,
-         #{?KEY_ID(?DONE_KEY) := {<<"done">>, DoneP}, ?KEY_ID(?ITERATOR_KEY) := {<<"iterator">>, IterP}, ?KEY_ID(?NEXT_KEY) := {<<"next">>, NextP}},
+         #{?KEY_ID(?DONE_KEY) := {_, DoneP}, ?KEY_ID(?ITERATOR_KEY) := {_, IterP}, ?KEY_ID(?NEXT_KEY) := {_, NextP}},
          _, _, _}
           when element(1, DoneP) =:= ?DATAPROPERTY_TAG,
                element(1, IterP) =:= ?DATAPROPERTY_TAG,
@@ -55,7 +55,7 @@ native(_, _, _) -> native_miss.
 
 %% the store with the iterator in scope moved to Index
 -define(AT_INDEX(Index),
-        setelement(?STORE_CELLS, Store,
+        setelement(?AGENT_CELLS, St,
                    arc_rt_arena_ffi:set(
                      IterId,
                      setelement(?SOBJECT_KIND, IterCell, {Tag, Target, Index, Kind}),
@@ -64,47 +64,47 @@ native(_, _, _) -> native_miss.
 -define(ADVANCE_PAIR(Index, K, V), {pair_advanced, K, V, ?AT_INDEX(Index)}).
 
 %% steps a native iterator object in place when that observes nothing; -1 is done
-iter_step(Store, {?ITERATORRECORD_TAG, {?HANDLE_TAG, IterId}, {?HANDLE_TAG, NextId}}) ->
-    iter_step_ids(Store, element(?STORE_CELLS, Store), IterId, NextId);
-iter_step(Store, {?HANDLE_TAG, RecId}) ->
-    Cells = element(?STORE_CELLS, Store),
+iter_step(St, {?ITERATORRECORD_TAG, {?HANDLE_TAG, IterId}, {?HANDLE_TAG, NextId}}) ->
+    iter_step_ids(St, element(?AGENT_CELLS, St), IterId, NextId);
+iter_step(St, {?HANDLE_TAG, RecId}) ->
+    Cells = element(?AGENT_CELLS, St),
     case arc_rt_arena_ffi:get(RecId, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _,
-         #{?KEY_ID(?ITERATOR_KEY) := {<<"iterator">>, IP}, ?KEY_ID(?NEXT_KEY) := {<<"next">>, NP}}, _, _, _}
+         #{?KEY_ID(?ITERATOR_KEY) := {_, IP}, ?KEY_ID(?NEXT_KEY) := {_, NP}}, _, _, _}
           when element(1, IP) =:= ?DATAPROPERTY_TAG,
                element(1, NP) =:= ?DATAPROPERTY_TAG ->
             case {element(?DATAPROPERTY_VALUE, NP), element(?DATAPROPERTY_VALUE, IP)} of
                 {{?HANDLE_TAG, NextId}, {?HANDLE_TAG, IterId}} ->
-                    iter_step_ids(Store, Cells, IterId, NextId);
+                    iter_step_ids(St, Cells, IterId, NextId);
                 _ -> iter_miss
             end;
         _ -> iter_miss
     end;
 iter_step(_, _) -> iter_miss.
 
-iter_step_ids(Store, Cells, IterId, NextId) ->
+iter_step_ids(St, Cells, IterId, NextId) ->
     case arc_rt_arena_ffi:get(IterId, Cells) of
         IterCell when element(1, IterCell) =:= ?SOBJECT_TAG ->
             iter_step_with(native_token(arc_rt_arena_ffi:get(NextId, Cells)),
                            element(?SOBJECT_KIND, IterCell),
-                           Store, Cells, IterId, IterCell);
+                           St, Cells, IterId, IterCell);
         _ -> iter_miss
     end.
 
 iter_step_with(?TOKEN_GENERATOR_NEXT, {?GENERATOROBJ_TAG, DataH}, _, _, _, _) ->
     {resume_generator, DataH};
-iter_step_with(?TOKEN_ARRAY_ITER_NEXT, {?ARRAYITERATOR_TAG, _, Index, _}, Store, _, _, _)
+iter_step_with(?TOKEN_ARRAY_ITER_NEXT, {?ARRAYITERATOR_TAG, _, Index, _}, St, _, _, _)
   when Index < 0 ->
-    {advanced, true, undefined, Store};
-iter_step_with(?TOKEN_MAP_ITER_NEXT, {?MAPITERATOR_TAG, _, Index, _}, Store, _, _, _)
+    {advanced, true, undefined, St};
+iter_step_with(?TOKEN_MAP_ITER_NEXT, {?MAPITERATOR_TAG, _, Index, _}, St, _, _, _)
   when Index < 0 ->
-    {advanced, true, undefined, Store};
-iter_step_with(?TOKEN_SET_ITER_NEXT, {?SETITERATOR_TAG, _, Index, _}, Store, _, _, _)
+    {advanced, true, undefined, St};
+iter_step_with(?TOKEN_SET_ITER_NEXT, {?SETITERATOR_TAG, _, Index, _}, St, _, _, _)
   when Index < 0 ->
-    {advanced, true, undefined, Store};
+    {advanced, true, undefined, St};
 iter_step_with(?TOKEN_ARRAY_ITER_NEXT,
                {?ARRAYITERATOR_TAG = Tag, {?HANDLE_TAG, T} = Target, Index, Kind},
-               Store, Cells, IterId, IterCell) ->
+               St, Cells, IterId, IterCell) ->
     case arc_rt_arena_ffi:get(T, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when Index >= Len ->
             ?ADVANCE(-1, true, undefined);
@@ -125,7 +125,7 @@ iter_step_with(?TOKEN_ARRAY_ITER_NEXT,
     end;
 iter_step_with(?TOKEN_MAP_ITER_NEXT,
                {?MAPITERATOR_TAG = Tag, {?HANDLE_TAG, T} = Target, Index, Kind},
-               Store, Cells, IterId, IterCell) ->
+               St, Cells, IterId, IterCell) ->
     case arc_rt_arena_ffi:get(T, Cells) of
         {?SOBJECT_TAG, {?MAPOBJ_TAG, Entries}, _, _, _, _, _} ->
             case arc_ordered_entries_ffi:next_from(Entries, Index) of
@@ -133,15 +133,15 @@ iter_step_with(?TOKEN_MAP_ITER_NEXT,
                 {?SOME, {Next, _, V}} when Kind =:= ?MAPITER_VALUES ->
                     ?ADVANCE(Next, false, V);
                 {?SOME, {Next, MK, _}} when Kind =:= ?MAPITER_KEYS ->
-                    ?ADVANCE(Next, false, 'arc@rt@types':map_key_to_js(MK));
+                    ?ADVANCE(Next, false, arc_rt_val_ffi:map_key_value(MK));
                 {?SOME, {Next, MK, V}} ->
-                    ?ADVANCE_PAIR(Next, 'arc@rt@types':map_key_to_js(MK), V)
+                    ?ADVANCE_PAIR(Next, arc_rt_val_ffi:map_key_value(MK), V)
             end;
         _ -> iter_miss
     end;
 iter_step_with(?TOKEN_SET_ITER_NEXT,
                {?SETITERATOR_TAG = Tag, {?HANDLE_TAG, T} = Target, Index, Kind},
-               Store, Cells, IterId, IterCell) ->
+               St, Cells, IterId, IterCell) ->
     case arc_rt_arena_ffi:get(T, Cells) of
         {?SOBJECT_TAG, {?SETOBJ_TAG, Entries}, _, _, _, _, _} ->
             case arc_ordered_entries_ffi:next_from(Entries, Index) of
@@ -157,7 +157,7 @@ iter_step_with(_, _, _, _, _, _) -> iter_miss.
 %% unobserved for-of state {arc_iter, Target, Index, NextFn, View}; strings index by byte
 array_iter_start(St, {?HANDLE_TAG, Id} = V) ->
     Realm = element(?AGENT_REALM, St),
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Cells = element(?AGENT_CELLS, St),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, Proto, _, [], _, _} ->
             pristine(Realm, Cells, V, Proto, ?REALM_ARRAY, ?REALM_ARRAY_ITER_PROTO,
@@ -172,7 +172,7 @@ array_iter_start(St, {?HANDLE_TAG, Id} = V) ->
     end;
 array_iter_start(St, S) when ?IS_STR(S) ->
     Realm = element(?AGENT_REALM, St),
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Cells = element(?AGENT_CELLS, St),
     Proto = {?SOME, element(?BUILTINPAIR_PROTOTYPE, element(?REALM_STRING, Realm))},
     pristine(Realm, Cells, S, Proto, ?REALM_STRING, ?REALM_STRING_ITER_PROTO,
              ?TOKEN_STRING_ITER, ?TOKEN_STRING_ITER_NEXT, ?VIEW_VALUES);
@@ -187,7 +187,7 @@ pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok, View) ->
         true ->
             case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells)} of
                 {{?SOBJECT_TAG, _, _, _, Syms, _, _},
-                 {?SOBJECT_TAG, _, _, #{?KEY_ID(?NEXT_KEY) := {<<"next">>, NP}}, _, _, _}}
+                 {?SOBJECT_TAG, _, _, #{?KEY_ID(?NEXT_KEY) := {_, NP}}, _, _, _}}
                   when element(1, NP) =:= ?DATAPROPERTY_TAG ->
                     N = element(?DATAPROPERTY_VALUE, NP),
                     case lists:keyfind(?SYMBOL_ITERATOR, 1, Syms) of
@@ -206,7 +206,7 @@ pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok, View) ->
 %% the record for V.keys(), V.values() or V.entries(), when the call and
 %% GetIterator on its result observe nothing
 view_iter_start(St, {?HANDLE_TAG, Id} = V, View) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Cells = element(?AGENT_CELLS, St),
     Key = view_key(View),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {Tag, _}, Proto, Props, _, _, _} when not is_map_key(?KEY_ID(Key), Props) ->
@@ -260,7 +260,7 @@ view_pristine(Realm, Cells, V, Proto, Class, IterProto, Key, ViewTok, NextTok, V
             case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells),
                   arc_rt_arena_ffi:get(Base, Cells)} of
                 {{?SOBJECT_TAG, _, _, #{Key := MP}, _, _, _},
-                 {?SOBJECT_TAG, _, {?SOME, BaseH}, #{?KEY_ID(?NEXT_KEY) := {<<"next">>, NP}}, IterSyms, _, _},
+                 {?SOBJECT_TAG, _, {?SOME, BaseH}, #{?KEY_ID(?NEXT_KEY) := {_, NP}}, IterSyms, _, _},
                  {?SOBJECT_TAG, _, _, _, BaseSyms, _, _}}
                   when element(1, MP) =:= ?DATAPROPERTY_TAG,
                        element(1, NP) =:= ?DATAPROPERTY_TAG ->
@@ -296,8 +296,8 @@ is_array_iter({?ARC_ITER, _, _, _, _}) -> true;
 is_array_iter(_) -> false.
 
 %% holes and index props go the long way
-array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _, View} = R) ->
-    case arc_rt_arena_ffi:get(T, element(?STORE_CELLS, Store)) of
+array_iter_next(St, {?ARC_ITER, {?HANDLE_TAG, T}, I, _, View} = R) ->
+    case arc_rt_arena_ffi:get(T, element(?AGENT_CELLS, St)) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when I >= Len ->
             {iter_step, true, undefined, undefined};
         {?SOBJECT_TAG, {Tag, Entries}, _, _, _, _, _}
@@ -309,10 +309,10 @@ array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _, View} = R) ->
                 {?SOME, {Next, _, V}} when Tag =:= ?SETOBJ_TAG ->
                     {iter_pair, V, V, setelement(3, R, Next)};
                 {?SOME, {Next, MK, _}} when View =:= ?VIEW_KEYS ->
-                    {iter_step, false, 'arc@rt@types':map_key_to_js(MK),
+                    {iter_step, false, arc_rt_val_ffi:map_key_value(MK),
                      setelement(3, R, Next)};
                 {?SOME, {Next, MK, V}} ->
-                    {iter_pair, 'arc@rt@types':map_key_to_js(MK), V,
+                    {iter_pair, arc_rt_val_ffi:map_key_value(MK), V,
                      setelement(3, R, Next)}
             end;
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, _, _, _, _} when View =:= ?VIEW_KEYS ->
@@ -343,7 +343,7 @@ array_iter_next(_, {?ARC_ITER, S, Off, _, _} = R) when ?IS_STR(S) ->
 array_iter_next(_, _) -> iter_miss.
 
 for_of_next(St, {?ARC_ITER, _, _, _, _} = R) ->
-    case array_iter_next(element(?AGENT_STORE, St), R) of
+    case array_iter_next(St, R) of
         {iter_step, Done, V, R2} -> {{Done, V, R2}, St};
         {iter_pair, K, V, R2} ->
             {Pair, St2} = 'arc@rt@obj':new_array(St, [K, V]),
@@ -352,12 +352,11 @@ for_of_next(St, {?ARC_ITER, _, _, _, _} = R) ->
     end;
 for_of_next(St, undefined) -> {{true, undefined, undefined}, St};
 for_of_next(St, R) ->
-    case iter_step(element(?AGENT_STORE, St), R) of
-        {advanced, false, V, Store} -> {{false, V, R}, setelement(?AGENT_STORE, St, Store)};
-        {advanced, true, V, Store} ->
-            {{true, V, undefined}, setelement(?AGENT_STORE, St, Store)};
-        {pair_advanced, K, V, Store} ->
-            {Pair, St2} = 'arc@rt@obj':new_array(setelement(?AGENT_STORE, St, Store), [K, V]),
+    case iter_step(St, R) of
+        {advanced, false, V, St1} -> {{false, V, R}, St1};
+        {advanced, true, V, St1} -> {{true, V, undefined}, St1};
+        {pair_advanced, K, V, St1} ->
+            {Pair, St2} = 'arc@rt@obj':new_array(St1, [K, V]),
             {{false, Pair, R}, St2};
         {resume_generator, DataH} ->
             case 'arc@rt@lang':generator_step(St, R, DataH) of
@@ -377,7 +376,7 @@ array_iter_proto(St, R) ->
 
 iter_proto_ix(_, {?ARC_ITER, S, _, _, _}) when ?IS_STR(S) -> ?REALM_STRING_ITER_PROTO;
 iter_proto_ix(St, {?ARC_ITER, {?HANDLE_TAG, T}, _, _, _}) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Cells = element(?AGENT_CELLS, St),
     case element(?SOBJECT_KIND, arc_rt_arena_ffi:get(T, Cells)) of
         {?MAPOBJ_TAG, _} -> ?REALM_MAP_ITER_PROTO;
         {?SETOBJ_TAG, _} -> ?REALM_SET_ITER_PROTO;
@@ -397,7 +396,7 @@ unpack_array(St, V, N) ->
 
 %% the first N elements pushed onto Tail, when destructuring observes nothing
 unpack_array(St, {?HANDLE_TAG, Id} = V, N, Tail) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Cells = element(?AGENT_CELLS, St),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}
           when map_size(Props) =:= 0 ->
@@ -435,7 +434,7 @@ lacks_return(Cells, {?SOME, {?HANDLE_TAG, Id}}) ->
 array_spread(St, V) ->
     case array_iter_start(St, V) of
         {?ARC_ITER, {?HANDLE_TAG, T}, _, _, _} ->
-            Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+            Cells = element(?AGENT_CELLS, St),
             case arc_rt_arena_ffi:get(T, Cells) of
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}
                   when map_size(Props) =:= 0 ->

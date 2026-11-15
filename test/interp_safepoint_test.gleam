@@ -1,7 +1,7 @@
 import arc/bytecode/lexical
 import arc/internal/tuple_array
 import arc/interp/safepoint
-import arc/interp/state.{type State, SavedFrame, State}
+import arc/interp/state.{type State, Frame, Outermost, SavedFrame, State}
 import arc/rt/async as rt_async
 import arc/rt/bytecode.{
   type FuncTemplate, FnFlags, FuncTemplate, ParkedOp, SuspendedFrame,
@@ -13,7 +13,7 @@ import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, Agent, BirthSettled, BytecodeFn,
-  GenSuspendedYield, HostJob, KHandle, ResumeFrame, SGenerator, Store, classify,
+  GenSuspendedYield, HostJob, KHandle, ResumeFrame, SGenerator, classify,
   mk_object, mk_undefined, plain_object,
 }
 import gleam/option.{None, Some}
@@ -24,7 +24,7 @@ const threshold = 64
 
 fn small_agent() -> Agent {
   let st = rt_gc.collect(rt_helpers.agent(), [])
-  Agent(..st, store: Store(..st.store, gc_threshold: threshold))
+  rt_gc.set_threshold(st, threshold)
 }
 
 fn new_object(st: Agent) -> #(Handle, JsVal, Agent) {
@@ -50,7 +50,6 @@ fn empty_template() -> FuncTemplate {
     length: 0,
     local_count: 1,
     bytecode: tuple_array.from_list([]),
-    constants: tuple_array.from_list([]),
     lines: tuple_array.from_list([]),
     functions: tuple_array.from_list([]),
     env_descriptors: [],
@@ -66,6 +65,8 @@ fn empty_template() -> FuncTemplate {
     code_kind: lexical.ScriptCode,
     regs: bytecode.NoRegs,
     nested_captures: 0,
+    code: tuple_array.from_list([]),
+    id: 0,
   )
 }
 
@@ -73,20 +74,20 @@ fn root_state(st: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
   let func = empty_template()
   State(
     agent: st,
-    pc: 0,
+    pc: 1,
     stack:,
     locals: tuple_array.from_list(locals),
-    func:,
-    unit_id: 0,
-    call_stack: [],
-    outer_depth: st.call_depth,
-    depth: st.call_depth,
-    try_stack: [],
-    this: mk_undefined(),
-    new_target: mk_undefined(),
-    home_object: mk_undefined(),
-    call_args: [],
-    eval_env: None,
+    frame: Frame(
+      func:,
+      unit_id: 0,
+      return_to: Outermost,
+      outer_depth: st.call_depth,
+      depth: st.call_depth,
+      try_stack: [],
+      call_args: [],
+      eval_env: None,
+      realm: st.realm.id,
+    ),
   )
 }
 
@@ -122,16 +123,15 @@ pub fn nested_activation_never_collects_test() {
 fn with_caller_frame(state: State, held: JsVal) -> State {
   let caller =
     SavedFrame(
-      caller: state,
-      pc: 0,
+      caller: state.frame,
+      pc: 1,
       stack: [held],
       locals: state.locals,
       constructor_this: None,
     )
   State(
     ..state,
-    call_stack: [caller],
-    depth: state.depth + 1,
+    frame: Frame(..state.frame, return_to: caller, depth: state.frame.depth + 1),
     agent: Agent(..state.agent, call_depth: state.agent.call_depth + 1),
   )
 }
@@ -213,7 +213,7 @@ pub fn parked_frame_roots_its_registers_test() {
   let st = small_agent()
   let #(local_h, local, st) = new_object(st)
   let #(stacked_h, stacked, st) = new_object(st)
-  let #(this_h, this, st) = new_object(st)
+  let #(arg_h, arg, st) = new_object(st)
   let #(env_h, _, st) = new_object(st)
   let #(dead_h, _, st) = new_object(st)
   let frame =
@@ -223,11 +223,9 @@ pub fn parked_frame_roots_its_registers_test() {
       locals: tuple_array.from_list([mk_undefined(), local]),
       stack: [stacked],
       try_stack: [],
-      this:,
-      home_object: mk_undefined(),
-      eval_env: Some(env_h.id),
+      eval_env: Some(mk_object(env_h)),
       parked: ParkedOp,
-      call_args: [],
+      call_args: [arg],
       realm: st.realm.id,
       unit_id: 0,
     )
@@ -239,7 +237,7 @@ pub fn parked_frame_roots_its_registers_test() {
   let st = rt_gc.collect(st, [gen_h])
   assert rt_gc.is_live(st, local_h)
   assert rt_gc.is_live(st, stacked_h)
-  assert rt_gc.is_live(st, this_h)
+  assert rt_gc.is_live(st, arg_h)
   assert rt_gc.is_live(st, env_h)
   assert !rt_gc.is_live(st, dead_h)
   let st = rt_gc.collect(st, [])
@@ -247,13 +245,11 @@ pub fn parked_frame_roots_its_registers_test() {
   assert !rt_gc.is_live(st, gen_h)
 }
 
-pub fn closure_environment_and_constants_are_traced_test() {
+pub fn closure_environment_is_traced_test() {
   let st = small_agent()
   let #(captured_h, captured, st) = new_object(st)
-  let #(pooled_h, pooled, st) = new_object(st)
   let #(dead_h, _, st) = new_object(st)
-  let template =
-    FuncTemplate(..empty_template(), constants: tuple_array.from_list([pooled]))
+  let template = empty_template()
   let flags =
     FnFlags(
       is_constructor: False,
@@ -285,6 +281,5 @@ pub fn closure_environment_and_constants_are_traced_test() {
   let st = rt_lang.global_set(st, <<"f">>, mk_object(fn_h))
   let st = rt_gc.collect(st, [])
   assert rt_gc.is_live(st, captured_h)
-  assert rt_gc.is_live(st, pooled_h)
   assert !rt_gc.is_live(st, dead_h)
 }

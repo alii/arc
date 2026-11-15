@@ -66,10 +66,8 @@ pub fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
 
   run.apply_js_main(st, mod)
 
-  let store_before = st.store
   let #(_v, st_after) = run.apply_js_main(st, mod)
-  let store_after = st_after.store
-  let cells = store_after.alloc_since_gc - store_before.alloc_since_gc
+  let cells = st_after.next_id - st.next_id
 
   let t0 = monotonic_time(Microsecond)
   repeat(runs, fn() { run.apply_js_main(st, mod) })
@@ -200,10 +198,8 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
 
   run.apply_js_main(st, mod)
 
-  let store_before = st.store
   let #(_v, st_after) = run.apply_js_main(st, mod)
-  let store_after = st_after.store
-  let cells = store_after.alloc_since_gc - store_before.alloc_since_gc
+  let cells = st_after.next_id - st.next_id
 
   let t0 = monotonic_time(Microsecond)
   repeat(runs, fn() { run.apply_js_main(st, mod) })
@@ -370,12 +366,11 @@ pub fn microbench() {
   trace_reset()
   let #(mod, st) = compile_and_load(adder_js, "arc_prof_micro_adder")
   let #(_v, st_adder) = run.apply_js_main(st, mod)
-  let adder_store = st_adder.store
   // inner fn is last cell, captured x is next-3
   let add5_h =
-    aot_harness.to_dynamic(#(atom.create("handle"), adder_store.next_id - 1))
+    aot_harness.to_dynamic(#(atom.create("handle"), st_adder.next_id - 1))
   let x_h =
-    aot_harness.to_dynamic(#(atom.create("handle"), adder_store.next_id - 3))
+    aot_harness.to_dynamic(#(atom.create("handle"), st_adder.next_id - 3))
   micro(
     "direct_callee (FFI direct)",
     "direct_callee_ffi",
@@ -388,9 +383,7 @@ pub fn microbench() {
 
   let #(mod2, st2) = compile_and_load(obj_js, "arc_prof_micro_obj")
   let #(_v2, st_obj) = run.apply_js_main(st2, mod2)
-  let obj_store = st_obj.store
-  let o_h =
-    aot_harness.to_dynamic(#(atom.create("handle"), obj_store.next_id - 1))
+  let o_h = aot_harness.to_dynamic(#(atom.create("handle"), st_obj.next_id - 1))
   let key =
     aot_harness.to_dynamic(#(
       atom.create("string_key"),

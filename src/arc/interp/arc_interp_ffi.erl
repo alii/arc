@@ -1,11 +1,11 @@
 %% interpreter kernels; exports may answer miss when anything observable is needed
 -module(arc_interp_ffi).
--export([for_in_list/1, for_in_next/1,
-         type_of/2,
-         box_get/2, cell_of/2, list_from_array_like/2, instance_of/4,
-         is_object/1, is_string/1]).
+-export([for_in_list/1,
+         type_of/2, type_name/1,
+         box_get/2, cell_of/2, list_from_array_like/2, instance_of/4]).
 
 -include("../rt/arc_rt_layout.hrl").
+-include("../rt/arc_rt_arena.hrl").
 
 %% §13.5.3 primitives only, objects miss
 type_of(undefined) -> <<"undefined">>;
@@ -20,9 +20,20 @@ type_of({js_sym, _}) -> <<"symbol">>;
 type_of(js_tdz) -> <<"undefined">>;
 type_of(_) -> miss.
 
+%% this module's own copy of a string typeof can give, or the string as it came
+type_name(<<"undefined">>) -> <<"undefined">>;
+type_name(<<"object">>) -> <<"object">>;
+type_name(<<"boolean">>) -> <<"boolean">>;
+type_name(<<"number">>) -> <<"number">>;
+type_name(<<"string">>) -> <<"string">>;
+type_name(<<"bigint">>) -> <<"bigint">>;
+type_name(<<"symbol">>) -> <<"symbol">>;
+type_name(<<"function">>) -> <<"function">>;
+type_name(Other) -> Other.
+
 %% proxy misses, §10.5.14
-type_of(Store, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
+type_of(St, {?HANDLE_TAG, Id}) ->
+    case arc_rt_arena_ffi:get(Id, element(?AGENT_CELLS, St)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case kind_tag(element(?SOBJECT_KIND, Cell)) of
                 ?COMPILEDFN_TAG -> <<"function">>;
@@ -35,13 +46,13 @@ type_of(Store, {?HANDLE_TAG, Id}) ->
         Cell when element(1, Cell) =:= ?SSHAPEDOBJECT_TAG -> <<"object">>;
         _ -> miss
     end;
-type_of(_Store, V) -> type_of(V).
+type_of(_St, V) -> type_of(V).
 
 kind_tag(Kind) when is_atom(Kind) -> Kind;
 kind_tag(Kind) -> element(1, Kind).
 
 cell_of(St, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+    case arena_get(Id, element(?AGENT_CELLS, St)) of
         ?STORE_FREE_CELL -> miss;
         Cell -> Cell
     end;
@@ -49,7 +60,7 @@ cell_of(_, _) -> miss.
 
 %% §7.3.20 for plain arrays and unmapped arguments, holes miss
 list_from_array_like(St, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+    case arc_rt_arena_ffi:get(Id, element(?AGENT_CELLS, St)) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, {?ELEMS_DENSE, A}, _}
           when map_size(Props) =:= 0 ->
             dense_list(A, Len);
@@ -57,7 +68,7 @@ list_from_array_like(St, {?HANDLE_TAG, Id}) ->
          {?ELEMS_DENSE, A}, _}
           when map_size(Props) =:= 2, (Mapped =:= ?NONE orelse Mapped =:= {?SOME, []}) ->
             case Props of
-                #{?KEY_ID(?LENGTH_KEY) := {<<"length">>, Prop}}
+                #{?KEY_ID(?LENGTH_KEY) := {_, Prop}}
                   when element(1, Prop) =:= ?DATAPROPERTY_TAG,
                        is_integer(element(?DATAPROPERTY_VALUE, Prop)),
                        is_map_key(?KEY_ID(?CALLEE_KEY), Props) ->
@@ -85,14 +96,9 @@ hole_free(L) ->
         false -> L
     end.
 
-is_object({?HANDLE_TAG, _}) -> true;
-is_object(_) -> false.
-
-is_string(V) -> ?IS_STR(V).
-
 %% tdz box misses
 box_get(St, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+    case arena_get(Id, element(?AGENT_CELLS, St)) of
         {?SBOX_TAG, js_tdz} -> miss;
         {?SBOX_TAG, V} -> V;
         _ -> miss
@@ -102,7 +108,7 @@ box_get(_, _) -> miss.
 %% §13.10.2 + §7.3.22 when @@hasInstance is provably the intrinsic; proxies miss
 instance_of(_, js_tdz, _, _) -> miss;
 instance_of(St, V, {?HANDLE_TAG, CId}, Sym) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Cells = element(?AGENT_CELLS, St),
     {?HANDLE_TAG, FP} =
         element(?BUILTINPAIR_PROTOTYPE,
                 element(?REALM_FUNCTION, element(?AGENT_REALM, St))),
@@ -119,7 +125,7 @@ instance_of(St, V, {?HANDLE_TAG, CId}, Sym) ->
                     case V of
                         {?HANDLE_TAG, VId} ->
                             case element(?SOBJECT_PROPS, Cell) of
-                                #{?KEY_ID(?PROTOTYPE_KEY) := {<<"prototype">>, Prop}}
+                                #{?KEY_ID(?PROTOTYPE_KEY) := {_, Prop}}
                                   when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                                     case element(?DATAPROPERTY_VALUE, Prop) of
                                         {?HANDLE_TAG, PId} ->
@@ -183,6 +189,3 @@ chain_reaches(Cells, VId, PId, Fuel) ->
     end.
 
 for_in_list(Keys) -> {for_in, Keys}.
-
-for_in_next({for_in, [K | Rest]}) -> {for_in_key, K, {for_in, Rest}};
-for_in_next({for_in, []}) -> for_in_end.

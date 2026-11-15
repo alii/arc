@@ -221,7 +221,7 @@ type BufferInfo {
 }
 
 type LiveData {
-  StoreData(storage: BufferStorage, bits: BitArray)
+  StoreData(storage: BufferStorage)
   OwnerData(owner: SabOwner)
 }
 
@@ -234,14 +234,12 @@ fn live_buffer(storage: BufferStorage) -> Option(BufferInfo) {
         byte_size: buffer.storage_byte_size(storage),
         immutable: False,
       ))
-    _ -> {
-      use bits <- option.map(buffer.storage_bits(storage))
-      BufferInfo(
-        data: StoreData(storage:, bits:),
+    _ ->
+      Some(BufferInfo(
+        data: StoreData(storage:),
         byte_size: buffer.storage_byte_size(storage),
         immutable: buffer.storage_is_immutable(storage),
-      )
-    }
+      ))
   }
 }
 
@@ -296,7 +294,12 @@ fn element_bytes(info: AtomicsTarget, v: Int) -> BitArray {
 fn read_element(buf: BufferInfo, info: AtomicsTarget, idx: Int) -> Int {
   let off = element_offset(info, idx)
   case buf.data {
-    StoreData(bits:, ..) -> get_int(bits, off, info.elem)
+    StoreData(storage:) -> {
+      let assert Some(bits) =
+        buffer.storage_read_region(storage, off, elem_size(info))
+        as "atomics: the index was checked against the buffer"
+      get_int(bits, 0, info.elem)
+    }
     OwnerData(owner:) ->
       get_int(sab.read_part(owner, off, elem_size(info)), 0, info.elem)
   }
@@ -309,20 +312,10 @@ fn write_element(
   idx: Int,
   v: Int,
 ) -> Agent {
-  let size = elem_size(info)
   let off = element_offset(info, idx)
   case buf.data {
-    StoreData(storage:, bits:) ->
-      buffer.set_storage(
-        st,
-        info.buffer,
-        buffer.storage_store_region(
-          storage,
-          set_int(bits, off, info.elem, v),
-          off,
-          size,
-        ),
-      )
+    StoreData(..) ->
+      buffer.write_region(st, info.buffer, off, element_bytes(info, v))
     OwnerData(owner:) -> {
       let Nil = sab.write(owner, off, element_bytes(info, v))
       st

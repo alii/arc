@@ -1,4 +1,4 @@
-import arc/bytecode/binop.{AddOp, PureOp}
+import arc/bytecode/binop
 import arc/bytecode/key
 import arc/bytecode/lazy.{LazyFunction}
 import arc/bytecode/lexical
@@ -40,7 +40,6 @@ pub type CompiledChild {
     arity: Int,
     length: Int,
     code: List(IrOp),
-    constants: List(JsVal),
     functions: List(CompiledChild),
     is_strict: Bool,
     is_arrow: Bool,
@@ -66,7 +65,6 @@ pub type LazyChild {
 pub type EmitOutput {
   EmitOutput(
     code: List(IrOp),
-    constants: List(JsVal),
     children: List(CompiledChild),
     is_strict: Bool,
     // must replace the caller's tree: scratch slots bumped local_count
@@ -98,9 +96,6 @@ type LoopIter {
 type Emitter {
   Emitter(
     code: List(IrOp),
-    constants_map: Dict(JsVal, Int),
-    constants_list: List(JsVal),
-    next_const: Int,
     next_label: Int,
     frame_stack: List(Frame),
     functions: List(CompiledChild),
@@ -293,10 +288,9 @@ pub fn module(
     True -> emit_module_using_top(e, stmts)
   })
 
-  let Finished(code:, constants:, children:) = finish(e)
+  let Finished(code:, children:) = finish(e)
   Ok(EmitOutput(
     code:,
-    constants:,
     children:,
     is_strict: True,
     tree: e.scope_tree,
@@ -550,7 +544,7 @@ fn emit_jump_unless_strict_neq(
   e
   |> emit_scratch_get(slot)
   |> push_const(constant)
-  |> emit_ir(IrBinOp(PureOp(binop.Equality(binop.StrictNotEq))))
+  |> emit_ir(IrBinOp(binop.StrictNotEq))
   |> emit_ir(IrJumpIfFalse(target))
 }
 
@@ -876,11 +870,10 @@ fn emit_top_level_body(
   use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   use e <- result.try(emit_stmts_tail(e, stmts))
-  let Finished(code:, constants:, children:) = finish(e)
+  let Finished(code:, children:) = finish(e)
   Ok(
     EmitOutput(
       code:,
-      constants:,
       children:,
       is_strict: script_strict,
       tree: e.scope_tree,
@@ -892,9 +885,6 @@ fn emit_top_level_body(
 fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
   Emitter(
     code: [],
-    constants_map: dict.new(),
-    constants_list: [],
-    next_const: 0,
     next_label: 0,
     frame_stack: [],
     functions: [],
@@ -1629,26 +1619,8 @@ fn acquire_ref_slot(e: Emitter) -> #(Int, Emitter) {
   }
 }
 
-fn add_constant(e: Emitter, val: JsVal) -> #(Int, Emitter) {
-  case dict.get(e.constants_map, val) {
-    Ok(idx) -> #(idx, e)
-    Error(Nil) -> {
-      let idx = e.next_const
-      let e =
-        Emitter(
-          ..e,
-          constants_map: dict.insert(e.constants_map, val, idx),
-          constants_list: [val, ..e.constants_list],
-          next_const: idx + 1,
-        )
-      #(idx, e)
-    }
-  }
-}
-
 fn push_const(e: Emitter, val: JsVal) -> Emitter {
-  let #(idx, e) = add_constant(e, val)
-  emit_op(e, opcode.PushConst(idx))
+  emit_op(e, opcode.PushConst(val))
 }
 
 // #x names use brand-checked private opcodes; [obj, ..] -> [val, ..]
@@ -2120,19 +2092,11 @@ fn emit_field_init_call(e: Emitter) -> Emitter {
 }
 
 type Finished {
-  Finished(
-    code: List(IrOp),
-    constants: List(JsVal),
-    children: List(CompiledChild),
-  )
+  Finished(code: List(IrOp), children: List(CompiledChild))
 }
 
 fn finish(e: Emitter) -> Finished {
-  Finished(
-    code: list.reverse(e.code),
-    constants: list.reverse(e.constants_list),
-    children: list.reverse(e.functions),
-  )
+  Finished(code: list.reverse(e.code), children: list.reverse(e.functions))
 }
 
 fn emit_stmt_tail(
@@ -2579,7 +2543,6 @@ fn compile_function_body(
           arity: 0,
           length: 0,
           code: [],
-          constants: [],
           functions: [],
           // its body may be gone, so its scope answers for its directive
           is_strict: parent.strict
@@ -2805,7 +2768,7 @@ fn compile_function_now(
   let e = push_const(e, mk_undefined())
   let e = emit_op(e, opcode.Return)
   let e = splice_arguments_setup(e, layout, pre_args_code)
-  let Finished(code:, constants:, children:) = finish(e)
+  let Finished(code:, children:) = finish(e)
 
   let child =
     CompiledChild(
@@ -2814,7 +2777,6 @@ fn compile_function_now(
       arity: list.length(layout.fixed),
       length: expected_argument_count(layout.fixed),
       code:,
-      constants:,
       functions: children,
       is_strict: child_strict,
       is_arrow:,
@@ -3469,7 +3431,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.SequenceExpression(_, exprs) -> emit_sequence(e, exprs)
 
     // leading static-key data props go into one NewObjectWith
-    ast.ObjectExpression(span, properties) -> {
+    ast.ObjectExpression(_, properties) -> {
       let LiteralHead(keys:, members:, rest:) =
         literal_head(properties, [], [], set.new())
       case members {
@@ -3487,7 +3449,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           case rest, count <= limits.max_shape_slots {
             [], True -> {
               let names = list.map(members, fn(m) { key.named(m.name) })
-              Ok(emit_op(e, opcode.NewObjectShaped(names, count, span.start)))
+              Ok(emit_op(e, opcode.NewObjectShaped(names, count)))
             }
             // what follows would only take the shape apart again
             _, _ ->
@@ -3992,12 +3954,15 @@ fn emit_template_literal(
       use e <- result.map(emit_expr(e, expr))
       let e = emit_op(e, opcode.ToStringVal)
       let e = case started {
-        True -> emit_ir(e, IrBinOp(AddOp))
+        True -> emit_ir(e, IrBinOp(binop.Add))
         False -> e
       }
       case quasi {
         "" -> #(True, e)
-        _ -> #(True, emit_ir(push_const(e, mk_string(quasi)), IrBinOp(AddOp)))
+        _ -> #(
+          True,
+          emit_ir(push_const(e, mk_string(quasi)), IrBinOp(binop.Add)),
+        )
       }
     }),
   )
@@ -4044,7 +4009,7 @@ fn emit_switch(
         Some(SwitchTest(expr:, found:)) -> {
           let e = emit_op(e, opcode.Dup)
           use e <- result.map(emit_expr(e, expr))
-          let e = emit_ir(e, IrBinOp(PureOp(binop.Equality(binop.StrictEq))))
+          let e = emit_ir(e, IrBinOp(binop.StrictEq))
           emit_ir(e, IrJumpIfTrue(found))
         }
         None -> Ok(e)
@@ -4849,7 +4814,7 @@ fn emit_default_if_undefined(
   let #(has_val, e) = fresh_label(e)
   let e = emit_op(e, opcode.Dup)
   let e = push_const(e, mk_undefined())
-  let e = emit_ir(e, IrBinOp(PureOp(binop.Equality(binop.StrictEq))))
+  let e = emit_ir(e, IrBinOp(binop.StrictEq))
   let e = emit_ir(e, IrJumpIfFalse(has_val))
   let e = emit_op(e, opcode.Pop)
   use e <- result.map(case target_name {

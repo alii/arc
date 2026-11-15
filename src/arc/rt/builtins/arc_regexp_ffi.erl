@@ -1,5 +1,6 @@
 -module(arc_regexp_ffi).
--export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4]).
+-export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4,
+         regexp_exec_short/4, can_trust/1, trusting/1]).
 -export([pair_trail/1, has_flag/2, take_hex/1]).
 
 has_flag(<<C, _/binary>>, <<C>>) -> true;
@@ -35,7 +36,7 @@ get_compiled(Pattern, Flags) ->
     Translated = iolist_to_binary([leading_star_prefix(Pattern, NL) | Body]),
     case re:compile(Translated, Opts) of
         {ok, MP} ->
-            {ok, {MP, GroupCount, Names}};
+            {ok, {MP, GroupCount, Names, arc_regexp_short_ffi:compile(Pattern, Flags)}};
         {error, Reason} ->
             {error, {pattern_compile_failed, compile_reason(Reason)}}
     end.
@@ -478,7 +479,7 @@ pair_trail(_) -> none.
 regexp_compile(Pattern, Flags) ->
     get_compiled(Pattern, Flags).
 
-is_compiled({ok, {_MP, _GroupCount, _Names}}) -> true;
+is_compiled({ok, {_MP, _GroupCount, _Names, _Short}}) -> true;
 is_compiled({error, {pattern_compile_failed, _Reason}}) -> true;
 is_compiled(_) -> false.
 
@@ -487,6 +488,20 @@ regexp_exec_compiled(Compiled, String, Offset, Sticky) ->
         {ok, Offset1} -> run_compiled(Compiled, String, Offset1, Sticky);
         {error, _} = Err -> Err
     end.
+
+%% the same answer in some, or none when it is pcre's to give
+regexp_exec_short({ok, {_, GroupCount, Names, Short}}, String, Offset, Sticky)
+  when Short =/= none ->
+    case check_offset(String, Offset) of
+        {ok, Offset1} ->
+            case arc_regexp_short_ffi:run(Short, String, Offset1, Sticky, GroupCount) of
+                {match, [Whole | Groups]} -> {some, {ok, {Whole, Groups, GroupCount, Names}}};
+                nomatch -> {some, {error, no_match}};
+                give_up -> none
+            end;
+        {error, _} = Err -> {some, Err}
+    end;
+regexp_exec_short(_, _, _, _) -> none.
 
 %% byte offsets. a mid-char offset is no_match, never badarg
 check_offset(String, Offset) when Offset < 0 ->
@@ -503,18 +518,40 @@ check_offset(_String, Offset) ->
 
 run_compiled({error, {pattern_compile_failed, _Reason}} = Err, _S, _O, _St) ->
     Err;
-run_compiled({ok, {MP, GroupCount, Names}}, String, Offset, Sticky) ->
+run_compiled({Subject, {MP, GroupCount, Names, _}}, String, Offset, Sticky) ->
     Opts0 = [{offset, Offset}, {capture, all, index}],
     Opts = case Sticky of
                true -> [anchored | Opts0];
                false -> Opts0
            end,
-    case re:run(String, MP, Opts) of
+    Run = case Subject of
+        ok -> re:run(String, MP, Opts);
+        trusted -> re:internal_run(String, MP, Opts, false)
+    end,
+    case Run of
         {match, [Whole | Groups]} ->
             Padded = pad_captures(Groups, GroupCount),
             {ok, {Whole, Padded, GroupCount, Names}};
         nomatch -> {error, no_match}
     end.
+
+%% pcre checks the subject from the offset on at every run. this is for a
+%% subject can_trust/1 passed: internal_run/4 is how re's own global loop says
+%% the check has been made
+trusting({ok, Compiled}) -> {trusted, Compiled};
+trusting(Failed) -> Failed.
+
+%% internal_run/4 is not documented, so only in the release it was read in
+can_trust(Subject) -> erlang:system_info(otp_release) =:= "29" andalso is_utf8(Subject).
+
+-define(ASCII_HI_MASK, 16#80808080808080).
+is_utf8(<<W1:56, W2:56, W3:56, W4:56, R/binary>>)
+  when (W1 bor W2 bor W3 bor W4) band ?ASCII_HI_MASK =:= 0 ->
+    is_utf8(R);
+is_utf8(<<W:56, R/binary>>) when W band ?ASCII_HI_MASK =:= 0 -> is_utf8(R);
+is_utf8(<<_/utf8, R/binary>>) -> is_utf8(R);
+is_utf8(<<>>) -> true;
+is_utf8(_) -> false.
 
 pad_captures(Caps, N) when length(Caps) >= N -> Caps;
 pad_captures(Caps, N) -> Caps ++ lists:duplicate(N - length(Caps), {-1, 0}).

@@ -19,7 +19,8 @@ fn render(template: FuncTemplate, label: String, path: String) -> List(String) {
   let width = pc_width(list.length(ops))
 
   let #(_, code) =
-    list.index_fold(ops, #(0, []), fn(acc, op, pc) {
+    list.index_fold(ops, #(0, []), fn(acc, op, index) {
+      let pc = index + 1
       let #(prev_line, rows) = acc
       let row = format_op(pc, width, op, template)
       case bytecode.line_at(template, pc) {
@@ -59,10 +60,10 @@ fn header(template: FuncTemplate, label: String, path: String) -> String {
 fn regs(template: FuncTemplate) -> String {
   case template.regs {
     bytecode.NoRegs -> ""
-    bytecode.Regs(a, b) ->
+    bytecode.Regs(a, b, c, d) ->
       " [regs "
       <> string.join(
-        list.filter([a, b], fn(r) { r != bytecode.no_register })
+        list.filter([a, b, c, d], fn(r) { r != bytecode.no_register })
           |> list.map(int.to_string),
         " ",
       )
@@ -108,15 +109,13 @@ fn format_op(pc: Int, width: Int, op: Op, template: FuncTemplate) -> String {
 
 fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
   case op {
-    opcode.PushConst(index) ->
-      Some(render_entry(index, template.constants, constant_to_string))
-    opcode.CmpLocalConstJump(_, index, _, _, _)
-    | opcode.IncLocalCmpConstJump(_, _, index, _, _, _)
-    | opcode.CmpConstJump(index, _, _, _)
-    | opcode.BinOpConst(_, index)
-    | opcode.BinOpConstPut(_, index, _)
-    | opcode.BinOpLocalConst(_, _, index) ->
-      Some(render_entry(index, template.constants, constant_to_string))
+    opcode.PushConst(value)
+    | opcode.CmpLocalConstJump(_, value, _, _, _)
+    | opcode.IncLocalCmpConstJump(_, _, value, _, _, _)
+    | opcode.CmpConstJump(value, _, _, _)
+    | opcode.BinOpConst(_, value)
+    | opcode.BinOpConstPut(_, value, _)
+    | opcode.BinOpLocalConst(_, _, value) -> Some(constant_to_string(value))
     opcode.MakeClosure(index) ->
       Some(render_entry(index, template.functions, child_label))
     _ -> None

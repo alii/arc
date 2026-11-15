@@ -11,8 +11,8 @@ import arc/rt/builtins/regexp.{
   type MatchRanges, MatchArray, NoMatch, OffsetOutOfRange, PatternCompileFailed,
   RangesHit, RangesMiss, builtin_exec_mode, builtin_exec_ranges,
   capture_to_value, groups_object, has_flag, is_handle, pristine_exec,
-  read_flags, regexp_exec_compiled, require_object, set_last_index,
-  species_constructor, update_legacy_statics,
+  read_flags, require_object, run_matcher, set_last_index, species_constructor,
+  update_legacy_statics,
 }
 import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
@@ -81,8 +81,8 @@ type GlobalHit {
 // §22.2.7.2 iterated with the global flag until the first miss
 fn global_hits(st: Agent, h: Handle, s: String) -> #(List(GlobalHit), Agent) {
   let #(flags, compiled, st) = regexp.matcher(st, h)
-  let rev =
-    scan_hits(compiled, s, sticky: has_flag(flags, "y"), from: 0, acc: [])
+  let #(rev, st) =
+    scan_hits(st, compiled, s, sticky: has_flag(flags, "y"), from: 0, acc: [])
   let st = case rev {
     [GlobalHit(start:, length:, groups:, ..), ..] ->
       update_legacy_statics(st, s, #(start, length), groups)
@@ -93,22 +93,26 @@ fn global_hits(st: Agent, h: Handle, s: String) -> #(List(GlobalHit), Agent) {
 }
 
 fn scan_hits(
+  st: Agent,
   compiled: types.CompiledRegExp,
   s: String,
   sticky sticky: Bool,
   from from: Int,
   acc acc: List(GlobalHit),
-) -> List(GlobalHit) {
-  case regexp_exec_compiled(compiled, s, from, sticky) {
-    Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) ->
-      acc
+) -> #(List(GlobalHit), Agent) {
+  let #(result, st) = run_matcher(st, compiled, s, from, sticky)
+  case result {
+    Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> #(
+      acc,
+      st,
+    )
     Ok(#(#(ms, ml), groups, _gc, names)) -> {
       let next = case ml {
         0 -> bytes.next_char_boundary(s, ms)
         _ -> ms + ml
       }
       let hit = GlobalHit(start: ms, length: ml, groups:, names:)
-      scan_hits(compiled, s, sticky:, from: next, acc: [hit, ..acc])
+      scan_hits(st, compiled, s, sticky:, from: next, acc: [hit, ..acc])
     }
   }
 }
@@ -608,7 +612,8 @@ fn split_pristine(
     )
   }
   use <- bool.lazy_guard(q >= size, fn() { rest(st) })
-  case regexp_exec_compiled(compiled, s, q, sticky: False) {
+  let #(result, st) = run_matcher(st, compiled, s, q, sticky: False)
+  case result {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) ->
       rest(st)
     // the spec never probes at size itself, so a match there is a miss

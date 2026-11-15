@@ -20,6 +20,9 @@ pub const all_lexical_refs = [
 
 pub type LexicalSlots {
   OwnedLexicalSlots(base: Int)
+  // what a finished template keeps of its owned slots when its code reads
+  // none of them, or only this
+  TrimmedLexicalSlots(base: Int, keeps_this: Bool)
   CapturedLexicalSlots(
     this: Option(Int),
     active_func: Option(Int),
@@ -48,6 +51,11 @@ pub fn slot_of(slots: LexicalSlots, ref: LexicalRef) -> Option(Int) {
   case slots {
     NoLexicalSlots -> None
     OwnedLexicalSlots(base) -> Some(base + ref_offset(ref))
+    TrimmedLexicalSlots(base:, keeps_this:) ->
+      case ref, keeps_this {
+        ThisRef, True -> Some(base)
+        _, _ -> None
+      }
     CapturedLexicalSlots(this:, active_func:, home_object:, new_target:) ->
       case ref {
         ThisRef -> this
@@ -62,6 +70,8 @@ pub fn map_slots(slots: LexicalSlots, f: fn(Int) -> Int) -> LexicalSlots {
   case slots {
     NoLexicalSlots -> NoLexicalSlots
     OwnedLexicalSlots(base) -> OwnedLexicalSlots(f(base))
+    TrimmedLexicalSlots(base:, keeps_this:) ->
+      TrimmedLexicalSlots(base: f(base), keeps_this:)
     CapturedLexicalSlots(this:, active_func:, home_object:, new_target:) ->
       CapturedLexicalSlots(
         this: option.map(this, f),
@@ -69,6 +79,17 @@ pub fn map_slots(slots: LexicalSlots, f: fn(Int) -> Int) -> LexicalSlots {
         home_object: option.map(home_object, f),
         new_target: option.map(new_target, f),
       )
+  }
+}
+
+/// where a slot went once the frame was trimmed
+pub fn trimmed_slot(slots: LexicalSlots, slot: Int) -> Int {
+  case slots {
+    TrimmedLexicalSlots(base:, keeps_this: True) if slot > base ->
+      slot - owned_lexical_slot_count + 1
+    TrimmedLexicalSlots(base:, keeps_this: False) if slot > base ->
+      slot - owned_lexical_slot_count
+    _ -> slot
   }
 }
 

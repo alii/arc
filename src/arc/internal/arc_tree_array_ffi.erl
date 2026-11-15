@@ -3,7 +3,7 @@
 %% trie invariant: every leaf below size except the hot one is in the trie
 -module(arc_tree_array_ffi).
 -compile({no_auto_import, [size/1]}).
--export([new/0, from_list/1, get_or_hole/2, get/2, set/3, overwrite/3, size/1, resize/2,
+-export([new/0, from_list/1, trie_from_list/1, get_or_hole/2, get/2, set/3, overwrite/3, size/1, resize/2,
          reset/2, sparse_fold/3, to_list/1, dense_list/2, append_list/2,
          range_list/3]).
 
@@ -23,6 +23,13 @@ new() -> {}.
 from_list(L) ->
     case length(L) of
         N when N =< ?FLAT_MAX -> list_to_tuple(L);
+        N -> build(L, N)
+    end.
+
+%% for a list whose slots are written far more often than it is read whole
+trie_from_list(L) ->
+    case length(L) of
+        N when N =< ?FANOUT -> list_to_tuple(L);
         N -> build(L, N)
     end.
 

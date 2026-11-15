@@ -6,6 +6,9 @@
 
 -include("../arc_rt_layout.hrl").
 
+-define(ROUNDS(X),
+        is_float(X), X < 1.0e15, X > -1.0e15, (X >= 1.0 orelse X =< -1.0)).
+
 %% sends plain number args straight to the kernels, otherwise returns miss
 math_kernel(math_floor, [X | _]) -> math_floor(X);
 math_kernel(math_abs, [X | _]) -> math_abs(X);
@@ -16,6 +19,22 @@ math_kernel(math_min, [A, B]) -> math_min(A, B);
 math_kernel(math_ceil, [X | _]) when is_integer(X) -> X;
 math_kernel(math_round, [X | _]) when is_integer(X) -> X;
 math_kernel(math_trunc, [X | _]) when is_integer(X) -> X;
+%% away from zero, where the answer could be -0, and from where floats are whole
+math_kernel(math_ceil, [X | _]) when ?ROUNDS(X) -> ceil(X);
+math_kernel(math_trunc, [X | _]) when ?ROUNDS(X) -> trunc(X);
+math_kernel(math_round, [X | _]) when ?ROUNDS(X) ->
+    Below = floor(X),
+    if X - Below >= 0.5 -> Below + 1;
+       true -> Below
+    end;
+math_kernel(math_sin, [X | _]) when is_number(X) -> math:sin(X);
+math_kernel(math_cos, [X | _]) when is_number(X) -> math:cos(X);
+math_kernel(math_log, [X | _]) when is_number(X), X > 0 -> math:log(X);
+math_kernel(math_imul, [A, B | _]) when is_integer(A), is_integer(B) ->
+    %% in halves, so as not to make a bignum
+    Low = (A band 16#FFFF) * (B band 16#FFFFFFFF),
+    High = (((A bsr 16) band 16#FFFF) * (B band 16#FFFF)) band 16#FFFF,
+    ((Low + (High bsl 16) + 16#80000000) band 16#FFFFFFFF) - 16#80000000;
 math_kernel(_, _) -> miss.
 
 exp_total(X) ->

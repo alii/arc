@@ -4,7 +4,7 @@ import arc/compiler.{type ExportSeed}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/entry
 import arc/interp/safepoint
-import arc/interp/state.{type State, State}
+import arc/interp/state.{type State, Frame, Outermost, State}
 import arc/module/graph
 import arc/module/linkable
 import arc/module/loader.{type ModuleSource}
@@ -306,7 +306,7 @@ fn compile_source_module(
     })
   CompiledModule(
     specifier: resolved,
-    template: body.template,
+    template: bytecode.shared(body.template),
     import_bindings: module_summary.imports,
     export_entries: module_summary.exports,
     export_names: body.export_names,
@@ -624,6 +624,7 @@ pub fn evaluate_bundle(
   bundle: ModuleBundle,
   drain: Drain,
 ) -> #(Result(EvaluatedBundle, ModuleError), Agent) {
+  use <- rt_store.with_room
   case link_for_evaluation(st, bundle) {
     #(Error(err), st) -> #(Error(EvaluationError(err)), st)
     #(Ok(linked_bundle), st) -> evaluate_linked(st, linked_bundle, drain)
@@ -818,20 +819,20 @@ fn module_activation(
 ) -> State {
   State(
     agent: st,
-    pc: 0,
+    pc: 1,
     stack: [],
     locals: module_locals(template, seeds),
-    func: template,
-    unit_id:,
-    call_stack: [],
-    outer_depth: st.call_depth,
-    depth: st.call_depth,
-    try_stack: [],
-    this: mk_undefined(),
-    new_target: mk_undefined(),
-    home_object: mk_undefined(),
-    call_args: [],
-    eval_env: None,
+    frame: Frame(
+      func: template,
+      unit_id:,
+      return_to: Outermost,
+      outer_depth: st.call_depth,
+      depth: st.call_depth,
+      try_stack: [],
+      call_args: [],
+      eval_env: None,
+      realm: st.realm.id,
+    ),
   )
 }
 

@@ -9,27 +9,30 @@ import arc/bytecode/opcode.{
   IrJumpIfNullish, IrJumpIfTrue, IrJumpIfTrueOrPop, IrJumpUndefinedIfNullish,
   IrLabel, IrLine, IrPushTry, IrPutField, IrUnpackArray, IrWithDeleteVar,
   IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis, IrWithMakeRef,
-  IrWithPutRefValue, IrWithPutVar, Pc,
+  IrWithPutRefValue, IrWithPutVar,
 }
 import arc/compiler/peephole
 import arc/internal/tuple_array
-import arc/rt/types.{type JsVal}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/result
 import gleam/set.{type Set}
 
-pub fn assemble(code: List(IrOp), constants: List(JsVal)) -> Assembled {
-  let const_arr = tuple_array.from_list(constants)
-  let code = thread_jumps(code, label_suffixes(code, dict.new()), [])
-  let code = drop_dead_labels(code, referenced_labels(code, set.new()), [])
-  let code = peephole.run(code, const_arr)
-  let code = add_safepoints(code)
-  let label_map = build_label_map(code, 0, dict.new())
-  let #(ops, lines) = assemble_ops(code, label_map, 0, [], [])
+pub fn assemble(code: List(IrOp)) -> Assembled {
+  let suffixes = label_suffixes(code, dict.new())
+  let code = case dict.is_empty(suffixes) {
+    True -> peephole.run(code)
+    False -> {
+      let code = thread_jumps(code, suffixes, [])
+      drop_dead_labels(code, referenced_labels(code, set.new()), [])
+      |> peephole.run
+      |> add_safepoints
+    }
+  }
+  let label_map = build_label_map(code, 1, dict.new())
+  let #(ops, lines) = assemble_ops(code, label_map, 1, 0, [], [])
   Assembled(
     bytecode: tuple_array.from_list(ops),
-    constants: const_arr,
     lines: tuple_array.from_list(lines),
   )
 }
@@ -37,7 +40,6 @@ pub fn assemble(code: List(IrOp), constants: List(JsVal)) -> Assembled {
 pub type Assembled {
   Assembled(
     bytecode: tuple_array.TupleArray(Op),
-    constants: tuple_array.TupleArray(JsVal),
     lines: tuple_array.TupleArray(Int),
   )
 }
@@ -123,6 +125,8 @@ fn loop_heads(
     [] -> heads
     [IrLabel(l), ..rest] ->
       loop_heads(rest, i + 1, dict.insert(seen, l, i), heads)
+    [IrFinal(_), ..rest] | [IrLine(_), ..rest] ->
+      loop_heads(rest, i + 1, seen, heads)
     [op, ..rest] -> {
       let heads =
         list.fold(loop_refs(op), heads, fn(heads, l) {
@@ -340,6 +344,7 @@ fn may_allocate(op: IrOp) -> Bool {
 fn referenced_labels(code: List(IrOp), acc: Set(LabelId)) -> Set(LabelId) {
   case code {
     [] -> acc
+    [IrFinal(_), ..rest] | [IrLine(_), ..rest] -> referenced_labels(rest, acc)
     [op, ..rest] ->
       referenced_labels(rest, list.fold(label_refs(op), acc, set.insert))
   }
@@ -415,8 +420,7 @@ fn build_label_map(
 ) -> Dict(LabelId, Pc) {
   case code {
     [] -> map
-    [IrLabel(id), ..rest] ->
-      build_label_map(rest, pc, dict.insert(map, id, Pc(pc)))
+    [IrLabel(id), ..rest] -> build_label_map(rest, pc, dict.insert(map, id, pc))
     [IrLine(_), ..rest] -> build_label_map(rest, pc, map)
     [_, ..rest] -> build_label_map(rest, pc + 1, map)
   }
@@ -442,23 +446,35 @@ fn assemble_try_kind(
 fn assemble_ops(
   code: List(IrOp),
   labels: Dict(LabelId, Pc),
+  pc: Pc,
   line: Int,
   acc: List(Op),
   lines: List(Int),
 ) -> #(List(Op), List(Int)) {
   case code {
     [] -> #(list.reverse([opcode.Return, ..acc]), list.reverse([line, ..lines]))
-    [IrLabel(_), ..rest] -> assemble_ops(rest, labels, line, acc, lines)
-    [IrLine(l), ..rest] -> assemble_ops(rest, labels, l, acc, lines)
+    [IrLabel(_), ..rest] -> assemble_ops(rest, labels, pc, line, acc, lines)
+    [IrLine(l), ..rest] -> assemble_ops(rest, labels, pc, l, acc, lines)
     [op, ..rest] ->
-      assemble_ops(rest, labels, line, [assemble_op(op, labels), ..acc], [
+      assemble_ops(
+        rest,
+        labels,
+        pc + 1,
         line,
-        ..lines
-      ])
+        [assemble_op(op, labels, pc), ..acc],
+        [line, ..lines],
+      )
   }
 }
 
-fn assemble_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
+fn assemble_op(op: IrOp, labels: Dict(LabelId, Pc), pc: Pc) -> Op {
+  // where a test goes when it holds and when it does not
+  let branch = fn(label, when, build) {
+    case when {
+      True -> build(label_pc(labels, label), pc + 1)
+      False -> build(pc + 1, label_pc(labels, label))
+    }
+  }
   case op {
     IrFinal(op) -> op
 
@@ -503,20 +519,35 @@ fn assemble_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
 
     IrBinOp(kind) -> opcode.BinOp(kind)
 
-    IrCmpLocalLocalJump(a, b, kind, l, when) ->
-      opcode.CmpLocalLocalJump(a, b, kind, label_pc(labels, l), when)
-    IrCmpLocalConstJump(a, c, kind, l, when) ->
-      opcode.CmpLocalConstJump(a, c, kind, label_pc(labels, l), when)
+    IrCmpLocalLocalJump(a, b, kind, l, when) -> {
+      use then, otherwise <- branch(l, when)
+      opcode.CmpLocalLocalJump(a, b, kind, then, otherwise)
+    }
+    IrCmpLocalConstJump(a, c, kind, l, when) -> {
+      use then, otherwise <- branch(l, when)
+      opcode.CmpLocalConstJump(a, c, kind, then, otherwise)
+    }
     IrIncLocalJump(i, l) -> opcode.IncLocalJump(i, label_pc(labels, l))
-    IrJumpIfLocal(i, l, when) ->
-      opcode.JumpIfLocal(i, label_pc(labels, l), when)
-    IrIncLocalCmpConstJump(i, by, c, kind, l, when) ->
-      opcode.IncLocalCmpConstJump(i, by, c, kind, label_pc(labels, l), when)
-    IrIncLocalCmpLocalJump(i, by, b, kind, l, when) ->
-      opcode.IncLocalCmpLocalJump(i, by, b, kind, label_pc(labels, l), when)
-    IrCmpJump(kind, l, when) -> opcode.CmpJump(kind, label_pc(labels, l), when)
-    IrCmpConstJump(c, kind, l, when) ->
-      opcode.CmpConstJump(c, kind, label_pc(labels, l), when)
+    IrJumpIfLocal(i, l, when) -> {
+      use then, otherwise <- branch(l, when)
+      opcode.JumpIfLocal(i, then, otherwise)
+    }
+    IrIncLocalCmpConstJump(i, by, c, kind, l, when) -> {
+      use then, otherwise <- branch(l, when)
+      opcode.IncLocalCmpConstJump(i, by, c, kind, then, otherwise)
+    }
+    IrIncLocalCmpLocalJump(i, by, b, kind, l, when) -> {
+      use then, otherwise <- branch(l, when)
+      opcode.IncLocalCmpLocalJump(i, by, b, kind, then, otherwise)
+    }
+    IrCmpJump(kind, l, when) -> {
+      use then, otherwise <- branch(l, when)
+      opcode.CmpJump(kind, then, otherwise)
+    }
+    IrCmpConstJump(c, kind, l, when) -> {
+      use then, otherwise <- branch(l, when)
+      opcode.CmpConstJump(c, kind, then, otherwise)
+    }
     IrLabel(_) | IrLine(_) -> panic as "marker occupies no pc"
   }
 }

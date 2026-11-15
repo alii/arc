@@ -15,6 +15,13 @@ set -euo pipefail
 #   * the default heap policy kept heaps nearly full (a GC every few
 #     allocations); default is now BEAM-like fibonacci growth.
 #
+# The other patches are where it differs from OTP in ways the interpreter
+# relies on:
+#   * 0002: a fun call in tail position was not a tail call, and the
+#     interpreter runs as funs calling funs, so the stack grew with every op;
+#   * 0003: =:= took 0.0 and -0.0 for the same number;
+#   * 0004: taking the rest of a binary in a match also skipped past it.
+#
 # It is also linked with memory growth allowed (256MB initial, 2GB max): the
 # copying collector's alloc/free of ever larger heaps fragments a fixed arena
 # and OOM'd at 256MB on programs that need ~70MB.
@@ -53,5 +60,7 @@ rm -rf "$BUILD" && mkdir -p "$BUILD"
 
 mkdir -p "$OUT"
 cp "$BUILD/src/AtomVM.js" "$BUILD/src/AtomVM.wasm" "$OUT/"
+# build-avm.sh refuses a runtime built from other patches
+cat "$WEBSITE"/atomvm_patches/*.patch | shasum -a 256 > "$OUT/AtomVM.patches.sha256"
 ls -lh "$OUT"/AtomVM.js "$OUT"/AtomVM.wasm
 echo "done — now run scripts/build-avm.sh to pack arc.avm against it"

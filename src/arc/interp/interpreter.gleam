@@ -27,7 +27,7 @@ import arc/bytecode/opcode.{
   JumpIfNotNullishOrPop, JumpIfNullish, JumpIfTrue, JumpIfTrueOrPop,
   JumpUndefinedIfNullish, KeepUnitText, MakeClosure, MakeLazyClosure, MakeMethod,
   MakeSuppressed, NewObject, NewObjectShaped, NewObjectWith, NewPrivateName,
-  NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry, PostDecLocal,
+  NewRegExp, ObjectRestCopy, ObjectSpread, Pop, PopTry, PostDecLocal,
   PostIncLocal, PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit,
   PutElem, PutElemPop, PutEnvBoxed, PutEnvBoxedCheckInit, PutEvalVar, PutField,
   PutFieldPop, PutGlobal, PutLocal, PutLocalCheckInit, PutLocalConstField,
@@ -38,8 +38,8 @@ import arc/bytecode/opcode.{
   WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef, WithPutRefValue,
   WithPutVar, Yield, YieldStar,
 }
-import arc/internal/tuple_array.{type TupleArray}
-import arc/interp/call.{type Drive}
+import arc/internal/tuple_array
+import arc/interp/call
 import arc/interp/eval
 import arc/interp/frames
 import arc/interp/guard.{
@@ -49,25 +49,23 @@ import arc/interp/guard.{
 import arc/interp/kernel
 import arc/interp/lazy
 import arc/interp/park
-import arc/interp/safepoint
 import arc/interp/state.{
-  type State, type StepExit, type VmError, AsyncDelegateResume, DelegateYield,
-  InternalError, Returned, SavedCont, SavedFrame, SavedRegFrame, StackUnderflow,
-  State, SuspensionLeak, Threw, VmFailed, Yielded,
+  type Outcome, type State, type StepExit, type VmError, AsyncDelegateResume,
+  Completed, DelegateYield, Frame, InternalError, Returned, StackUnderflow,
+  State, Suspended, SuspensionLeak, Threw, VmFailed, Yielded,
 }
+import arc/interp/thread
 import arc/interp/using
 import arc/module/dynamic_import
 import arc/rt/arena
 import arc/rt/async as rt_async
-import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/global_fns
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/bytecode.{type SuspendedFrame, ParkedOp, ParkedStart, TryFrame}
-import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/class as rt_class
-import arc/rt/closure as rt_closure
 import arc/rt/elements
 import arc/rt/env as rt_env
 import arc/rt/inspect as rt_inspect
@@ -79,34 +77,21 @@ import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
-  AccessorProperty, Agent, BytecodeFn, DataProperty, FunctionApply, FunctionCall,
-  FunctionN, HintString, KHandle, KNull, KNum, KStr, KSym, KUndef, NativeFn,
-  Realm, ReflectApply, ReflectN, SBox, SObject, SShapedObject, Store, StringKey,
-  SymbolKey, classify, mk_bool, mk_int, mk_object, mk_string, mk_tdz,
-  mk_undefined,
+  AccessorProperty, Agent, BytecodeFn, DataProperty, FunctionApply, FunctionN,
+  HintString, KHandle, KNull, KNum, KStr, KSym, KUndef, NativeFn, Realm, SBox,
+  SObject, SShapedObject, StringKey, SymbolKey, classify, mk_bool, mk_int,
+  mk_object, mk_string, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-pub type Outcome {
-  Completed(Completion(JsVal))
-  Suspended(state.SuspendKind, JsVal)
-}
-
-const prototype_key = names.prototype
-
-const return_key = names.return
-
-const function_call = FunctionN(FunctionCall)
-
 const function_apply = FunctionN(FunctionApply)
-
-const reflect_apply = ReflectN(ReflectApply)
 
 fn is_undef(v: JsVal) -> Bool {
   kernel.is(v, kernel.Undefined)
@@ -136,6 +121,7 @@ fn put_lexical_global(
   let realm = agent.realm
   Agent(
     ..agent,
+    globals: dict.new(),
     realm: Realm(
       ..realm,
       lexical_globals: prop_map.insert(
@@ -147,55 +133,12 @@ fn put_lexical_global(
   )
 }
 
-// loop tier: registers live in loop arguments
-pub fn execute(
-  state: State,
-  drive: Drive,
-) -> Result(#(Outcome, State), VmError) {
-  let func = state.func
-  let locals = state.locals
-  let code = func.bytecode
-  let constants = func.constants
-  let _ = tuple_array.size(locals)
-  let _ = tuple_array.size(code)
-  let _ = tuple_array.size(constants)
-  case func.regs {
-    bytecode.NoRegs -> {
-      let u = kernel.literal([kernel.Undefined])
-      loop(
-        state,
-        drive,
-        state.pc,
-        state.stack,
-        locals,
-        state.agent,
-        code,
-        constants,
-        u,
-        u,
-      )
-    }
-    bytecode.Regs(a, b) ->
-      loop(
-        state,
-        drive,
-        state.pc,
-        state.stack,
-        locals,
-        state.agent,
-        code,
-        constants,
-        load_register(locals, a),
-        load_register(locals, b),
-      )
-  }
+pub fn execute(state: State) -> Result(#(Outcome, State), VmError) {
+  thread.enter(state)
 }
 
-fn execute_to_completion(
-  state: State,
-  drive: Drive,
-) -> #(Result(JsVal, JsVal), State) {
-  case execute(state, drive) {
+fn execute_to_completion(state: State) -> #(Result(JsVal, JsVal), State) {
+  case execute(state) {
     Ok(#(Completed(NormalCompletion(v)), state)) -> #(Ok(v), state)
     Ok(#(Completed(ThrowCompletion(e)), state)) -> #(Error(e), state)
     Ok(#(Suspended(kind, _), state)) ->
@@ -204,4045 +147,11 @@ fn execute_to_completion(
   }
 }
 
-// tuple_size tells the erlang compiler these are tuples so element inlines
-fn enter_loop(
-  state: State,
-  drive: Drive,
-  pc: Int,
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  agent: Agent,
-  code: TupleArray(Op),
-  constants: TupleArray(JsVal),
-) -> Result(#(Outcome, State), VmError) {
-  let _ = tuple_array.size(locals)
-  let _ = tuple_array.size(code)
-  let _ = tuple_array.size(constants)
-  case state.func.regs {
-    bytecode.NoRegs -> {
-      let u = kernel.literal([kernel.Undefined])
-      loop(state, drive, pc, stack, locals, agent, code, constants, u, u)
-    }
-    bytecode.Regs(a, b) ->
-      loop(
-        state,
-        drive,
-        pc,
-        stack,
-        locals,
-        agent,
-        code,
-        constants,
-        load_register(locals, a),
-        load_register(locals, b),
-      )
-  }
-}
-
-fn load_register(locals: TupleArray(JsVal), local: Int) -> JsVal {
-  case local < 0 {
-    True -> kernel.literal([kernel.Undefined])
-    False -> tuple_array.element(local + 1, locals)
-  }
-}
-
-// -1 is reg_a_slot; the literal keeps these arms inlinable
-fn continue_with_register(
-  state: State,
-  drive: Drive,
-  pc: Int,
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  agent: Agent,
-  code: TupleArray(Op),
-  constants: TupleArray(JsVal),
-  r0: JsVal,
-  r1: JsVal,
-  register: Int,
-  v: JsVal,
-) -> Result(#(Outcome, State), VmError) {
-  case register {
-    -1 -> loop(state, drive, pc, stack, locals, agent, code, constants, v, r1)
-    _ -> loop(state, drive, pc, stack, locals, agent, code, constants, r0, v)
-  }
-}
-
-// registers written back so the tuple can leave the loop
-fn flush_registers(
-  state: State,
-  locals: TupleArray(JsVal),
-  r0: JsVal,
-  r1: JsVal,
-) -> TupleArray(JsVal) {
-  case state.func.regs {
-    bytecode.NoRegs -> locals
-    bytecode.Regs(a, b) -> kernel.flush_registers(locals, a, b, r0, r1)
-  }
-}
-
-fn via_step(
-  state: State,
-  drive: Drive,
-  pc: Int,
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  agent: Agent,
-  r0: JsVal,
-  r1: JsVal,
-) -> Result(#(Outcome, State), VmError) {
-  step_from_loop(
-    state,
-    drive,
-    pc,
-    stack,
-    flush_registers(state, locals, r0, r1),
-    agent,
-  )
-}
-
-// nothing ran before the miss, so step re-runs with the loop args
-fn loop(
-  state: State,
-  drive: Drive,
-  pc: Int,
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  agent: Agent,
-  code: TupleArray(Op),
-  constants: TupleArray(JsVal),
-  r0: JsVal,
-  r1: JsVal,
-) -> Result(#(Outcome, State), VmError) {
-  // every stream ends in a sentinel return, so fetch is unchecked
-  case tuple_array.element(pc + 1, code) {
-    PushConst(index) -> {
-      let v = tuple_array.element(index + 1, constants)
-      loop(
-        state,
-        drive,
-        pc + 1,
-        [v, ..stack],
-        locals,
-        agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    Pop ->
-      case stack {
-        [_, ..rest] ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            rest,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    Dup ->
-      case stack {
-        [top, ..] ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [top, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    Swap ->
-      case stack {
-        [a, b, ..rest] ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [b, a, ..rest],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetLocal(index) -> {
-      let v = case index < 0 {
-        True ->
-          case index {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(index + 1, locals)
-      }
-      case kernel.is(v, kernel.JsTdz) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [v, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    PutLocal(index) ->
-      case stack {
-        [v, ..rest] ->
-          case index < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                index,
-                v,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                tuple_array.set_element(index + 1, locals, v),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetBoxed(index) -> {
-      let v =
-        kernel.box_get(agent, case index < 0 {
-          True ->
-            case index {
-              -1 -> r0
-              _ -> r1
-            }
-          False -> tuple_array.element(index + 1, locals)
-        })
-      case kernel.is(v, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [v, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    GetEnvBoxed(index) -> {
-      let v =
-        kernel.box_get(
-          agent,
-          tuple_array.element(index + 1, kernel.nested_captures(1, locals)),
-        )
-      case kernel.is(v, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [v, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    PutEnvBoxed(index) ->
-      case stack {
-        [v, ..rest] -> {
-          let box =
-            tuple_array.element(index + 1, kernel.nested_captures(1, locals))
-          case rt_store.is_handle(box) {
-            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                rt_store.cell_set(
-                  agent,
-                  kernel.to_handle_unchecked([box]),
-                  SBox(v),
-                ),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetEnv(index) ->
-      loop(
-        state,
-        drive,
-        pc + 1,
-        [
-          tuple_array.element(index + 1, kernel.nested_captures(1, locals)),
-          ..stack
-        ],
-        locals,
-        agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
-
-    PutBoxed(index) ->
-      case stack {
-        [v, ..rest] -> {
-          let local = case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          }
-          case rt_store.is_handle(local) {
-            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                rt_store.cell_set(
-                  agent,
-                  kernel.to_handle_unchecked([local]),
-                  SBox(v),
-                ),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    Safepoint ->
-      case agent.store.alloc_since_gc < agent.store.gc_threshold {
-        True ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-        // only the outermost run collects
-        False ->
-          case state.outer_depth == 0 {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-
-    BoxLocal(index) ->
-      case index < 0 {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False -> {
-          let #(box, agent) =
-            rt_store.cell_new(
-              agent,
-              SBox(tuple_array.element(index + 1, locals)),
-            )
-          loop(
-            state,
-            drive,
-            pc + 1,
-            stack,
-            tuple_array.set_unchecked(index, mk_object(box), locals),
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-        }
-      }
-
-    ToObject ->
-      case stack {
-        [val, ..] ->
-          case kernel.is_object(val) {
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    ToStringVal ->
-      case stack {
-        [val, ..] ->
-          case kernel.is_string(val) {
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    ArrayFrom(count) ->
-      case pop_n(stack, count) {
-        Some(#(items, rest)) -> {
-          let #(arr, agent) = rt_obj.new_array(agent, items)
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [arr, ..rest],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-        }
-        None -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    CreateRestArray(from_index) -> {
-      let #(arr, agent) =
-        rt_obj.new_array(agent, list.drop(state.call_args, from_index))
-      loop(
-        state,
-        drive,
-        pc + 1,
-        [arr, ..stack],
-        locals,
-        agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    Jump(Pc(target)) ->
-      loop(state, drive, target, stack, locals, agent, code, constants, r0, r1)
-
-    JumpIfFalse(Pc(target)) ->
-      case stack {
-        [top, ..rest] ->
-          case kernel.is_bool(top, expected: True) {
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              case kernel.is_bool(top, expected: False) {
-                True ->
-                  loop(
-                    state,
-                    drive,
-                    target,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-                False ->
-                  case rt_val.to_boolean(top) {
-                    True ->
-                      loop(
-                        state,
-                        drive,
-                        pc + 1,
-                        rest,
-                        locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                    False ->
-                      loop(
-                        state,
-                        drive,
-                        target,
-                        rest,
-                        locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                  }
-              }
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    JumpIfTrue(Pc(target)) ->
-      case stack {
-        [top, ..rest] ->
-          case kernel.is_bool(top, expected: True) {
-            True ->
-              loop(
-                state,
-                drive,
-                target,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              case kernel.is_bool(top, expected: False) {
-                True ->
-                  loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-                False ->
-                  case rt_val.to_boolean(top) {
-                    True ->
-                      loop(
-                        state,
-                        drive,
-                        target,
-                        rest,
-                        locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                    False ->
-                      loop(
-                        state,
-                        drive,
-                        pc + 1,
-                        rest,
-                        locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                  }
-              }
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    IterateView(view, Pc(hit)) ->
-      case stack {
-        [receiver, ..rest] -> {
-          let rec = rt_lang.view_iter_start(agent, receiver, view)
-          case kernel.is(rec, kernel.Miss) {
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                hit,
-                [rec, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    UnpackArray(count, Pc(miss)) ->
-      case stack {
-        [array, ..rest] -> {
-          let unpacked = kernel.unpack_array(agent, array, count, rest)
-          case kernel.is(unpacked, kernel.Miss) {
-            True ->
-              loop(
-                state,
-                drive,
-                miss,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                unpacked,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    JumpIfNullish(Pc(target)) ->
-      case stack {
-        [top, ..rest] ->
-          case kernel.is(top, kernel.Undefined) || kernel.is(top, kernel.Null) {
-            True ->
-              loop(
-                state,
-                drive,
-                target,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    JumpIfNotNullish(Pc(target)) ->
-      case stack {
-        [top, ..rest] ->
-          case kernel.is(top, kernel.Undefined) || kernel.is(top, kernel.Null) {
-            False ->
-              loop(
-                state,
-                drive,
-                target,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    JumpIfFalseOrPop(Pc(target)) ->
-      case stack {
-        [top, ..rest] ->
-          case rt_val.to_boolean(top) {
-            False ->
-              loop(
-                state,
-                drive,
-                target,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    JumpIfTrueOrPop(Pc(target)) ->
-      case stack {
-        [top, ..rest] ->
-          case rt_val.to_boolean(top) {
-            True ->
-              loop(
-                state,
-                drive,
-                target,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    JumpIfNotNullishOrPop(Pc(target)) ->
-      case stack {
-        [top, ..rest] ->
-          case kernel.is(top, kernel.Undefined) || kernel.is(top, kernel.Null) {
-            False ->
-              loop(
-                state,
-                drive,
-                target,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    JumpUndefinedIfNullish(Pc(target)) ->
-      case stack {
-        [top, ..rest] ->
-          case kernel.is(top, kernel.Undefined) || kernel.is(top, kernel.Null) {
-            True ->
-              loop(
-                state,
-                drive,
-                target,
-                [kernel.literal([kernel.Undefined]), ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    BinOp(kind) ->
-      case stack {
-        [right, left, ..rest] -> {
-          let r = case kind {
-            binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-            binop.InOp -> kernel.has_property(agent, left, right)
-            _ -> kernel.classified_binop(kind, left, right)
-          }
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [r, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    BinOpConst(kind, const_index) ->
-      case stack {
-        [left, ..rest] -> {
-          let right = tuple_array.element(const_index + 1, constants)
-          let r = case kind {
-            binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-            binop.InOp -> kernel.has_property(agent, left, right)
-            _ -> kernel.classified_binop(kind, left, right)
-          }
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [r, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    BinOpLocal(kind, index) ->
-      case stack {
-        [left, ..rest] -> {
-          let right = case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          }
-          let r = case kind {
-            binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-            binop.InOp -> kernel.has_property(agent, left, right)
-            _ -> kernel.classified_binop(kind, left, right)
-          }
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [r, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    BinOpLocalLocal(kind, left_idx, right_idx) -> {
-      let left = case left_idx < 0 {
-        True ->
-          case left_idx {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(left_idx + 1, locals)
-      }
-      let right = case right_idx < 0 {
-        True ->
-          case right_idx {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(right_idx + 1, locals)
-      }
-      let r = case kind {
-        binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-        binop.InOp -> kernel.has_property(agent, left, right)
-        _ -> kernel.classified_binop(kind, left, right)
-      }
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [r, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    BinOpLocalConst(kind, left_idx, const_index) -> {
-      let left = case left_idx < 0 {
-        True ->
-          case left_idx {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(left_idx + 1, locals)
-      }
-      let right = tuple_array.element(const_index + 1, constants)
-      let r = case kind {
-        binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-        binop.InOp -> kernel.has_property(agent, left, right)
-        _ -> kernel.classified_binop(kind, left, right)
-      }
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [r, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    BinOpPut(kind, dst) ->
-      case stack {
-        [right, left, ..rest] -> {
-          let r = case kind {
-            binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-            binop.InOp -> kernel.has_property(agent, left, right)
-            _ -> kernel.classified_binop(kind, left, right)
-          }
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              case dst < 0 {
-                True ->
-                  continue_with_register(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                    dst,
-                    r,
-                  )
-                False ->
-                  loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    tuple_array.set_element(dst + 1, locals, r),
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-              }
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    BinOpConstPut(kind, const_index, dst) ->
-      case stack {
-        [left, ..rest] -> {
-          let right = tuple_array.element(const_index + 1, constants)
-          let r = case kind {
-            binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-            binop.InOp -> kernel.has_property(agent, left, right)
-            _ -> kernel.classified_binop(kind, left, right)
-          }
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              case dst < 0 {
-                True ->
-                  continue_with_register(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                    dst,
-                    r,
-                  )
-                False ->
-                  loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    tuple_array.set_element(dst + 1, locals, r),
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-              }
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    BinOpLocalPut(kind, index, dst) ->
-      case stack {
-        [left, ..rest] -> {
-          let right = case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          }
-          let r = case kind {
-            binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-            binop.InOp -> kernel.has_property(agent, left, right)
-            _ -> kernel.classified_binop(kind, left, right)
-          }
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              case dst < 0 {
-                True ->
-                  continue_with_register(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                    dst,
-                    r,
-                  )
-                False ->
-                  loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    tuple_array.set_element(dst + 1, locals, r),
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-              }
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    BinOpLocalField(kind, index, key.Named(..) as k) ->
-      case stack {
-        [left, ..rest] -> {
-          let recv = case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          }
-          let right = kernel.get_field(agent, recv, k)
-          let right = case kernel.is(right, kernel.Miss) {
-            True -> kernel.builtin_getter(agent, recv, k)
-            False -> right
-          }
-          case kernel.is(right, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False -> {
-              let r = case kind {
-                binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-                binop.InOp -> kernel.has_property(agent, left, right)
-                _ -> kernel.classified_binop(kind, left, right)
-              }
-              case kernel.is(r, kernel.Miss) {
-                True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-                False ->
-                  loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    [r, ..rest],
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-              }
-            }
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    BinOpLocalLocalPut(kind, left_idx, right_idx, dst) -> {
-      let left = case left_idx < 0 {
-        True ->
-          case left_idx {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(left_idx + 1, locals)
-      }
-      let right = case right_idx < 0 {
-        True ->
-          case right_idx {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(right_idx + 1, locals)
-      }
-      let r = case kind {
-        binop.InstanceOfOp -> instance_of_kernel(agent, left, right)
-        binop.InOp -> kernel.has_property(agent, left, right)
-        _ -> kernel.classified_binop(kind, left, right)
-      }
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case dst < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                dst,
-                r,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                tuple_array.set_element(dst + 1, locals, r),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    UnaryOp(kind) ->
-      case stack {
-        [operand, ..rest] -> {
-          let r = case kind {
-            opcode.Neg -> kernel.neg(operand)
-            opcode.Pos -> kernel.plus(operand)
-            opcode.LogicalNot -> rt_val.logical_not(operand)
-            opcode.Void -> mk_undefined()
-            opcode.BitNot -> kernel.bitnot(operand)
-          }
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [r, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    IncLocal(index) -> {
-      let r =
-        kernel.step(
-          case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          },
-          1,
-        )
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case index < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                index,
-                r,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                tuple_array.set_element(index + 1, locals, r),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    DecLocal(index) -> {
-      let r =
-        kernel.step(
-          case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          },
-          -1,
-        )
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case index < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                index,
-                r,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                tuple_array.set_element(index + 1, locals, r),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    JumpIfLocal(index, Pc(target), when) -> {
-      let v = case index < 0 {
-        True ->
-          case index {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(index + 1, locals)
-      }
-      case kernel.is(v, kernel.JsTdz) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case rt_val.to_boolean(v) == when {
-            True ->
-              loop(
-                state,
-                drive,
-                target,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    IncLocalJump(index, Pc(target)) -> {
-      let r =
-        kernel.step(
-          case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          },
-          1,
-        )
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case index < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                target,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                index,
-                r,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                target,
-                stack,
-                tuple_array.set_element(index + 1, locals, r),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    IncLocalCmpConstJump(index, by, const_index, kind, Pc(target), when) -> {
-      let n =
-        kernel.step(
-          case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          },
-          by,
-        )
-      let r = case kernel.is(n, kernel.Miss) {
-        True -> n
-        False ->
-          kernel.pure_binop(
-            kind,
-            n,
-            tuple_array.element(const_index + 1, constants),
-          )
-      }
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False -> {
-          let next = case kernel.is_bool(r, when) {
-            True -> target
-            False -> pc + 1
-          }
-          case index < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                next,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                index,
-                n,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                next,
-                stack,
-                tuple_array.set_element(index + 1, locals, n),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-      }
-    }
-
-    IncLocalCmpLocalJump(index, by, right_idx, kind, Pc(target), when) -> {
-      let n =
-        kernel.step(
-          case index < 0 {
-            True ->
-              case index {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(index + 1, locals)
-          },
-          by,
-        )
-      let r = case kernel.is(n, kernel.Miss) {
-        True -> n
-        False ->
-          kernel.pure_binop(kind, n, case right_idx < 0 {
-            True ->
-              case right_idx {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(right_idx + 1, locals)
-          })
-      }
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False -> {
-          let next = case kernel.is_bool(r, when) {
-            True -> target
-            False -> pc + 1
-          }
-          case index < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                next,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                index,
-                n,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                next,
-                stack,
-                tuple_array.set_element(index + 1, locals, n),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-      }
-    }
-
-    PostIncLocal(index) -> {
-      let old = case index < 0 {
-        True ->
-          case index {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(index + 1, locals)
-      }
-      let r = kernel.step(old, 1)
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case index < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                pc + 1,
-                [old, ..stack],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                index,
-                r,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [old, ..stack],
-                tuple_array.set_element(index + 1, locals, r),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    PostDecLocal(index) -> {
-      let old = case index < 0 {
-        True ->
-          case index {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(index + 1, locals)
-      }
-      let r = kernel.step(old, -1)
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case index < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                pc + 1,
-                [old, ..stack],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                index,
-                r,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [old, ..stack],
-                tuple_array.set_element(index + 1, locals, r),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    CmpLocalLocalJump(left_idx, right_idx, kind, Pc(target), when) -> {
-      let r =
-        kernel.pure_binop(
-          kind,
-          case left_idx < 0 {
-            True ->
-              case left_idx {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(left_idx + 1, locals)
-          },
-          case right_idx < 0 {
-            True ->
-              case right_idx {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(right_idx + 1, locals)
-          },
-        )
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case kernel.is_bool(r, when) {
-            True ->
-              loop(
-                state,
-                drive,
-                target,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    CmpLocalConstJump(left_idx, const_index, kind, Pc(target), when) -> {
-      let r =
-        kernel.pure_binop(
-          kind,
-          case left_idx < 0 {
-            True ->
-              case left_idx {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(left_idx + 1, locals)
-          },
-          tuple_array.element(const_index + 1, constants),
-        )
-      case kernel.is(r, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case kernel.is_bool(r, when) {
-            True ->
-              loop(
-                state,
-                drive,
-                target,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    CmpJump(kind, Pc(target), when) ->
-      case stack {
-        [right, left, ..rest] -> {
-          let r = kernel.pure_binop(kind, left, right)
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              case kernel.is_bool(r, when) {
-                True ->
-                  loop(
-                    state,
-                    drive,
-                    target,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-                False ->
-                  loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-              }
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    CmpConstJump(const_index, kind, Pc(target), when) ->
-      case stack {
-        [left, ..rest] -> {
-          let r =
-            kernel.pure_binop(
-              kind,
-              left,
-              tuple_array.element(const_index + 1, constants),
-            )
-          case kernel.is(r, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              case kernel.is_bool(r, when) {
-                True ->
-                  loop(
-                    state,
-                    drive,
-                    target,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-                False ->
-                  loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    rest,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-              }
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetPrivateFieldDyn ->
-      case stack {
-        [k, recv, ..rest] -> {
-          let v = kernel.private_get(agent.store, recv, k)
-          case kernel.is(v, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [v, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetPrivateFieldDynKeep ->
-      case stack {
-        [k, recv, ..rest] -> {
-          let v = kernel.private_get(agent.store, recv, k)
-          case kernel.is(v, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [v, recv, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    DefinePrivateField ->
-      case stack {
-        [val, k, recv, ..rest] -> {
-          let store = kernel.private_define(agent.store, recv, k, val)
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [recv, ..rest],
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    PutPrivateFieldDyn ->
-      case stack {
-        [k, val, recv, ..rest] -> {
-          let store = kernel.private_put(agent.store, recv, k, val)
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [val, ..rest],
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetElem ->
-      case stack {
-        [k, recv, ..rest] -> {
-          let v = kernel.get_elem(agent.store, recv, k)
-          case kernel.is(v, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [v, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetElemKeep ->
-      case stack {
-        [k, recv, ..] -> {
-          let v = kernel.get_elem_keep(agent.store, recv, k)
-          case kernel.is(v, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [v, ..stack],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    PutElem ->
-      case stack {
-        [val, k, recv, ..rest] -> {
-          let store = kernel.put_elem(agent.store, recv, k, val)
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [val, ..rest],
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetElemLocals(obj, key_idx) -> {
-      let v =
-        kernel.get_elem(
-          agent.store,
-          case obj < 0 {
-            True ->
-              case obj {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(obj + 1, locals)
-          },
-          case key_idx < 0 {
-            True ->
-              case key_idx {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(key_idx + 1, locals)
-          },
-        )
-      case kernel.is(v, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [v, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    GetElemPostInc(obj, key_idx) -> {
-      let old = case key_idx < 0 {
-        True ->
-          case key_idx {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(key_idx + 1, locals)
-      }
-      let r = kernel.step(old, 1)
-      let v = case kernel.is(r, kernel.Miss) {
-        True -> r
-        False ->
-          kernel.get_elem(
-            agent.store,
-            case obj < 0 {
-              True ->
-                case obj {
-                  -1 -> r0
-                  _ -> r1
-                }
-              False -> tuple_array.element(obj + 1, locals)
-            },
-            old,
-          )
-      }
-      case kernel.is(v, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          case key_idx < 0 {
-            True ->
-              continue_with_register(
-                state,
-                drive,
-                pc + 1,
-                [v, ..stack],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                key_idx,
-                r,
-              )
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [v, ..stack],
-                tuple_array.set_element(key_idx + 1, locals, r),
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-      }
-    }
-
-    PutElemPop ->
-      case stack {
-        [val, k, recv, ..rest] -> {
-          let store = kernel.put_elem(agent.store, recv, k, val)
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetField(key.Named(..) as k) ->
-      case stack {
-        [recv, ..rest] -> {
-          let v = kernel.get_field(agent, recv, k)
-          case kernel.is(v, kernel.Miss) {
-            True ->
-              case kernel.find_accessor(agent, recv, k) {
-                kernel.Accessor(get: Some(getter), ..) ->
-                  loop_call(
-                    state,
-                    drive,
-                    pc,
-                    stack,
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                    kernel.cell_of(agent, getter),
-                    getter,
-                    recv,
-                    [],
-                    rest,
-                    None,
-                    kernel.literal([kernel.Undefined]),
-                  )
-                _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-              }
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [v, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetFieldKeep(key.Named(..) as k) ->
-      case stack {
-        [recv, ..rest] -> {
-          let v = kernel.get_field(agent, recv, k)
-          case kernel.is(v, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [v, recv, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    PutField(key.Named(..) as k) ->
-      case stack {
-        [val, recv, ..rest] -> {
-          let store = kernel.put_field(agent.store, recv, k, val, create: True)
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [val, ..rest],
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    PutFieldPop(key.Named(..) as k) ->
-      case stack {
-        [val, recv, ..rest] -> {
-          let store = kernel.put_field(agent.store, recv, k, val, create: True)
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    PutLocalLocalField(obj, value, k) -> {
-      let val = case value < 0 {
-        True ->
-          case value {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(value + 1, locals)
-      }
-      case kernel.is(val, kernel.JsTdz) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False -> {
-          let store =
-            kernel.put_field(
-              agent.store,
-              case obj < 0 {
-                True ->
-                  case obj {
-                    -1 -> r0
-                    _ -> r1
-                  }
-                False -> tuple_array.element(obj + 1, locals)
-              },
-              k,
-              val,
-              create: True,
-            )
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                stack,
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-      }
-    }
-
-    PutLocalConstField(obj, const_index, k) -> {
-      let store =
-        kernel.put_field(
-          agent.store,
-          case obj < 0 {
-            True ->
-              case obj {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(obj + 1, locals)
-          },
-          k,
-          tuple_array.element(const_index + 1, constants),
-          create: True,
-        )
-      case kernel.is(store, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            stack,
-            locals,
-            Agent(..agent, store:),
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    GetLocalField(index, key.Named(..) as k) -> {
-      let recv = case index < 0 {
-        True ->
-          case index {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(index + 1, locals)
-      }
-      let v = kernel.get_field(agent, recv, k)
-      case kernel.is(v, kernel.Miss) {
-        True ->
-          case kernel.find_accessor(agent, recv, k) {
-            kernel.Accessor(get: Some(getter), ..) ->
-              loop_call(
-                state,
-                drive,
-                pc,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                kernel.cell_of(agent, getter),
-                getter,
-                recv,
-                [],
-                stack,
-                None,
-                kernel.literal([kernel.Undefined]),
-              )
-            _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-          }
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [v, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    GetLocalFieldKeep(index, key.Named(..) as k) -> {
-      let recv = case index < 0 {
-        True ->
-          case index {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(index + 1, locals)
-      }
-      let v = kernel.get_field(agent, recv, k)
-      case kernel.is(v, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [v, recv, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    GetGlobal(k) -> {
-      let v = kernel.get_global(agent, agent.realm.lexical_globals, k)
-      case kernel.is(v, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop(
-            state,
-            drive,
-            pc + 1,
-            [v, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    TypeofGlobal(k) -> {
-      let v = kernel.get_global(agent, agent.realm.lexical_globals, k)
-      case kernel.is(v, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False -> {
-          let t = kernel.type_of(agent.store, v)
-          case kernel.is(t, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [mk_string(t), ..stack],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-      }
-    }
-
-    PutGlobal(k) ->
-      case stack {
-        [val, ..rest] -> {
-          let realm = agent.realm
-          let store =
-            kernel.put_global(
-              agent.store,
-              realm.lexical_globals,
-              realm.global_object,
-              k,
-              val,
-              state.func.is_strict,
-            )
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    NewObject -> {
-      let #(obj, stack, store) =
-        kernel.new_object(
-          agent.store,
-          agent.realm.object.prototype,
-          [],
-          0,
-          stack,
-        )
-      loop(
-        state,
-        drive,
-        pc + 1,
-        [obj, ..stack],
-        locals,
-        Agent(..agent, store:),
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    NewObjectShaped(keys, count, site) -> {
-      let #(obj, stack, agent) =
-        kernel.new_object_shaped(agent, keys, count, stack, #(
-          state.unit_id,
-          site,
-        ))
-      loop(
-        state,
-        drive,
-        pc + 1,
-        [obj, ..stack],
-        locals,
-        agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    NewObjectWith(keys, count) -> {
-      let #(obj, stack, store) =
-        kernel.new_object(
-          agent.store,
-          agent.realm.object.prototype,
-          keys,
-          count,
-          stack,
-        )
-      loop(
-        state,
-        drive,
-        pc + 1,
-        [obj, ..stack],
-        locals,
-        Agent(..agent, store:),
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    TypeOf ->
-      case stack {
-        [v, ..rest] -> {
-          let t = kernel.type_of(agent.store, v)
-          case kernel.is(t, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [mk_string(t), ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    DefineField(key.Named(..) as k) ->
-      case stack {
-        [val, obj, ..rest] -> {
-          let store = kernel.define_field(agent.store, obj, k, val)
-          case kernel.is(store, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [obj, ..rest],
-                locals,
-                Agent(..agent, store:),
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    MakeClosure(func_index) -> {
-      let template = tuple_array.element(func_index + 1, state.func.functions)
-      let #(fn_h, agent) =
-        rt_closure.new_bytecode_function(
-          agent,
-          template,
-          kernel.capture_env(
-            template.env_descriptors,
-            template.nested_captures,
-            locals,
-            state.func.nested_captures,
-          ),
-          state.unit_id,
-        )
-      loop(
-        state,
-        drive,
-        pc + 1,
-        [mk_object(fn_h), ..stack],
-        locals,
-        agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    MakeLazyClosure(stub_index, record) -> {
-      let #(fn_h, agent) =
-        lazy.make_closure(
-          agent,
-          state.func,
-          state.unit_id,
-          locals,
-          stub_index,
-          record,
-        )
-      loop(
-        state,
-        drive,
-        pc + 1,
-        [mk_object(fn_h), ..stack],
-        locals,
-        agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    GetIterator ->
-      case stack {
-        [iterable, ..rest] -> {
-          let rec = rt_lang.array_iter_start(agent, iterable)
-          case kernel.is(rec, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [rec, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    IteratorClose ->
-      case stack {
-        [rec, ..rest] ->
-          case
-            kernel.is(rec, kernel.Undefined)
-            || {
-              rt_lang.is_array_iter(rec)
-              && kernel.is(
-                kernel.get_field(
-                  agent,
-                  mk_object(rt_lang.array_iter_proto(agent, rec)),
-                  return_key,
-                ),
-                kernel.Undefined,
-              )
-            }
-          {
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    ForInNext ->
-      case stack {
-        [iter, ..rest] ->
-          case kernel.for_in_next(iter) {
-            kernel.ForInKey(key:, rest: iter) ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [mk_bool(False), key, iter, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            kernel.ForInEnd ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [mk_bool(True), mk_undefined(), iter, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    IteratorNext ->
-      case stack {
-        [rec, ..rest] ->
-          case kernel.is(rec, kernel.Undefined) {
-            True ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [mk_bool(True), mk_undefined(), rec, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            False ->
-              case rt_lang.is_array_iter(rec) {
-                True ->
-                  case rt_lang.array_iter_next(agent.store, rec) {
-                    rt_lang.IterStep(done:, value:, rec:) ->
-                      loop(
-                        state,
-                        drive,
-                        pc + 1,
-                        [mk_bool(done), value, rec, ..rest],
-                        locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                    rt_lang.IterPair(key:, value:, rec:) -> {
-                      let #(pair, agent) = rt_obj.new_array(agent, [key, value])
-                      loop(
-                        state,
-                        drive,
-                        pc + 1,
-                        [mk_bool(False), pair, rec, ..rest],
-                        locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                    }
-                    rt_lang.IterMiss ->
-                      via_step(state, drive, pc, stack, locals, agent, r0, r1)
-                  }
-                False ->
-                  case kernel.iter_step(agent.store, rec) {
-                    kernel.Advanced(done, val, store) -> {
-                      let agent = Agent(..agent, store:)
-                      let record = case done {
-                        True -> mk_undefined()
-                        False -> rec
-                      }
-                      loop(
-                        state,
-                        drive,
-                        pc + 1,
-                        [mk_bool(done), val, record, ..rest],
-                        locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                    }
-                    kernel.PairAdvanced(key, value, store) -> {
-                      let #(pair, agent) =
-                        rt_obj.new_array(Agent(..agent, store:), [key, value])
-                      loop(
-                        state,
-                        drive,
-                        pc + 1,
-                        [mk_bool(False), pair, rec, ..rest],
-                        locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                    }
-                    // registers stay live across the step, flushed only on exits
-                    plan -> {
-                      let state =
-                        State(
-                          ..state,
-                          pc:,
-                          stack:,
-                          agent: frames.sync(state, agent, pc),
-                        )
-                      case
-                        iterator_next_general(state, drive, rec, rest, plan)
-                      {
-                        Ok(state) ->
-                          loop(
-                            state,
-                            drive,
-                            state.pc,
-                            state.stack,
-                            locals,
-                            state.agent,
-                            code,
-                            constants,
-                            r0,
-                            r1,
-                          )
-                        Error(exit) ->
-                          after_step(
-                            Error(
-                              state.map_exit(exit, fn(state) {
-                                State(
-                                  ..state,
-                                  locals: flush_registers(state, locals, r0, r1),
-                                )
-                              }),
-                            ),
-                            drive,
-                          )
-                      }
-                    }
-                  }
-              }
-          }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    // coroutine frames never get registers, see compile_child
-    Yield -> {
-      let #(v, rest) = top_or_undefined(stack)
-      let parked =
-        State(
-          ..state,
-          pc: pc + 1,
-          stack: rest,
-          locals:,
-          agent: frames.sync(state, agent, pc),
-        )
-      Ok(#(Suspended(state.Yield, v), parked))
-    }
-
-    Await -> {
-      let #(v, rest) = top_or_undefined(stack)
-      let parked =
-        State(
-          ..state,
-          pc: pc + 1,
-          stack: rest,
-          locals:,
-          agent: frames.sync(state, agent, pc),
-        )
-      Ok(#(Suspended(state.Await, v), parked))
-    }
-
-    InitialYield ->
-      Ok(#(
-        Suspended(state.Yield, mk_undefined()),
-        State(
-          ..state,
-          pc: pc + 1,
-          stack:,
-          locals:,
-          agent: frames.sync(state, agent, pc),
-        ),
-      ))
-
-    PushTry(catch_target: Pc(catch_target), kind:) -> {
-      let frame =
-        TryFrame(catch_target:, stack_depth: list.length(stack), kind:)
-      loop(
-        State(..state, try_stack: [frame, ..state.try_stack]),
-        drive,
-        pc + 1,
-        stack,
-        locals,
-        agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    PopTry ->
-      case state.try_stack {
-        [_, ..try_rest] ->
-          loop(
-            State(..state, try_stack: try_rest),
-            drive,
-            pc + 1,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    CreateArguments(simple_params:) -> {
-      let state =
-        call.create_arguments(
-          State(
-            ..state,
-            pc:,
-            stack:,
-            locals: flush_registers(state, locals, r0, r1),
-            agent:,
-          ),
-          simple_params,
-        )
-      loop(
-        state,
-        drive,
-        state.pc,
-        state.stack,
-        locals,
-        state.agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
-    }
-
-    // arity 0-2 unrolled to skip pop_n's tuple
-    Call(arity) ->
-      case arity, stack {
-        0, [callee, ..rest] ->
-          loop_call(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            kernel.cell_of(agent, callee),
-            callee,
-            kernel.literal([kernel.Undefined]),
-            [],
-            rest,
-            None,
-            kernel.literal([kernel.Undefined]),
-          )
-        1, [a, callee, ..rest] ->
-          loop_call(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            kernel.cell_of(agent, callee),
-            callee,
-            kernel.literal([kernel.Undefined]),
-            [a],
-            rest,
-            None,
-            kernel.literal([kernel.Undefined]),
-          )
-        2, [b, a, callee, ..rest] ->
-          loop_call(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            kernel.cell_of(agent, callee),
-            callee,
-            kernel.literal([kernel.Undefined]),
-            [a, b],
-            rest,
-            None,
-            kernel.literal([kernel.Undefined]),
-          )
-        _, _ ->
-          case pop_n(stack, arity) {
-            Some(#(args, [callee, ..rest])) ->
-              loop_call(
-                state,
-                drive,
-                pc,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                kernel.cell_of(agent, callee),
-                callee,
-                kernel.literal([kernel.Undefined]),
-                args,
-                rest,
-                None,
-                kernel.literal([kernel.Undefined]),
-              )
-            _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-          }
-      }
-
-    CallMethod(arity) ->
-      case arity, stack {
-        0, [method, receiver, ..rest] ->
-          loop_call(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            kernel.cell_of(agent, method),
-            method,
-            receiver,
-            [],
-            rest,
-            None,
-            kernel.literal([kernel.Undefined]),
-          )
-        1, [a, method, receiver, ..rest] ->
-          loop_call(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            kernel.cell_of(agent, method),
-            method,
-            receiver,
-            [a],
-            rest,
-            None,
-            kernel.literal([kernel.Undefined]),
-          )
-        2, [b, a, method, receiver, ..rest] ->
-          loop_call(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            kernel.cell_of(agent, method),
-            method,
-            receiver,
-            [a, b],
-            rest,
-            None,
-            kernel.literal([kernel.Undefined]),
-          )
-        _, _ ->
-          case pop_n(stack, arity) {
-            Some(#(args, [method, receiver, ..rest])) ->
-              loop_call(
-                state,
-                drive,
-                pc,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                kernel.cell_of(agent, method),
-                method,
-                receiver,
-                args,
-                rest,
-                None,
-                kernel.literal([kernel.Undefined]),
-              )
-            _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-          }
-      }
-
-    GetFieldCall1(key.Named(..) as k, arg_idx) ->
-      case stack {
-        [recv, ..rest] -> {
-          let method = kernel.get_field(agent, recv, k)
-          let arg = case arg_idx < 0 {
-            True ->
-              case arg_idx {
-                -1 -> r0
-                _ -> r1
-              }
-            False -> tuple_array.element(arg_idx + 1, locals)
-          }
-          case kernel.is(method, kernel.Miss) || kernel.is(arg, kernel.JsTdz) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop_call(
-                state,
-                drive,
-                pc,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                kernel.cell_of(agent, method),
-                method,
-                recv,
-                [arg],
-                rest,
-                None,
-                kernel.literal([kernel.Undefined]),
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetFieldCall(key.Named(..) as k) ->
-      case stack {
-        [recv, ..rest] -> {
-          let method = kernel.get_field(agent, recv, k)
-          case kernel.is(method, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False ->
-              loop_call(
-                state,
-                drive,
-                pc,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                kernel.cell_of(agent, method),
-                method,
-                recv,
-                [],
-                rest,
-                None,
-                kernel.literal([kernel.Undefined]),
-              )
-          }
-        }
-        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    GetLocalFieldCall(index, key.Named(..) as k) -> {
-      let recv = case index < 0 {
-        True ->
-          case index {
-            -1 -> r0
-            _ -> r1
-          }
-        False -> tuple_array.element(index + 1, locals)
-      }
-      let method = kernel.get_field(agent, recv, k)
-      case kernel.is(method, kernel.Miss) {
-        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          loop_call(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            kernel.cell_of(agent, method),
-            method,
-            recv,
-            [],
-            stack,
-            None,
-            kernel.literal([kernel.Undefined]),
-          )
-      }
-    }
-
-    CallNew(arity) ->
-      case pop_n(stack, arity) {
-        Some(#(args, [ctor, ..rest])) ->
-          loop_construct(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            ctor,
-            ctor,
-            args,
-            rest,
-          )
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    ApplyArguments(slot:, ..) ->
-      case stack {
-        [this_arg, apply_fn, target, ..rest] ->
-          case
-            !rt_store.is_handle(case slot < 0 {
-              True ->
-                case slot {
-                  -1 -> r0
-                  _ -> r1
-                }
-              False -> tuple_array.element(slot + 1, locals)
-            })
-            && is_intrinsic_apply(agent, apply_fn)
-          {
-            True ->
-              loop_call(
-                state,
-                drive,
-                pc,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                kernel.cell_of(agent, target),
-                target,
-                this_arg,
-                state.call_args,
-                rest,
-                None,
-                kernel.literal([kernel.Undefined]),
-              )
-            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-          }
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    CallConstructor(arity) ->
-      case pop_n(stack, arity) {
-        Some(#(args, [new_target, ctor, ..rest])) ->
-          loop_construct(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            ctor,
-            new_target,
-            args,
-            rest,
-          )
-        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-      }
-
-    Return ->
-      case state.call_stack {
-        [SavedCont(..) as saved, ..] -> {
-          let value = case stack {
-            [v, ..] -> v
-            [] -> kernel.literal([kernel.Undefined])
-          }
-          after_step(call.cont_return(agent, state.depth, saved, value), drive)
-        }
-        [saved, ..] ->
-          case saved.constructor_this, state.func.is_derived_constructor {
-            None, True ->
-              after_step(
-                call.return_op(
-                  State(
-                    ..state,
-                    pc:,
-                    stack:,
-                    locals: flush_registers(state, locals, r0, r1),
-                    agent: frames.sync(state, agent, pc),
-                  ),
-                ),
-                drive,
-              )
-            constructor_this, _ -> {
-              let value = case constructor_this, stack {
-                None, [v, ..] -> v
-                None, [] -> kernel.literal([kernel.Undefined])
-                Some(receiver), [v, ..] ->
-                  case
-                    !kernel.is(v, kernel.Undefined) && rt_store.is_handle(v)
-                  {
-                    True -> v
-                    False -> receiver
-                  }
-                Some(receiver), [] -> receiver
-              }
-              let caller = saved.caller
-              let caller_pc = saved.pc
-              let caller_stack = saved.stack
-              let caller_locals = saved.locals
-              let depth = state.depth
-              // call.leave_frame inlined
-              let agent = case agent.call_depth == depth {
-                False -> agent
-                True ->
-                  Agent(
-                    ..agent,
-                    call_depth: depth - 1,
-                    frames: case agent.frames {
-                      [_, ..rest] -> rest
-                      [] -> []
-                    },
-                  )
-              }
-              let caller_stack = [value, ..caller_stack]
-              let store = agent.store
-              case
-                state.outer_depth == 0
-                && store.alloc_since_gc >= store.gc_threshold
-              {
-                True -> {
-                  let caller =
-                    safepoint.maybe_collect_at_return(call.restore_frame(
-                      frames.sync(caller, agent, caller_pc),
-                      saved,
-                      caller_stack,
-                    ))
-                  enter_loop(
-                    caller,
-                    drive,
-                    caller_pc,
-                    caller.stack,
-                    caller.locals,
-                    caller.agent,
-                    caller.func.bytecode,
-                    caller.func.constants,
-                  )
-                }
-                // enter_loop inlined
-                False ->
-                  case saved {
-                    SavedRegFrame(r0:, r1:, ..) -> {
-                      let caller_func = caller.func
-                      let code = caller_func.bytecode
-                      let constants = caller_func.constants
-                      let _ = tuple_array.size(caller_locals)
-                      let _ = tuple_array.size(code)
-                      let _ = tuple_array.size(constants)
-                      loop(
-                        caller,
-                        drive,
-                        caller_pc,
-                        caller_stack,
-                        caller_locals,
-                        agent,
-                        code,
-                        constants,
-                        r0,
-                        r1,
-                      )
-                    }
-                    SavedFrame(..) | SavedCont(..) -> {
-                      let caller_func = caller.func
-                      case caller_func.regs {
-                        bytecode.NoRegs -> {
-                          let code = caller_func.bytecode
-                          let constants = caller_func.constants
-                          let _ = tuple_array.size(caller_locals)
-                          let _ = tuple_array.size(code)
-                          let _ = tuple_array.size(constants)
-                          let u = kernel.literal([kernel.Undefined])
-                          loop(
-                            caller,
-                            drive,
-                            caller_pc,
-                            caller_stack,
-                            caller_locals,
-                            agent,
-                            code,
-                            constants,
-                            u,
-                            u,
-                          )
-                        }
-                        bytecode.Regs(..) ->
-                          enter_loop(
-                            caller,
-                            drive,
-                            caller_pc,
-                            caller_stack,
-                            caller_locals,
-                            agent,
-                            caller_func.bytecode,
-                            caller_func.constants,
-                          )
-                      }
-                    }
-                  }
-              }
-            }
-          }
-        [] -> {
-          let value = case stack {
-            [v, ..] -> v
-            [] -> kernel.literal([kernel.Undefined])
-          }
-          // a finished frame's locals are never read, so no flush
-          Ok(#(
-            Completed(NormalCompletion(value)),
-            State(..state, pc:, stack:, locals:, agent:),
-          ))
-        }
-      }
-
-    _other -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-  }
-}
-
-// an undefined new_target means a plain call; otherwise loop_construct entered
-fn loop_call(
-  state: State,
-  drive: Drive,
-  pc: Int,
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  agent: Agent,
-  code: TupleArray(Op),
-  constants: TupleArray(JsVal),
-  r0: JsVal,
-  r1: JsVal,
-  callee_cell: types.Cell,
-  callee: JsVal,
-  this: JsVal,
-  args: List(JsVal),
-  rest: List(JsVal),
-  constructor_this: Option(JsVal),
-  new_target: JsVal,
-) -> Result(#(Outcome, State), VmError) {
-  let depth = state.depth
-  case kernel.is(callee_cell, kernel.Miss) {
-    False ->
-      case callee_cell {
-        SObject(kind: NativeFn(token:, ..), ..)
-          if token != function_call
-          && token != function_apply
-          && token != reflect_apply
-          && depth < limits.max_call_depth
-        ->
-          case rt_builtins.plain_answer(agent, token, this, args) {
-            Some(v) ->
-              loop(
-                state,
-                drive,
-                pc + 1,
-                [v, ..rest],
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-              )
-            None -> {
-              let agent = case agent.call_depth == depth {
-                False -> frames.sync_entering(state, agent, pc)
-                True -> {
-                  let line = tuple_array.element(pc + 1, state.func.lines)
-                  // frames.set_top_line inlined
-                  let frames = case agent.frames {
-                    [types.FrameInfo(line: l, ..), ..] as frames if l == line ->
-                      frames
-                    [top, ..rest] -> [types.FrameInfo(..top, line:), ..rest]
-                    [] -> [types.FrameInfo("", frames.stack_source, line)]
-                  }
-                  Agent(..agent, frames:, call_depth: depth + 1)
-                }
-              }
-              case
-                guard.guard4(
-                  rt_builtins.dispatch_native,
-                  agent,
-                  token,
-                  this,
-                  args,
-                )
-              {
-                Value(value: v, agent:) ->
-                  loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    [v, ..rest],
-                    locals,
-                    Agent(..agent, call_depth: agent.call_depth - 1),
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-                Thrown(agent:, thrown:) ->
-                  after_step(
-                    Error(Threw(
-                      thrown,
-                      State(
-                        ..state,
-                        pc:,
-                        stack: rest,
-                        locals: flush_registers(state, locals, r0, r1),
-                        agent: Agent(..agent, call_depth: agent.call_depth - 1),
-                      ),
-                    )),
-                    drive,
-                  )
-              }
-            }
-          }
-        SObject(
-          kind: BytecodeFn(
-            template:,
-            env:,
-            home_object:,
-            flags:,
-            realm:,
-            unit_id:,
-            ..,
-          ),
-          ..,
-        ) as callee_cell ->
-          case
-            realm == agent.realm.id
-            && depth < limits.max_call_depth
-            && case kernel.is(new_target, kernel.Undefined) {
-              True ->
-                !template.is_class_constructor
-                && !template.is_generator
-                && !template.is_async
-              False -> True
-            }
-          {
-            True -> {
-              let home = case home_object {
-                Some(h) -> kernel.object_val([h])
-                None -> kernel.literal([kernel.Undefined])
-              }
-              // keep in step with call.setup_frame
-              let #(this_val, agent) = case
-                template.is_arrow || flags.is_strict
-              {
-                True -> #(this, agent)
-                False ->
-                  case kernel.is(this, kernel.Undefined) {
-                    True -> #(
-                      kernel.object_val([agent.realm.global_object]),
-                      agent,
-                    )
-                    False -> {
-                      let coerced =
-                        kernel.sloppy_this(this, agent.realm.global_object)
-                      case kernel.is(coerced, kernel.Miss) {
-                        False -> #(coerced, agent)
-                        True -> rt_call.callee_this(agent, flags, this)
-                      }
-                    }
-                  }
-              }
-              let callee_locals =
-                kernel.frame_locals(
-                  env,
-                  template.lexical,
-                  this_val,
-                  callee,
-                  home,
-                  new_target,
-                  args,
-                  template.arity,
-                  template.local_count,
-                )
-              let saved = case state.func.regs {
-                bytecode.NoRegs ->
-                  SavedFrame(
-                    caller: state,
-                    pc: pc + 1,
-                    stack: rest,
-                    locals:,
-                    constructor_this:,
-                  )
-                bytecode.Regs(..) ->
-                  SavedRegFrame(
-                    caller: state,
-                    pc: pc + 1,
-                    stack: rest,
-                    locals:,
-                    constructor_this:,
-                    r0:,
-                    r1:,
-                  )
-              }
-              let new_state =
-                State(
-                  agent:,
-                  stack: [],
-                  locals: callee_locals,
-                  func: template,
-                  unit_id:,
-                  pc: 0,
-                  call_stack: [saved, ..state.call_stack],
-                  outer_depth: state.outer_depth,
-                  depth: depth + 1,
-                  try_stack: [],
-                  this: this_val,
-                  new_target:,
-                  home_object: home,
-                  call_args: args,
-                  eval_env: None,
-                )
-              // §15.10 tail call elision
-              let new_state = case
-                state.func.is_strict
-                && tuple_array.element(pc + 2, code) == Return
-                && kernel.is(new_target, kernel.Undefined)
-                && call.is_tail_call(state, pc, template)
-              {
-                True -> call.elide_tail_frame(new_state)
-                False -> new_state
-              }
-              // enter_loop inlined
-              case template.regs {
-                bytecode.NoRegs -> {
-                  let code = template.bytecode
-                  let constants = template.constants
-                  let _ = tuple_array.size(callee_locals)
-                  let _ = tuple_array.size(code)
-                  let _ = tuple_array.size(constants)
-                  let u = kernel.literal([kernel.Undefined])
-                  loop(
-                    new_state,
-                    drive,
-                    0,
-                    [],
-                    callee_locals,
-                    new_state.agent,
-                    code,
-                    constants,
-                    u,
-                    u,
-                  )
-                }
-                bytecode.Regs(..) ->
-                  enter_loop(
-                    new_state,
-                    drive,
-                    0,
-                    [],
-                    callee_locals,
-                    new_state.agent,
-                    template.bytecode,
-                    template.constants,
-                  )
-              }
-            }
-            False ->
-              case kernel.is(new_target, kernel.Undefined) {
-                True ->
-                  after_step(
-                    call.call_cell(
-                      State(
-                        ..state,
-                        pc:,
-                        stack:,
-                        locals: flush_registers(state, locals, r0, r1),
-                        agent: frames.sync(state, agent, pc),
-                      ),
-                      kernel.to_handle_unchecked([callee]),
-                      callee_cell,
-                      this,
-                      args,
-                      rest,
-                      drive,
-                    ),
-                    drive,
-                  )
-                False ->
-                  via_step(state, drive, pc, stack, locals, agent, r0, r1)
-              }
-          }
-        callee_cell ->
-          after_step(
-            call.call_cell(
-              State(
-                ..state,
-                pc:,
-                stack:,
-                locals: flush_registers(state, locals, r0, r1),
-                agent: frames.sync(state, agent, pc),
-              ),
-              kernel.to_handle_unchecked([callee]),
-              callee_cell,
-              this,
-              args,
-              rest,
-              drive,
-            ),
-            drive,
-          )
-      }
-    True ->
-      after_step(
-        call.call(
-          State(
-            ..state,
-            pc:,
-            stack:,
-            locals: flush_registers(state, locals, r0, r1),
-            agent: frames.sync(state, agent, pc),
-          ),
-          callee,
-          this,
-          args,
-          rest,
-          drive,
-        ),
-        drive,
-      )
-  }
-}
-
-fn loop_construct(
-  state: State,
-  drive: Drive,
-  pc: Int,
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  agent: Agent,
-  code: TupleArray(Op),
-  constants: TupleArray(JsVal),
-  r0: JsVal,
-  r1: JsVal,
-  ctor: JsVal,
-  new_target: JsVal,
-  args: List(JsVal),
-  rest: List(JsVal),
-) -> Result(#(Outcome, State), VmError) {
-  case kernel.cell_of(agent, ctor) {
-    SObject(kind: BytecodeFn(template:, flags:, realm:, ..), props:, ..) as callee_cell
-      if flags.is_constructor
-      && realm == agent.realm.id
-      && state.depth < limits.max_call_depth
-    ->
-      case template.is_derived_constructor {
-        True ->
-          loop_call(
-            state,
-            drive,
-            pc,
-            stack,
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-            callee_cell,
-            ctor,
-            kernel.literal([kernel.JsTdz]),
-            args,
-            rest,
-            None,
-            new_target,
-          )
-        False -> {
-          let proto = case kernel.same(new_target, ctor) {
-            True -> kernel.own_data(props, prototype_key)
-            False -> kernel.get_field(agent, new_target, prototype_key)
-          }
-          let made = kernel.new_receiver(agent, proto)
-          case kernel.is(made, kernel.Miss) {
-            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-            False -> {
-              let #(receiver, agent) = made
-              loop_call(
-                state,
-                drive,
-                pc,
-                stack,
-                locals,
-                agent,
-                code,
-                constants,
-                r0,
-                r1,
-                callee_cell,
-                ctor,
-                receiver,
-                args,
-                rest,
-                Some(receiver),
-                new_target,
-              )
-            }
-          }
-        }
-      }
-    _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
-  }
-}
-
 fn is_intrinsic_apply(agent: Agent, v: JsVal) -> Bool {
   case kernel.cell_of(agent, v) {
     SObject(kind: NativeFn(token:, ..), ..) -> token == function_apply
     _ -> False
   }
-}
-
-fn instance_of_kernel(agent: Agent, left: JsVal, right: JsVal) -> JsVal {
-  kernel.instance_of(agent, left, right, types.symbol_has_instance)
 }
 
 fn array_iter_next_general(
@@ -4272,72 +181,12 @@ pub fn closable_record(
   guarded2(state, rt_lang.closable_record, rec)
 }
 
-fn top_or_undefined(stack: List(JsVal)) -> #(JsVal, List(JsVal)) {
-  case stack {
-    [v, ..rest] -> #(v, rest)
-    [] -> #(mk_undefined(), [])
-  }
-}
-
-fn step_from_loop(
-  state: State,
-  drive: Drive,
-  pc: Int,
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  agent: Agent,
-) -> Result(#(Outcome, State), VmError) {
-  let state =
-    State(..state, pc:, stack:, locals:, agent: frames.sync(state, agent, pc))
-  let func = state.func
-  let op = tuple_array.element(pc + 1, func.bytecode)
-  let op = case func.regs {
-    bytecode.NoRegs -> op
-    bytecode.Regs(a, b) ->
-      opcode.map_slots(op, fn(i) {
-        case i {
-          -1 -> a
-          -2 -> b
-          _ -> i
-        }
-      })
-  }
-  case step(state, drive, op) {
-    Ok(state) ->
-      enter_loop(
-        state,
-        drive,
-        state.pc,
-        state.stack,
-        state.locals,
-        state.agent,
-        state.func.bytecode,
-        state.func.constants,
-      )
-    exit -> after_step(exit, drive)
-  }
-}
-
-fn after_step(
-  stepped: Result(State, StepExit),
-  drive: Drive,
-) -> Result(#(Outcome, State), VmError) {
-  case stepped {
-    Ok(state) ->
-      enter_loop(
-        state,
-        drive,
-        state.pc,
-        state.stack,
-        state.locals,
-        state.agent,
-        state.func.bytecode,
-        state.func.constants,
-      )
-    Error(Returned(value, post)) ->
-      Ok(#(Completed(NormalCompletion(value)), post))
-    Error(VmFailed(err, _)) -> Error(err)
-    Error(Yielded(kind, yielded_value, post)) -> {
+// called by name from threaded code, for a step that did not go on
+pub fn after_exit(exit: StepExit) -> Result(#(Outcome, State), VmError) {
+  case exit {
+    Returned(value, post) -> Ok(#(Completed(NormalCompletion(value)), post))
+    VmFailed(err, _) -> Error(err)
+    Yielded(kind, yielded_value, post) -> {
       // must spread from post: the step may have run user code
       let parked = case kind {
         // keep pc so the resume re-executes yieldstar
@@ -4354,9 +203,9 @@ fn after_step(
       }
       Ok(#(Suspended(state.Yield, yielded_value), parked))
     }
-    Error(Threw(thrown, post)) ->
+    Threw(thrown, post) ->
       case unwind_to_catch(post, thrown) {
-        Some(caught) -> execute(caught, drive)
+        Some(caught) -> execute(caught)
         None -> Ok(#(Completed(ThrowCompletion(thrown)), post))
       }
   }
@@ -4364,13 +213,13 @@ fn after_step(
 
 // walks up caller frames when this frame has no handler
 pub fn unwind_to_catch(state: State, thrown: JsVal) -> Option(State) {
-  case state.try_stack {
+  case state.frame.try_stack {
     [TryFrame(catch_target:, stack_depth:, kind: _), ..rest_try] ->
       Some(
         State(
           ..state,
           stack: [thrown, ..state.truncate_stack(state.stack, stack_depth)],
-          try_stack: rest_try,
+          frame: Frame(..state.frame, try_stack: rest_try),
           pc: catch_target,
         ),
       )
@@ -4382,37 +231,8 @@ fn underflow(state: State, op: String) -> Result(a, StepExit) {
   Error(VmFailed(StackUnderflow(op), state))
 }
 
-fn conditional_jump(
-  state: State,
-  target: Int,
-  condition: fn(JsVal) -> Bool,
-) -> Result(State, StepExit) {
-  case state.stack {
-    [top, ..rest] ->
-      case condition(top) {
-        True -> Ok(State(..state, stack: rest, pc: target))
-        False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-      }
-    [] -> underflow(state, "ConditionalJump")
-  }
-}
-
-fn jump_or_pop(
-  state: State,
-  target: Int,
-  condition: fn(JsVal) -> Bool,
-) -> Result(State, StepExit) {
-  case state.stack {
-    [top, ..rest] ->
-      case condition(top) {
-        True -> Ok(State(..state, pc: target))
-        False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-      }
-    [] -> underflow(state, "JumpOrPop")
-  }
-}
-
-fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
+// called by name from threaded code, for whatever it does not run itself
+pub fn step(state: State, op: Op) -> Result(State, StepExit) {
   case op {
     CompileSelf -> lazy.first_call(state)
     KeepUnitText(bytes, is_module) ->
@@ -4421,14 +241,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           ..state,
           agent: lazy.keep_unit_text(
             state.agent,
-            state.unit_id,
+            state.frame.unit_id,
             types.UnitText(bytes:, is_module:),
           ),
           pc: state.pc + 1,
         ),
       )
 
-    // the loop runs these without ever falling back here
+    // threaded code runs these without ever falling back here
     PushConst(_)
     | Jump(_)
     | PushTry(..)
@@ -4441,81 +261,69 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     | Yield
     | Await
     | CreateArguments(..)
-    | Return -> Error(VmFailed(InternalError("step", "loop-only op"), state))
-
-    Pop ->
-      case state.stack {
-        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-        [] -> underflow(state, "Pop")
-      }
-
-    Dup ->
-      case state.stack {
-        [top, ..] ->
-          Ok(State(..state, stack: [top, ..state.stack], pc: state.pc + 1))
-        [] -> underflow(state, "Dup")
-      }
-
-    Swap ->
-      case state.stack {
-        [a, b, ..rest] ->
-          Ok(State(..state, stack: [b, a, ..rest], pc: state.pc + 1))
-        _ -> underflow(state, "Swap")
-      }
-
-    Rot3 ->
-      case state.stack {
-        [a, b, c, ..rest] ->
-          Ok(State(..state, stack: [c, a, b, ..rest], pc: state.pc + 1))
-        _ -> underflow(state, "Rot3")
-      }
-
-    Unrot4 ->
-      case state.stack {
-        [a, b, c, d, ..rest] ->
-          Ok(State(..state, stack: [b, c, d, a, ..rest], pc: state.pc + 1))
-        _ -> underflow(state, "Unrot4")
-      }
-
-    GetLocal(index) -> {
-      let value = tuple_array.get_unchecked(index, state.locals)
-      case kernel.is(value, kernel.JsTdz) {
-        True -> tdz_reference_error(state)
-        False ->
-          Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
-      }
-    }
-
-    PutLocal(index) ->
-      case state.stack {
-        [value, ..rest] -> {
-          let locals = tuple_array.set_unchecked(index, value, state.locals)
-          Ok(State(..state, stack: rest, locals:, pc: state.pc + 1))
-        }
-        [] -> underflow(state, "PutLocal")
-      }
+    | Pop
+    | Dup
+    | Swap
+    | Rot3
+    | Unrot4
+    | GetLocal(..)
+    | PutLocal(..)
+    | BoxLocal(..)
+    | GetEnv(..)
+    | BinOpConst(..)
+    | BinOpLocal(..)
+    | BinOpLocalLocal(..)
+    | BinOpLocalConst(..)
+    | BinOpPut(..)
+    | BinOpConstPut(..)
+    | BinOpLocalPut(..)
+    | BinOpLocalLocalPut(..)
+    | IncLocalJump(..)
+    | IncLocalCmpConstJump(..)
+    | IncLocalCmpLocalJump(..)
+    | CmpLocalLocalJump(..)
+    | CmpLocalConstJump(..)
+    | CmpJump(..)
+    | CmpConstJump(..)
+    | Safepoint
+    | JumpIfFalse(..)
+    | JumpIfTrue(..)
+    | JumpIfLocal(..)
+    | IterateView(..)
+    | UnpackArray(..)
+    | JumpIfNullish(..)
+    | JumpIfNotNullish(..)
+    | JumpIfFalseOrPop(..)
+    | JumpIfTrueOrPop(..)
+    | JumpIfNotNullishOrPop(..)
+    | JumpUndefinedIfNullish(..)
+    | Gosub(..)
+    | PopTry
+    | ArrayFrom(..)
+    | GetElemLocals(..)
+    | Call(..)
+    | CallMethod(..)
+    | CallNew(..)
+    | CallConstructor(..)
+    | ForInNext
+    | CreateRestArray(..)
+    | GetFieldCall(..)
+    | GetLocalFieldCall(..)
+    | PutLocalLocalField(..)
+    | PutLocalConstField(..)
+    | Return ->
+      Error(VmFailed(InternalError("step", "threaded-only op"), state))
 
     // §9.1.1.3.1 bindthisvalue: bound exactly once
     PutLocalCheckInit(index) ->
       case state.stack {
         [value, ..rest] ->
           case
-            kernel.is(
-              tuple_array.get_unchecked(index, state.locals),
-              kernel.JsTdz,
-            )
+            kernel.is(tuple_array.element(index, state.locals), kernel.JsTdz)
           {
             True -> {
-              let locals = tuple_array.set_unchecked(index, value, state.locals)
-              Ok(
-                State(
-                  ..state,
-                  stack: rest,
-                  locals:,
-                  this: value,
-                  pc: state.pc + 1,
-                ),
-              )
+              let locals = tuple_array.set_element(index, state.locals, value)
+              Ok(State(..state, stack: rest, locals:, pc: state.pc + 1))
             }
             False ->
               state.throw_reference_error(
@@ -4526,19 +334,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "PutLocalCheckInit")
       }
 
-    BoxLocal(index) -> {
-      let current = tuple_array.get_unchecked(index, state.locals)
-      let #(box, agent) = rt_store.cell_new(state.agent, SBox(current))
-      let locals =
-        tuple_array.set_unchecked(index, mk_object(box), state.locals)
-      Ok(State(..state, agent:, locals:, pc: state.pc + 1))
-    }
-
     BoxLocals(slots, uninit) -> {
       let #(items, agent) =
         box_slots(
           tuple_array.to_list(state.locals),
-          0,
+          1,
           slots,
           uninit,
           state.agent,
@@ -4549,45 +349,27 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     }
 
     GetBoxed(index) ->
-      get_boxed(state, tuple_array.get_unchecked(index, state.locals))
+      get_boxed(state, tuple_array.element(index, state.locals))
     GetEnvBoxed(index) ->
       get_boxed(
         state,
-        tuple_array.element(index + 1, kernel.nested_captures(1, state.locals)),
+        tuple_array.element(index, kernel.nested_captures(1, state.locals)),
       )
 
     PutBoxed(index) ->
-      put_boxed(state, tuple_array.get_unchecked(index, state.locals))
+      put_boxed(state, tuple_array.element(index, state.locals))
     PutEnvBoxed(index) ->
       put_boxed(
         state,
-        tuple_array.element(index + 1, kernel.nested_captures(1, state.locals)),
+        tuple_array.element(index, kernel.nested_captures(1, state.locals)),
       )
 
     PutBoxedCheckInit(index) ->
-      put_boxed_check_init(
-        state,
-        tuple_array.get_unchecked(index, state.locals),
-      )
+      put_boxed_check_init(state, tuple_array.element(index, state.locals))
     PutEnvBoxedCheckInit(index) ->
       put_boxed_check_init(
         state,
-        tuple_array.element(index + 1, kernel.nested_captures(1, state.locals)),
-      )
-
-    GetEnv(index) ->
-      Ok(
-        State(
-          ..state,
-          stack: [
-            tuple_array.element(
-              index + 1,
-              kernel.nested_captures(1, state.locals),
-            ),
-            ..state.stack
-          ],
-          pc: state.pc + 1,
-        ),
+        tuple_array.element(index, kernel.nested_captures(1, state.locals)),
       )
 
     // §9.1.1.4.4 getbindingvalue
@@ -4708,7 +490,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case lookup_eval_env(state, name) {
         Some(v) ->
           Ok(State(..state, stack: [v, ..state.stack], pc: state.pc + 1))
-        None -> step(state, drive, GetGlobal(key.named(name)))
+        None -> step(state, GetGlobal(key.named(name)))
       }
 
     TypeofEvalVar(name) ->
@@ -4723,14 +505,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             ),
           )
         }
-        None -> step(state, drive, TypeofGlobal(key.named(name)))
+        None -> step(state, TypeofGlobal(key.named(name)))
       }
 
     PutEvalVar(name) ->
-      case state.eval_env, state.stack {
+      case state.frame.eval_env, state.stack {
         Some(env), [v, ..rest] ->
           case rt_env.eval_env_has(state.agent, env, name) {
-            False -> step(state, drive, PutGlobal(key.named(name)))
+            False -> step(state, PutGlobal(key.named(name)))
             True ->
               Ok(
                 State(
@@ -4741,13 +523,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 ),
               )
           }
-        _, _ -> step(state, drive, PutGlobal(key.named(name)))
+        _, _ -> step(state, PutGlobal(key.named(name)))
       }
 
     // §19.2.1.3 no eval scope: global var, deletable
     DeclareEvalVar(name) ->
-      case state.eval_env {
-        None -> step(state, drive, DeclareGlobalVar(name, deletable: True))
+      case state.frame.eval_env {
+        None -> step(state, DeclareGlobalVar(name, deletable: True))
         Some(env) ->
           Ok(
             State(
@@ -4785,7 +567,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       let #(tpl, agent) =
         rt_lang.get_template_object(
           state.agent,
-          int.to_string(state.unit_id) <> "#" <> int.to_string(site),
+          int.to_string(state.frame.unit_id) <> "#" <> int.to_string(site),
           cooked,
           raw,
         )
@@ -4835,13 +617,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "ToObject")
       }
 
-    WithGetVar(name, Pc(target)) ->
+    WithGetVar(name, target) ->
       with_get_var(state, name, target, keep_this: False, op: "WithGetVar")
 
-    WithGetVarThis(name, Pc(target)) ->
+    WithGetVarThis(name, target) ->
       with_get_var(state, name, target, keep_this: True, op: "WithGetVarThis")
 
-    WithPutVar(name, Pc(target)) ->
+    WithPutVar(name, target) ->
       case state.stack {
         [obj, val, ..rest] ->
           case handle_of(obj) {
@@ -4863,7 +645,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     h,
                     name,
                     val,
-                    state.func.is_strict,
+                    state.frame.func.is_strict,
                   ))
                   State(..state, stack: rest, pc: target)
                 }
@@ -4873,7 +655,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "WithPutVar")
       }
 
-    WithDeleteVar(name, Pc(target)) ->
+    WithDeleteVar(name, target) ->
       case state.stack {
         [obj, ..rest] ->
           case handle_of(obj) {
@@ -4902,7 +684,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithDeleteVar")
       }
 
-    WithMakeRef(name, Pc(target)) ->
+    WithMakeRef(name, target) ->
       case state.stack {
         [obj, ..rest] ->
           case handle_of(obj) {
@@ -4923,7 +705,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithMakeRef")
       }
 
-    WithGetRefValue(name, Pc(target)) ->
+    WithGetRefValue(name, target) ->
       case state.stack {
         [obj, ..rest] ->
           case handle_of(obj) {
@@ -4934,7 +716,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 rt_env.with_get_binding_value,
                 h,
                 name,
-                state.func.is_strict,
+                state.frame.func.is_strict,
               ))
               State(..state, stack: [val, ..rest], pc: target)
             }
@@ -4942,7 +724,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithGetRefValue")
       }
 
-    WithPutRefValue(name, Pc(target)) ->
+    WithPutRefValue(name, target) ->
       case state.stack {
         [obj, val, ..rest] ->
           case handle_of(obj) {
@@ -4954,7 +736,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 h,
                 name,
                 val,
-                state.func.is_strict,
+                state.frame.func.is_strict,
               ))
               State(..state, stack: rest, pc: target)
             }
@@ -5003,7 +785,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             using.using_disposer,
             val,
             is_async,
-            state.unit_id,
+            state.frame.unit_id,
           ))
           State(..state, stack: [disposer, ..state.stack])
         }
@@ -5077,77 +859,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "BinOp")
       }
 
-    BinOpConst(kind, const_index) ->
-      case state.stack {
-        [left, ..rest] ->
-          binop_step(
-            state,
-            kind,
-            left,
-            tuple_array.get_unchecked(const_index, state.func.constants),
-            rest,
-          )
-        _ -> underflow(state, "BinOpConst")
-      }
-
-    BinOpLocal(kind, index) ->
-      case state.stack {
-        [left, ..rest] -> {
-          use right <- local_or_tdz(state, index)
-          binop_step(state, kind, left, right, rest)
-        }
-        _ -> underflow(state, "BinOpLocal")
-      }
-
-    BinOpLocalLocal(kind, left_idx, right_idx) -> {
-      use left <- local_or_tdz(state, left_idx)
-      use right <- local_or_tdz(state, right_idx)
-      binop_step(state, kind, left, right, state.stack)
-    }
-
-    BinOpLocalConst(kind, left_idx, const_index) -> {
-      use left <- local_or_tdz(state, left_idx)
-      binop_step(
-        state,
-        kind,
-        left,
-        tuple_array.get_unchecked(const_index, state.func.constants),
-        state.stack,
-      )
-    }
-
     PostIncLocal(index) -> fused_postfix_local(state, index, increment: True)
     PostDecLocal(index) -> fused_postfix_local(state, index, increment: False)
-
-    BinOpPut(kind, dst) ->
-      case state.stack {
-        [right, left, ..rest] ->
-          binop_put_step(state, kind, left, right, rest, dst)
-        _ -> underflow(state, "BinOpPut")
-      }
-
-    BinOpConstPut(kind, const_index, dst) ->
-      case state.stack {
-        [left, ..rest] ->
-          binop_put_step(
-            state,
-            kind,
-            left,
-            tuple_array.get_unchecked(const_index, state.func.constants),
-            rest,
-            dst,
-          )
-        _ -> underflow(state, "BinOpConstPut")
-      }
-
-    BinOpLocalPut(kind, index, dst) ->
-      case state.stack {
-        [left, ..rest] -> {
-          use right <- local_or_tdz(state, index)
-          binop_put_step(state, kind, left, right, rest, dst)
-        }
-        _ -> underflow(state, "BinOpLocalPut")
-      }
 
     BinOpLocalField(kind, index, k) ->
       case state.stack {
@@ -5156,19 +869,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           let finish = fn(right, state) {
             binop_step(state, kind, left, right, rest)
           }
-          use <-
-            accessor_as_frame(state, receiver, k, rest, drive, Some(finish), _)
+          use <- accessor_as_frame(state, receiver, k, rest, Some(finish), _)
           use #(right, state) <- result.try(get_field(state, receiver, k))
           finish(right, state)
         }
         _ -> underflow(state, "BinOpLocalField")
       }
-
-    BinOpLocalLocalPut(kind, left_idx, right_idx, dst) -> {
-      use left <- local_or_tdz(state, left_idx)
-      use right <- local_or_tdz(state, right_idx)
-      binop_put_step(state, kind, left, right, state.stack, dst)
-    }
 
     UnaryOp(kind) ->
       case state.stack {
@@ -5181,170 +887,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     IncLocal(index) -> fused_update_local(state, index, increment: True)
     DecLocal(index) -> fused_update_local(state, index, increment: False)
-    IncLocalJump(index, Pc(target)) -> {
-      use state <- result.map(fused_update_local(state, index, increment: True))
-      State(..state, pc: target)
-    }
-    IncLocalCmpConstJump(index, by, const_index, kind, Pc(target), when) -> {
-      use stepped <- result.try(fused_update_local(state, index, by == 1))
-      fused_cmp_jump(
-        State(..stepped, pc: state.pc),
-        kind,
-        tuple_array.get_unchecked(index, stepped.locals),
-        tuple_array.get_unchecked(const_index, state.func.constants),
-        target,
-        when,
-      )
-    }
-    IncLocalCmpLocalJump(index, by, right_idx, kind, Pc(target), when) -> {
-      use stepped <- result.try(fused_update_local(state, index, by == 1))
-      let right = tuple_array.get_unchecked(right_idx, stepped.locals)
-      case kernel.is(right, kernel.JsTdz) {
-        True -> tdz_reference_error(stepped)
-        False ->
-          fused_cmp_jump(
-            State(..stepped, pc: state.pc),
-            kind,
-            tuple_array.get_unchecked(index, stepped.locals),
-            right,
-            target,
-            when,
-          )
-      }
-    }
-
-    CmpLocalLocalJump(left_idx, right_idx, kind, Pc(target), when) -> {
-      let left = tuple_array.get_unchecked(left_idx, state.locals)
-      let right = tuple_array.get_unchecked(right_idx, state.locals)
-      case kernel.is(left, kernel.JsTdz) || kernel.is(right, kernel.JsTdz) {
-        True -> tdz_reference_error(state)
-        False -> fused_cmp_jump(state, kind, left, right, target, when)
-      }
-    }
-
-    CmpLocalConstJump(left_idx, const_index, kind, Pc(target), when) -> {
-      let left = tuple_array.get_unchecked(left_idx, state.locals)
-      case kernel.is(left, kernel.JsTdz) {
-        True -> tdz_reference_error(state)
-        False ->
-          fused_cmp_jump(
-            state,
-            kind,
-            left,
-            tuple_array.get_unchecked(const_index, state.func.constants),
-            target,
-            when,
-          )
-      }
-    }
-
-    CmpJump(kind, Pc(target), when) ->
-      case state.stack {
-        [right, left, ..rest] ->
-          fused_cmp_jump(
-            State(..state, stack: rest),
-            kind,
-            left,
-            right,
-            target,
-            when,
-          )
-        _ -> underflow(state, "CmpJump")
-      }
-
-    CmpConstJump(const_index, kind, Pc(target), when) ->
-      case state.stack {
-        [left, ..rest] ->
-          fused_cmp_jump(
-            State(..state, stack: rest),
-            kind,
-            left,
-            tuple_array.get_unchecked(const_index, state.func.constants),
-            target,
-            when,
-          )
-        _ -> underflow(state, "CmpConstJump")
-      }
-
-    Safepoint ->
-      Ok(safepoint.maybe_collect_at_return(State(..state, pc: state.pc + 1)))
-
-    JumpIfFalse(Pc(target)) -> {
-      use v <- conditional_jump(state, target)
-      !rt_val.to_boolean(v)
-    }
-
-    JumpIfTrue(Pc(target)) -> conditional_jump(state, target, rt_val.to_boolean)
-
-    JumpIfLocal(index, Pc(target), when) -> {
-      let v = tuple_array.get_unchecked(index, state.locals)
-      case kernel.is(v, kernel.JsTdz) {
-        True -> tdz_reference_error(state)
-        False ->
-          case rt_val.to_boolean(v) == when {
-            True -> Ok(State(..state, pc: target))
-            False -> Ok(State(..state, pc: state.pc + 1))
-          }
-      }
-    }
-
-    IterateView(view, Pc(hit)) ->
-      case state.stack {
-        [receiver, ..rest] -> {
-          let rec = rt_lang.view_iter_start(state.agent, receiver, view)
-          case kernel.is(rec, kernel.Miss) {
-            True -> Ok(State(..state, pc: state.pc + 1))
-            False -> Ok(State(..state, stack: [rec, ..rest], pc: hit))
-          }
-        }
-        [] -> underflow(state, "IterateView")
-      }
-
-    UnpackArray(count, Pc(miss)) ->
-      case state.stack {
-        [array, ..rest] -> {
-          let unpacked = kernel.unpack_array(state.agent, array, count, rest)
-          case kernel.is(unpacked, kernel.Miss) {
-            True -> Ok(State(..state, pc: miss))
-            False -> Ok(State(..state, stack: unpacked, pc: state.pc + 1))
-          }
-        }
-        [] -> underflow(state, "UnpackArray")
-      }
-
-    JumpIfNullish(Pc(target)) ->
-      conditional_jump(state, target, rt_val.is_nullish)
-    JumpIfNotNullish(Pc(target)) -> {
-      use v <- conditional_jump(state, target)
-      !rt_val.is_nullish(v)
-    }
-
-    JumpIfFalseOrPop(Pc(target)) -> {
-      use v <- jump_or_pop(state, target)
-      !rt_val.to_boolean(v)
-    }
-    JumpIfTrueOrPop(Pc(target)) -> jump_or_pop(state, target, rt_val.to_boolean)
-    JumpIfNotNullishOrPop(Pc(target)) -> {
-      use v <- jump_or_pop(state, target)
-      !rt_val.is_nullish(v)
-    }
-    JumpUndefinedIfNullish(Pc(target)) ->
-      case state.stack {
-        [top, ..rest] ->
-          case rt_val.is_nullish(top) {
-            True ->
-              Ok(State(..state, stack: [mk_undefined(), ..rest], pc: target))
-            False -> Ok(State(..state, pc: state.pc + 1))
-          }
-        [] -> underflow(state, "JumpUndefinedIfNullish")
-      }
-
-    // quickjs op_gosub
-    Gosub(Pc(target)) ->
-      Ok(
-        State(..state, stack: [mk_int(state.pc + 1), ..state.stack], pc: target),
-      )
-
     // quickjs op_ret; negative retpc: value below is the return value
     Ret ->
       case state.stack {
@@ -5356,12 +898,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             _, _ -> underflow(state, "Ret")
           }
         [] -> underflow(state, "Ret")
-      }
-
-    PopTry ->
-      case state.try_stack {
-        [_, ..rest] -> Ok(State(..state, try_stack: rest, pc: state.pc + 1))
-        [] -> underflow(state, "PopTry: empty try_stack")
       }
 
     Throw ->
@@ -5378,7 +914,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetField(k) ->
       case state.stack {
         [receiver, ..rest] -> {
-          use <- getter_as_frame(state, receiver, k, rest, drive)
+          use <- getter_as_frame(state, receiver, k, rest)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
@@ -5388,7 +924,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetFieldKeep(k) ->
       case state.stack {
         [receiver, ..rest] -> {
-          use <- getter_as_frame(state, receiver, k, state.stack, drive)
+          use <- getter_as_frame(state, receiver, k, state.stack)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
         }
@@ -5396,52 +932,32 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     GetLocalField(index, k) -> {
-      let receiver = tuple_array.get_unchecked(index, state.locals)
+      let receiver = tuple_array.element(index, state.locals)
       case kernel.is(receiver, kernel.JsTdz) {
         True -> tdz_reference_error(state)
         False -> {
-          use <- getter_as_frame(state, receiver, k, state.stack, drive)
+          use <- getter_as_frame(state, receiver, k, state.stack)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, ..state.stack], pc: state.pc + 1)
         }
       }
     }
 
-    GetFieldCall(k) ->
-      case state.stack {
-        [receiver, ..rest] -> {
-          use #(method, state) <- result.try(get_field(state, receiver, k))
-          call.call(state, method, receiver, [], rest, drive)
-        }
-        [] -> underflow(state, "GetFieldCall")
-      }
-
     GetFieldCall1(k, arg_idx) ->
       case state.stack {
         [receiver, ..rest] -> {
           use #(method, state) <- result.try(get_field(state, receiver, k))
-          let arg = tuple_array.get_unchecked(arg_idx, state.locals)
+          let arg = tuple_array.element(arg_idx, state.locals)
           case kernel.is(arg, kernel.JsTdz) {
             True -> tdz_reference_error(state)
-            False -> call.call(state, method, receiver, [arg], rest, drive)
+            False -> call.call(state, method, receiver, [arg], rest)
           }
         }
         [] -> underflow(state, "GetFieldCall1")
       }
 
-    GetLocalFieldCall(index, k) -> {
-      let receiver = tuple_array.get_unchecked(index, state.locals)
-      case kernel.is(receiver, kernel.JsTdz) {
-        True -> tdz_reference_error(state)
-        False -> {
-          use #(method, state) <- result.try(get_field(state, receiver, k))
-          call.call(state, method, receiver, [], state.stack, drive)
-        }
-      }
-    }
-
     GetLocalFieldKeep(index, k) -> {
-      let receiver = tuple_array.get_unchecked(index, state.locals)
+      let receiver = tuple_array.element(index, state.locals)
       case kernel.is(receiver, kernel.JsTdz) {
         True -> tdz_reference_error(state)
         False -> {
@@ -5455,35 +971,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
     }
 
-    PutLocalLocalField(obj, value, k) -> {
-      let receiver = tuple_array.get_unchecked(obj, state.locals)
-      let val = tuple_array.get_unchecked(value, state.locals)
-      case kernel.is(receiver, kernel.JsTdz) || kernel.is(val, kernel.JsTdz) {
-        True -> tdz_reference_error(state)
-        False -> put_field_step(state, k, val, receiver, state.stack)
-      }
-    }
-
-    PutLocalConstField(obj, const_index, k) -> {
-      let receiver = tuple_array.get_unchecked(obj, state.locals)
-      case kernel.is(receiver, kernel.JsTdz) {
-        True -> tdz_reference_error(state)
-        False ->
-          put_field_step(
-            state,
-            k,
-            tuple_array.get_unchecked(const_index, state.func.constants),
-            receiver,
-            state.stack,
-          )
-      }
-    }
-
     PutField(k) ->
       case state.stack {
         [value, receiver, ..rest] -> {
           let after = [value, ..rest]
-          use <- setter_as_frame(state, receiver, k, value, after, drive)
+          use <- setter_as_frame(state, receiver, k, value, after)
           put_field_step(state, k, value, receiver, after)
         }
         _ -> underflow(state, "PutField")
@@ -5492,7 +984,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     PutFieldPop(k) ->
       case state.stack {
         [value, receiver, ..rest] -> {
-          use <- setter_as_frame(state, receiver, k, value, rest, drive)
+          use <- setter_as_frame(state, receiver, k, value, rest)
           put_field_step(state, k, value, receiver, rest)
         }
         _ -> underflow(state, "PutFieldPop")
@@ -5866,7 +1358,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 StringKey(k),
               ))
               // §13.5.1.2 step 5.b.i
-              case deleted, state.func.is_strict {
+              case deleted, state.frame.func.is_strict {
                 False, True ->
                   state.throw_type_error(
                     state,
@@ -5906,7 +1398,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 h,
                 pk,
               ))
-              case deleted, state.func.is_strict {
+              case deleted, state.frame.func.is_strict {
                 False, True ->
                   state.throw_type_error(state, "Cannot delete property")
                 _, _ ->
@@ -5971,15 +1463,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           )
       }
 
-    ArrayFrom(count) ->
-      case pop_n(state.stack, count) {
-        Some(#(items, rest)) -> {
-          let #(arr, agent) = rt_obj.new_array(state.agent, items)
-          Ok(State(..state, agent:, stack: [arr, ..rest], pc: state.pc + 1))
-        }
-        None -> underflow(state, "ArrayFrom")
-      }
-
     // emitter guarantees holes non-empty, ascending, within count
     ArrayFromWithHoles(count, holes) ->
       case pop_n(state.stack, count - list.length(holes)) {
@@ -5997,11 +1480,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "GetElem")
       }
 
-    GetElemLocals(obj, key_idx) -> {
-      use receiver <- local_or_tdz(state, obj)
-      use k <- local_or_tdz(state, key_idx)
-      get_elem_step(state, receiver, k, state.stack)
-    }
     GetElemPostInc(obj, key_idx) -> {
       use receiver <- local_or_tdz(state, obj)
       use stepped <- result.try(fused_postfix_local(
@@ -6122,7 +1600,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case pop_n(state.stack, arity) {
         Some(#(args, [callee, ..rest_stack])) ->
           case global_fns.is_intrinsic_eval(state.agent, callee) {
-            False -> step(state, drive, Call(arity))
+            False -> call.call(state, callee, mk_undefined(), args, rest_stack)
             True -> {
               let #(res, new_state) =
                 eval.direct(
@@ -6131,7 +1609,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   param_scope_names,
                   with_names,
                   private_names,
-                  run_eval_body(_, drive),
+                  run_eval_body,
                 )
               case res {
                 Ok(val) ->
@@ -6146,72 +1624,32 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               }
             }
           }
-        _ -> step(state, drive, Call(arity))
-      }
-
-    Call(arity) ->
-      case pop_n(state.stack, arity) {
-        Some(#(args, [callee, ..rest_stack])) ->
-          call.call(state, callee, mk_undefined(), args, rest_stack, drive)
-        Some(#(_, [])) -> underflow(state, "Call: no callee")
-        None -> underflow(state, "Call: not enough args")
-      }
-
-    CallMethod(arity) ->
-      case pop_n(state.stack, arity) {
-        Some(#(args, [method, receiver, ..rest_stack])) ->
-          call.call(state, method, receiver, args, rest_stack, drive)
-        Some(#(_, _)) -> underflow(state, "CallMethod")
-        None -> underflow(state, "CallMethod: not enough args")
-      }
-
-    CallNew(arity) ->
-      case pop_n(state.stack, arity) {
-        Some(#(args, [ctor, ..rest_stack])) ->
-          call.construct(state, ctor, args, rest_stack, ctor, drive)
-        Some(#(_, _)) -> underflow(state, "CallNew")
-        None -> underflow(state, "CallNew: not enough args")
-      }
-
-    CallConstructor(arity) ->
-      case pop_n(state.stack, arity) {
-        Some(#(args, [new_target, ctor, ..rest_stack])) ->
-          call.construct(state, ctor, args, rest_stack, new_target, drive)
-        Some(#(_, _)) -> underflow(state, "CallConstructor")
-        None -> underflow(state, "CallConstructor: not enough args")
+        _ -> underflow(state, "CallEval")
       }
 
     ApplyArguments(slot:, simple_params:) ->
       case state.stack {
         [this_arg, apply_fn, target, ..rest] -> {
-          let cached = tuple_array.get_unchecked(slot, state.locals)
+          let cached = tuple_array.element(slot, state.locals)
           case
             rt_val.is_object(cached),
             is_intrinsic_apply(state.agent, apply_fn)
           {
             False, True ->
-              call.call(state, target, this_arg, state.call_args, rest, drive)
+              call.call(state, target, this_arg, state.frame.call_args, rest)
             False, False -> {
               let #(obj, agent) = call.arguments_object(state, simple_params)
-              let locals = tuple_array.set_unchecked(slot, obj, state.locals)
+              let locals = tuple_array.set_element(slot, state.locals, obj)
               call.call(
                 State(..state, agent:, locals:),
                 apply_fn,
                 target,
                 [this_arg, obj],
                 rest,
-                drive,
               )
             }
             True, _ ->
-              call.call(
-                state,
-                apply_fn,
-                target,
-                [this_arg, cached],
-                rest,
-                drive,
-              )
+              call.call(state, apply_fn, target, [this_arg, cached], rest)
           }
         }
         _ -> underflow(state, "ApplyArguments")
@@ -6226,7 +1664,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             mk_undefined(),
             call.array_values(state.agent, args_arr),
             rest,
-            drive,
           )
         _ -> underflow(state, "CallApply")
       }
@@ -6240,7 +1677,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             receiver,
             call.array_values(state.agent, args_arr),
             rest,
-            drive,
           )
         _ -> underflow(state, "CallMethodApply")
       }
@@ -6254,7 +1690,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             call.array_values(state.agent, args_arr),
             rest,
             new_target,
-            drive,
           )
         _ -> underflow(state, "CallConstructorApply")
       }
@@ -6300,7 +1735,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 this_val,
               ))
               // §6.2.5.6 putvalue step 5.c
-              case ok, state.func.is_strict {
+              case ok, state.frame.func.is_strict {
                 False, True ->
                   state.throw_type_error(
                     state,
@@ -6335,30 +1770,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           )
         }
         _ -> underflow(state, "ForInStart")
-      }
-
-    ForInNext ->
-      case state.stack {
-        [iter, ..rest] ->
-          case kernel.for_in_next(iter) {
-            kernel.ForInKey(key:, rest: iter) ->
-              Ok(
-                State(
-                  ..state,
-                  stack: [mk_bool(False), key, iter, ..rest],
-                  pc: state.pc + 1,
-                ),
-              )
-            kernel.ForInEnd ->
-              Ok(
-                State(
-                  ..state,
-                  stack: [mk_bool(True), mk_undefined(), iter, ..rest],
-                  pc: state.pc + 1,
-                ),
-              )
-          }
-        _ -> underflow(state, "ForInNext")
       }
 
     // §7.4.1 getiterator sync
@@ -6434,9 +1845,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               use <- bool.lazy_guard(rt_lang.is_array_iter(rec), fn() {
                 array_iter_next_general(state, rec, rest)
               })
-              case kernel.iter_step(state.agent.store, rec) {
-                kernel.Advanced(done, val, store) -> {
-                  let agent = Agent(..state.agent, store:)
+              case kernel.iter_step(state.agent, rec) {
+                kernel.Advanced(done, val, agent) -> {
                   let record = case done {
                     True -> mk_undefined()
                     False -> rec
@@ -6450,9 +1860,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     ),
                   )
                 }
-                kernel.PairAdvanced(key, value, store) -> {
-                  let #(pair, agent) =
-                    rt_obj.new_array(Agent(..state.agent, store:), [key, value])
+                kernel.PairAdvanced(key, value, agent) -> {
+                  let #(pair, agent) = rt_obj.new_array(agent, [key, value])
                   Ok(
                     State(
                       ..state,
@@ -6462,7 +1871,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     ),
                   )
                 }
-                plan -> iterator_next_general(state, drive, rec, rest, plan)
+                plan -> iterator_next_general(state, rec, rest, plan)
               }
             }
           }
@@ -6562,7 +1971,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           )
           use #(#(done, val), state) <- result.try(delegate_step(
             state,
-            drive,
             iterator,
             next_fn,
             arg,
@@ -6589,7 +1997,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "AsyncYieldStarNext")
       }
 
-    AsyncYieldStarResume(next_pc: Pc(next_pc)) ->
+    AsyncYieldStarResume(next_pc:) ->
       case state.stack {
         [res, _iter, ..rest] -> {
           use #(#(done, val), state) <- result.try(guarded2(
@@ -6604,8 +2012,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         }
         _ -> underflow(state, "AsyncYieldStarResume")
       }
-
-    CreateRestArray(from_index) -> Ok(call.create_rest_array(state, from_index))
 
     // §13.2.7.3 fresh regexp per evaluation
     NewRegExp ->
@@ -6717,7 +2123,7 @@ fn read_box(state: State, local: JsVal) -> Option(JsVal) {
 }
 
 fn lookup_eval_env(state: State, name: String) -> Option(JsVal) {
-  option.then(state.eval_env, rt_env.eval_env_lookup(state.agent, _, name))
+  option.then(state.frame.eval_env, rt_env.eval_env_lookup(state.agent, _, name))
 }
 
 // §6.2.5.6 putvalue, static key
@@ -6737,7 +2143,7 @@ fn put_field_step(
         StringKey(k),
         value,
       ))
-      case ok, state.func.is_strict {
+      case ok, state.frame.func.is_strict {
         False, True ->
           state.throw_type_error(
             state,
@@ -6758,7 +2164,7 @@ fn put_field_step(
           <> "')",
       )
     _ ->
-      case state.func.is_strict {
+      case state.frame.func.is_strict {
         True ->
           state.throw_type_error(
             state,
@@ -6825,7 +2231,7 @@ fn global_object_put(
 ) -> Result(State, StepExit) {
   let global = mk_object(state.agent.realm.global_object)
   let k = StringKey(named(name))
-  case state.func.is_strict {
+  case state.frame.func.is_strict {
     True -> {
       use #(has, state) <- result.try(guarded3(
         state,
@@ -6896,7 +2302,7 @@ fn with_get_var(
                 rt_env.with_get_binding_value,
                 h,
                 name,
-                state.func.is_strict,
+                state.frame.func.is_strict,
               ))
               let below = case keep_this {
                 True -> [obj, ..rest]
@@ -6908,53 +2314,6 @@ fn with_get_var(
         }
       }
     [] -> underflow(state, op)
-  }
-}
-
-fn pure_binop_general(
-  state: State,
-  op: binop.PureBinOp,
-  left: JsVal,
-  right: JsVal,
-  then: fn(JsVal, Agent) -> Result(r, StepExit),
-) -> Result(r, StepExit) {
-  let cmp = fn(f) {
-    use r, agent <- guard.then3(state, state.agent, f, left, right)
-    then(mk_bool(r == 1), agent)
-  }
-  case op {
-    binop.Arith(binop.Sub) ->
-      guard.then3(state, state.agent, rt_ops.sub, left, right, then)
-    binop.Arith(binop.Mul) ->
-      guard.then3(state, state.agent, rt_ops.mul, left, right, then)
-    binop.Arith(binop.Div) ->
-      guard.then3(state, state.agent, rt_ops.div, left, right, then)
-    binop.Arith(binop.Mod) ->
-      guard.then3(state, state.agent, rt_ops.mod, left, right, then)
-    binop.Arith(binop.Exp) ->
-      guard.then3(state, state.agent, rt_ops.pow, left, right, then)
-    binop.Bitwise(binop.BitAnd) ->
-      guard.then3(state, state.agent, rt_ops.bitand_general, left, right, then)
-    binop.Bitwise(binop.BitOr) ->
-      guard.then3(state, state.agent, rt_ops.bitor_general, left, right, then)
-    binop.Bitwise(binop.BitXor) ->
-      guard.then3(state, state.agent, rt_ops.bitxor_general, left, right, then)
-    binop.Bitwise(binop.ShiftLeft) ->
-      guard.then3(state, state.agent, rt_ops.shl_general, left, right, then)
-    binop.Bitwise(binop.ShiftRight) ->
-      guard.then3(state, state.agent, rt_ops.shr_general, left, right, then)
-    binop.Bitwise(binop.ShiftRightUnsigned) ->
-      guard.then3(state, state.agent, rt_ops.ushr_general, left, right, then)
-    binop.Compare(binop.Less) -> cmp(rt_ops.lt_i32)
-    binop.Compare(binop.LessEq) -> cmp(rt_ops.le_i32)
-    binop.Compare(binop.Greater) -> cmp(rt_ops.gt_i32)
-    binop.Compare(binop.GreaterEq) -> cmp(rt_ops.ge_i32)
-    binop.Equality(binop.LooseEq) -> cmp(rt_ops.eq_i32_general)
-    binop.Equality(binop.LooseNotEq) -> cmp(rt_ops.neq_i32)
-    binop.Equality(binop.StrictEq) ->
-      then(mk_bool(rt_val.strict_eq(left, right)), state.agent)
-    binop.Equality(binop.StrictNotEq) ->
-      then(mk_bool(!rt_val.strict_eq(left, right)), state.agent)
   }
 }
 
@@ -6979,7 +2338,7 @@ fn fused_update_local(
   increment increment: Bool,
 ) -> Result(State, StepExit) {
   let next_pc = state.pc + 1
-  let v = tuple_array.get_unchecked(index, state.locals)
+  let v = tuple_array.element(index, state.locals)
   case kernel.is(v, kernel.JsTdz) {
     True -> tdz_reference_error(state)
     False -> {
@@ -6989,7 +2348,7 @@ fn fused_update_local(
         True -> guarded3(state, rt_ops.add, n, one)
         False -> guarded3(state, rt_ops.sub, n, one)
       })
-      let locals = tuple_array.set_unchecked(index, r, state.locals)
+      let locals = tuple_array.set_element(index, state.locals, r)
       State(..state, locals:, pc: next_pc)
     }
   }
@@ -7042,7 +2401,7 @@ fn put_elem_step(
         pk,
         val,
       ))
-      case ok, state.func.is_strict {
+      case ok, state.frame.func.is_strict {
         False, True ->
           state.throw_type_error(
             state,
@@ -7057,7 +2416,7 @@ fn put_elem_step(
         "Cannot set properties of undefined or null",
       )
     _ ->
-      case state.func.is_strict {
+      case state.frame.func.is_strict {
         True ->
           state.throw_type_error(
             state,
@@ -7081,7 +2440,7 @@ fn fused_postfix_local(
     True -> guarded3(state, rt_ops.add, n, one)
     False -> guarded3(state, rt_ops.sub, n, one)
   })
-  let locals = tuple_array.set_unchecked(index, r, state.locals)
+  let locals = tuple_array.set_element(index, state.locals, r)
   State(..state, stack: [n, ..state.stack], locals:, pc: next_pc)
 }
 
@@ -7090,7 +2449,7 @@ fn local_or_tdz(
   index: Int,
   k: fn(JsVal) -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
-  let v = tuple_array.get_unchecked(index, state.locals)
+  let v = tuple_array.element(index, state.locals)
   case kernel.is(v, kernel.JsTdz) {
     True -> tdz_reference_error(state)
     False -> k(v)
@@ -7099,7 +2458,7 @@ fn local_or_tdz(
 
 fn binop_step(
   state: State,
-  kind: binop.ClassifiedBinOp,
+  kind: binop.BinOp,
   left: JsVal,
   right: JsVal,
   rest: List(JsVal),
@@ -7108,28 +2467,19 @@ fn binop_step(
   Ok(State(..state, agent:, stack: [r, ..rest], pc: state.pc + 1))
 }
 
-fn binop_put_step(
-  state: State,
-  kind: binop.ClassifiedBinOp,
-  left: JsVal,
-  right: JsVal,
-  rest: List(JsVal),
-  dst: Int,
-) -> Result(State, StepExit) {
-  use r, agent <- binop_value(state, kind, left, right)
-  let locals = tuple_array.set_unchecked(dst, r, state.locals)
-  Ok(State(..state, agent:, stack: rest, locals:, pc: state.pc + 1))
-}
-
 fn binop_value(
   state: State,
-  kind: binop.ClassifiedBinOp,
+  kind: binop.BinOp,
   left: JsVal,
   right: JsVal,
   then: fn(JsVal, Agent) -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
+  let cmp = fn(f) {
+    use r, agent <- guard.then3(state, state.agent, f, left, right)
+    then(mk_bool(r == 1), agent)
+  }
   case kind {
-    binop.InstanceOfOp -> {
+    binop.InstanceOf -> {
       use r, agent <- guard.then3(
         state,
         state.agent,
@@ -7139,7 +2489,7 @@ fn binop_value(
       )
       then(mk_bool(r), agent)
     }
-    binop.InOp ->
+    binop.In ->
       case rt_val.is_object(right) {
         True -> {
           use r, agent <- guard.then3(
@@ -7160,25 +2510,33 @@ fn binop_value(
               <> inspect(state, right),
           )
       }
-    binop.AddOp ->
-      guard.then3(state, state.agent, rt_ops.add, left, right, then)
-    binop.PureOp(op) -> pure_binop_general(state, op, left, right, then)
-  }
-}
-
-fn fused_cmp_jump(
-  state: State,
-  kind: binop.PureBinOp,
-  left: JsVal,
-  right: JsVal,
-  target: Int,
-  when when: Bool,
-) -> Result(State, StepExit) {
-  let next_pc = state.pc + 1
-  use r, agent <- pure_binop_general(state, kind, left, right)
-  case rt_val.to_boolean(r) == when {
-    True -> Ok(State(..state, agent:, pc: target))
-    False -> Ok(State(..state, agent:, pc: next_pc))
+    binop.Add -> guard.then3(state, state.agent, rt_ops.add, left, right, then)
+    binop.Sub -> guard.then3(state, state.agent, rt_ops.sub, left, right, then)
+    binop.Mul -> guard.then3(state, state.agent, rt_ops.mul, left, right, then)
+    binop.Div -> guard.then3(state, state.agent, rt_ops.div, left, right, then)
+    binop.Mod -> guard.then3(state, state.agent, rt_ops.mod, left, right, then)
+    binop.Exp -> guard.then3(state, state.agent, rt_ops.pow, left, right, then)
+    binop.BitAnd ->
+      guard.then3(state, state.agent, rt_ops.bitand_general, left, right, then)
+    binop.BitOr ->
+      guard.then3(state, state.agent, rt_ops.bitor_general, left, right, then)
+    binop.BitXor ->
+      guard.then3(state, state.agent, rt_ops.bitxor_general, left, right, then)
+    binop.ShiftLeft ->
+      guard.then3(state, state.agent, rt_ops.shl_general, left, right, then)
+    binop.ShiftRight ->
+      guard.then3(state, state.agent, rt_ops.shr_general, left, right, then)
+    binop.ShiftRightUnsigned ->
+      guard.then3(state, state.agent, rt_ops.ushr_general, left, right, then)
+    binop.Less -> cmp(rt_ops.lt_i32)
+    binop.LessEq -> cmp(rt_ops.le_i32)
+    binop.Greater -> cmp(rt_ops.gt_i32)
+    binop.GreaterEq -> cmp(rt_ops.ge_i32)
+    binop.LooseEq -> cmp(rt_ops.eq_i32_general)
+    binop.LooseNotEq -> cmp(rt_ops.neq_i32)
+    binop.StrictEq -> then(mk_bool(rt_val.strict_eq(left, right)), state.agent)
+    binop.StrictNotEq ->
+      then(mk_bool(!rt_val.strict_eq(left, right)), state.agent)
   }
 }
 
@@ -7355,14 +2713,14 @@ fn fill_holes(
   }
 }
 
-fn iterator_next_general(
+// called by name from threaded code
+pub fn iterator_next_general(
   state: State,
-  drive: Drive,
   rec: JsVal,
   rest: List(JsVal),
   plan: kernel.IterPlan,
 ) -> Result(State, StepExit) {
-  case next_by_plan(state, drive, rec, plan) {
+  case next_by_plan(state, rec, plan) {
     Ok(#(#(done, val), state)) -> {
       let record = case done {
         True -> mk_undefined()
@@ -7387,13 +2745,11 @@ fn iterator_next_general(
 
 fn next_by_plan(
   state: State,
-  drive: Drive,
   rec: JsVal,
   plan: kernel.IterPlan,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   case plan {
-    kernel.ResumeGenerator(gen_h) ->
-      gen_step(state, drive, gen_h, mk_undefined())
+    kernel.ResumeGenerator(gen_h) -> gen_step(state, gen_h, mk_undefined())
     kernel.Advanced(..) | kernel.PairAdvanced(..) | kernel.IterMiss ->
       guarded2(state, rt_lang.iter_next, rec)
   }
@@ -7402,7 +2758,6 @@ fn next_by_plan(
 // §27.5.3.3; same-realm parked body resumes on this stack
 fn gen_step(
   state: State,
-  drive: Drive,
   gen_h: Handle,
   sent: JsVal,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
@@ -7421,12 +2776,8 @@ fn gen_step(
     ->
       case frame.parked {
         ParkedOp ->
-          resume_inline(state, drive, gen_h, resume, frame, [
-            sent,
-            ..frame.stack
-          ])
-        ParkedStart ->
-          resume_inline(state, drive, gen_h, resume, frame, frame.stack)
+          resume_inline(state, gen_h, resume, frame, [sent, ..frame.stack])
+        ParkedStart -> resume_inline(state, gen_h, resume, frame, frame.stack)
         _ -> guarded3(state, rt_async.gen_step, gen_h, sent)
       }
     _ -> guarded3(state, rt_async.gen_step, gen_h, sent)
@@ -7435,26 +2786,21 @@ fn gen_step(
 
 fn resume_inline(
   state: State,
-  drive: Drive,
   gen_h: Handle,
   resume: types.Resume,
   frame: SuspendedFrame,
   stack: List(JsVal),
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   let agent = state.agent
-  let store = agent.store
   let depth = agent.call_depth
   let frames = agent.frames
   let running =
     Agent(
       ..agent,
-      store: Store(
-        ..store,
-        cells: arena.set(
-          gen_h.id,
-          types.SGenerator(state: types.GenExecuting, resume:),
-          store.cells,
-        ),
+      cells: arena.set(
+        gen_h.id,
+        types.SGenerator(state: types.GenExecuting, resume:),
+        agent.cells,
       ),
       call_depth: depth + 1,
       frames: [
@@ -7466,8 +2812,28 @@ fn resume_inline(
       ],
     )
   let body = park.unpark_with(running, frame, stack)
+  generator_stopped(
+    state,
+    gen_h,
+    resume,
+    depth,
+    frames,
+    guard.guard1(run_resumed, body),
+  )
+}
+
+// what a run of a generator's body came to, back in the state that resumed it;
+// also called by name from threaded code
+pub fn generator_stopped(
+  state: State,
+  gen_h: Handle,
+  resume: types.Resume,
+  depth: Int,
+  frames: List(types.FrameInfo),
+  outcome: guard.Guarded(Result(#(Outcome, State), VmError)),
+) -> Result(#(#(Bool, JsVal), State), StepExit) {
   let completed = types.SGenerator(state: types.GenCompleted, resume:)
-  case guard.guard2(run_resumed, body, drive) {
+  case outcome {
     Value(value: Ok(#(Suspended(state.Yield, v), post)), ..) -> {
       let parked = types.ResumeFrame(park.park(post, ParkedOp))
       let gen = types.SGenerator(state: types.GenSuspendedYield, resume: parked)
@@ -7536,20 +2902,16 @@ fn settle_generator(
   frames: List(types.FrameInfo),
   cell: types.Cell,
 ) -> Agent {
-  let store = agent.store
   Agent(
     ..agent,
-    store: Store(..store, cells: arena.set(gen_h.id, cell, store.cells)),
+    cells: arena.set(gen_h.id, cell, agent.cells),
     call_depth: depth,
     frames:,
   )
 }
 
-fn run_resumed(
-  body: State,
-  drive: Drive,
-) -> #(Result(#(Outcome, State), VmError), Agent) {
-  case execute(body, drive) {
+fn run_resumed(body: State) -> #(Result(#(Outcome, State), VmError), Agent) {
+  case execute(body) {
     Ok(#(_, post)) as res -> #(res, post.agent)
     Error(err) -> #(Error(err), body.agent)
   }
@@ -7557,13 +2919,12 @@ fn run_resumed(
 
 fn delegate_step(
   state: State,
-  drive: Drive,
   iterator: JsVal,
   next_fn: JsVal,
   arg: JsVal,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   case native_generator(state.agent, iterator, next_fn) {
-    Some(gen_h) -> gen_step(state, drive, gen_h, arg)
+    Some(gen_h) -> gen_step(state, gen_h, arg)
     None -> {
       use #(res, state) <- result.try(
         guarded4(state, rt_call.call, next_fn, iterator, [arg]),
@@ -7722,12 +3083,9 @@ fn pop_n_loop(
   }
 }
 
-fn run_eval_body(
-  activation: State,
-  drive: Drive,
-) -> #(Result(JsVal, JsVal), Agent) {
-  let agent = frames.push_frame_info(activation.agent, activation.func)
-  let #(res, state) = execute_to_completion(State(..activation, agent:), drive)
+fn run_eval_body(activation: State) -> #(Result(JsVal, JsVal), Agent) {
+  let agent = frames.push_frame_info(activation.agent, activation.frame.func)
+  let #(res, state) = execute_to_completion(State(..activation, agent:))
   #(res, frames.pop_frame_info(state.agent))
 }
 
@@ -7737,10 +3095,9 @@ fn getter_as_frame(
   receiver: JsVal,
   k: key.PropertyKey,
   rest: List(JsVal),
-  drive: Drive,
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
-  accessor_as_frame(state, receiver, k, rest, drive, None, otherwise)
+  accessor_as_frame(state, receiver, k, rest, None, otherwise)
 }
 
 // then, when given, finishes the op with the getter's result
@@ -7749,7 +3106,6 @@ fn accessor_as_frame(
   receiver: JsVal,
   k: key.PropertyKey,
   rest: List(JsVal),
-  drive: Drive,
   then: Option(fn(JsVal, State) -> Result(State, StepExit)),
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
@@ -7757,7 +3113,7 @@ fn accessor_as_frame(
     key.Named(..) ->
       case kernel.find_accessor(state.agent, receiver, k) {
         kernel.Accessor(get: Some(f), ..) ->
-          call_as_frame(state, f, receiver, [], rest, drive, then, otherwise)
+          call_as_frame(state, f, receiver, [], rest, then, otherwise)
         _ -> otherwise()
       }
     _ -> otherwise()
@@ -7771,7 +3127,6 @@ fn setter_as_frame(
   k: key.PropertyKey,
   value: JsVal,
   stack_after: List(JsVal),
-  drive: Drive,
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
   case k {
@@ -7787,7 +3142,6 @@ fn setter_as_frame(
             receiver,
             [value],
             stack_after,
-            drive,
             Some(finish),
             otherwise,
           )
@@ -7805,7 +3159,6 @@ fn call_as_frame(
   this: JsVal,
   args: List(JsVal),
   rest: List(JsVal),
-  drive: Drive,
   then: Option(fn(JsVal, State) -> Result(State, StepExit)),
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
@@ -7840,7 +3193,6 @@ fn call_as_frame(
         this,
         None,
         mk_undefined(),
-        drive,
         then,
       )
     }
@@ -7884,15 +3236,7 @@ fn put_boxed_check_init(state: State, local: JsVal) -> Result(State, StepExit) {
           case kernel.is(current, kernel.JsTdz) {
             True -> {
               let agent = rt_store.cell_set(state.agent, box, SBox(new_value))
-              Ok(
-                State(
-                  ..state,
-                  agent:,
-                  stack: rest,
-                  this: new_value,
-                  pc: state.pc + 1,
-                ),
-              )
+              Ok(State(..state, agent:, stack: rest, pc: state.pc + 1))
             }
             False ->
               state.throw_reference_error(

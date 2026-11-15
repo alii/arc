@@ -40,7 +40,7 @@ pub fn create_realm_registers_a_distinct_realm_test() {
   let #(other, st) = rt_builtins.create_realm(st0)
   assert st.realm.id == 0
   assert other.id == 1
-  assert dict.size(st.realms) == 2
+  assert dict.size(st.store.meta.realms) == 2
   assert rt_call.realm_by_id(st, 1) == other
   assert rt_call.realm_by_id(st, 0) == st.realm
   assert other.object.prototype != st.realm.object.prototype
@@ -105,7 +105,7 @@ pub fn install_262_and_create_realm_test() {
     rt_obj.set_prop(st, dollar, StringKey(named("agent")), agent_obj)
   let #(child, st) = rt_helpers.call_method(st, dollar, "createRealm", [])
   assert st.realm.id == 0
-  assert dict.size(st.realms) == 2
+  assert dict.size(st.store.meta.realms) == 2
   let child_global = get(st, child, "global")
   assert child_global == mk_object(rt_call.realm_by_id(st, 1).global_object)
   assert child_global != mk_object(st.realm.global_object)

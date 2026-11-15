@@ -12,7 +12,8 @@
 %% FFI: negatives clamp to 0, past the end is offset_out_of_range, and a
 %% continuation byte is a plain no_match.
 -module(arc_regexp_ffi).
--export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4]).
+-export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4,
+         regexp_exec_short/4, can_trust/1, trusting/1, has_flag/2]).
 
 -define(RS, 30).   %% U+001E record separator inside a payload
 
@@ -34,6 +35,15 @@ regexp_compile(Pattern, Flags) when is_binary(Pattern), is_binary(Flags) ->
 is_compiled({ok, {{js, _, _}, _GroupCount, _Names}}) -> true;
 is_compiled({error, {pattern_compile_failed, _Reason}}) -> true;
 is_compiled(_) -> false.
+
+has_flag(<<C, _/binary>>, <<C>>) -> true;
+has_flag(<<_, R/binary>>, F) -> has_flag(R, F);
+has_flag(<<>>, _) -> false.
+
+%% the browser's engine runs everything, and has no check to skip
+regexp_exec_short(_, _, _, _) -> none.
+can_trust(_) -> false.
+trusting(Compiled) -> Compiled.
 
 %% regexp_exec_compiled(Compiled, String, Offset, Sticky) ->
 %%     {ok, {{Start, Len}, [{S, L} | {-1, 0}], GroupCount, Names}}

@@ -5,6 +5,7 @@ import arc/interp/frames
 import arc/interp/guard
 import arc/interp/resume
 import arc/interp/state.{type State, State}
+import arc/interp/thread
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/call.{type Completion} as rt_call
 import arc/rt/limits
@@ -37,7 +38,7 @@ fn linked_ops(ops: JsOps) -> JsOps {
 
 fn run(state: State) -> #(Result(JsVal, JsVal), Agent) {
   let m = frames.mark(state.agent)
-  let agent = frames.push_frame_info(state.agent, state.func)
+  let agent = frames.push_frame_info(state.agent, state.frame.func)
   let body = fn(agent) {
     let #(res, state) = resume.complete(State(..state, agent:), "run")
     #(res, state.agent)
@@ -56,6 +57,7 @@ pub fn run_script(
   agent: Agent,
   template: FuncTemplate,
 ) -> #(Completion(JsVal), Agent) {
+  use <- rt_store.with_room
   let #(res, agent) = run(eval.script_activation(agent, template))
   #(to_completion(res), agent)
 }
@@ -114,56 +116,30 @@ fn prepare_call(
   kind: types.ObjKind,
   this: JsVal,
 ) -> fn(Agent, List(JsVal)) -> #(JsVal, Agent) {
-  let assert BytecodeFn(
-    template:,
-    env:,
-    home_object:,
-    flags:,
-    realm:,
-    unit_id:,
-    ..,
-  ) = kind
+  let assert BytecodeFn(template:, realm:, ..) = kind
     as "prepare_call: not a BytecodeFn kind"
+  let general = fn(kind) {
+    fn(agent, args) { raised(call_bytecode(agent, fn_h, kind, this, args)) }
+  }
+  let settled = bytecode.is_threaded(template) && !bytecode.is_stub(template)
   case
     realm == agent.realm.id
     && !template.is_generator
     && !template.is_async
     && !template.is_class_constructor
   {
-    True -> {
-      let callee =
-        call.root_callee(fn_h, template, env, home_object, flags, unit_id)
-      fn(agent, args) { call_prepared(agent, callee, this, args) }
-    }
-    False -> fn(agent, args) {
-      raised(call_bytecode(agent, fn_h, kind, this, args))
-    }
-  }
-}
-
-fn call_prepared(
-  agent: Agent,
-  callee: call.RootCallee,
-  this: JsVal,
-  args: List(JsVal),
-) -> #(JsVal, Agent) {
-  let frames = agent.frames
-  let depth = agent.call_depth
-  case depth >= limits.max_call_depth {
-    True -> raised(depth_exceeded(agent))
-    False -> {
-      let state = call.root_state(agent, callee, this, args, mk_undefined())
-      case guard.guard1(resume.complete_call, state) {
-        guard.Value(value: Ok(v), agent:) -> #(
-          v,
-          frames.resettle(agent, frames, depth),
-        )
-        guard.Value(value: Error(e), agent:) ->
-          rt_store.throw(frames.resettle(agent, frames, depth), e)
-        guard.Thrown(agent:, thrown:) ->
-          rt_store.throw(frames.resettle(agent, frames, depth), thrown)
+    // its first call leaves the function with the code to run from then on
+    True if !settled -> fn(agent, args) {
+      let assert SObject(kind: BytecodeFn(template:, ..) as kind, ..) =
+        rt_store.cell_get(agent, fn_h)
+        as "prepare_call: the function's cell went away"
+      case bytecode.is_threaded(template) && !bytecode.is_stub(template) {
+        True -> thread.prepare(fn_h, kind, this, general(kind))(agent, args)
+        False -> general(kind)(agent, args)
       }
     }
+    True -> thread.prepare(fn_h, kind, this, general(kind))
+    False -> general(kind)
   }
 }
 
@@ -190,6 +166,7 @@ fn run_call(
   this: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsVal, JsVal), Agent) {
+  let #(template, agent) = thread.for_call(agent, fn_h, template)
   let callee =
     call.root_callee(fn_h, template, env, home_object, flags, unit_id)
   case template.is_generator || template.is_async {
@@ -287,6 +264,7 @@ fn run_construct(
     ..,
   ) = rt_store.cell_get(agent, callee_h)
     as "construct_bytecode: handle is not a BytecodeFn cell"
+  let #(template, agent) = thread.for_call(agent, callee_h, template)
   let m = frames.mark(agent)
   case call.root_this(agent, template, new_target) {
     Error(#(thrown, agent)) -> #(
@@ -350,7 +328,7 @@ fn eval_source(
 
 pub fn run_turn(state: State) -> #(Step, Agent) {
   let m = frames.mark(state.agent)
-  let agent = frames.push_frame_info(state.agent, state.func)
+  let agent = frames.push_frame_info(state.agent, state.frame.func)
   let turn = fn(agent) {
     resume.step_of(resume.executed(State(..state, agent:)))
   }

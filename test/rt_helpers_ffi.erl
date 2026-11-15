@@ -1,5 +1,6 @@
 -module(rt_helpers_ffi).
--export([record/1, recorded/0, counter_state_machine/0]).
+-export([record/1, recorded/0, counter_state_machine/0, reductions/1,
+         improper_list/1]).
 
 record(Term) ->
     self() ! {rt_test_record, Term},
@@ -16,3 +17,12 @@ counter_state_machine() ->
        (St, 1, _Sent, {_, B, _} = Loc) -> {{yield, B, 2, Loc}, St};
        (St, 2, _Sent, {_, _, Done}) -> {{return, Done}, St}
     end.
+
+%% what Run costs, as the vm counts it whatever the machine
+reductions(Run) ->
+    {reductions, Before} = process_info(self(), reductions),
+    Run(),
+    {reductions, After} = process_info(self(), reductions),
+    After - Before.
+
+improper_list(Head) -> [Head | <<"tail">>].

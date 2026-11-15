@@ -52381,6 +52381,7 @@ staging/sm/TypedArray/sort_comparators.js
 staging/sm/TypedArray/sort_compare_nan.js
 staging/sm/TypedArray/sort_errors.js
 staging/sm/TypedArray/sort_globals.js
+staging/sm/TypedArray/sort_large_countingsort.js
 staging/sm/TypedArray/sort_modifications.js
 staging/sm/TypedArray/sort_small.js
 staging/sm/TypedArray/sort_snans.js

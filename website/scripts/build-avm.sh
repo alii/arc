@@ -197,6 +197,18 @@ fi
   echo "AtomVM web runtime missing in $OUT — run website/scripts/build-atomvm-web.sh" >&2
   exit 1
 }
+cat "$WEBSITE"/atomvm_patches/*.patch | shasum -a 256 | cmp -s - "$OUT/AtomVM.patches.sha256" || {
+  echo "AtomVM web runtime is older than atomvm_patches — run website/scripts/build-atomvm-web.sh" >&2
+  exit 1
+}
+
+# A function the shim lacks is only found missing when a script reaches it.
+for fn in $(grep -rhoE '"arc_regexp_ffi", "[a-z_]+"' "$REPO_ROOT/src" | cut -d'"' -f4 | sort -u); do
+  grep -q "^$fn(" "$WEBSITE/atomvm_shims/arc_regexp_ffi.erl" || {
+    echo "atomvm_shims/arc_regexp_ffi.erl has no $fn" >&2
+    exit 1
+  }
+done
 
 echo "==> pack arc.avm"
 # First occurrence of a module wins: shims first so they shadow the real

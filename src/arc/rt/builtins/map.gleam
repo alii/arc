@@ -201,27 +201,6 @@ fn map_get(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(result, st)
 }
 
-/// get on a real Map, which cannot throw
-pub fn plain_get(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
-  case entries_of(st, this) {
-    Some(entries) ->
-      case ordered_entries.get(entries, js_to_map_key(key)) {
-        Some(_) as found -> found
-        None -> Some(mk_undefined())
-      }
-    None -> None
-  }
-}
-
-/// has on a real Map
-pub fn plain_has(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
-  case entries_of(st, this) {
-    Some(entries) ->
-      Some(mk_bool(ordered_entries.has(entries, js_to_map_key(key))))
-    None -> None
-  }
-}
-
 /// the size getter on a real Map
 pub fn plain_size(st: Agent, this: JsVal) -> Option(JsVal) {
   use entries <- option.map(entries_of(st, this))

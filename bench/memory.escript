@@ -4,7 +4,7 @@
 %% usage: escript bench/memory.escript <file.js> [ebin_root]
 %%   run 1, default heap flags under gc tracing:
 %%     ALLOC <words allocated>  PEAK <max heap+old_heap block words>
-%%     LIVE <words retained by final agent>  CELLS <arena cells>  MINOR/MAJOR gcs
+%%     LIVE <words retained by final agent, less the builtins all share>  CELLS <arena cells>  MINOR/MAJOR gcs
 %%   run 2, fullsweep_after 8 so majors are frequent:
 %%     HIGH <max words after any major gc>  close to the live size arc controls
 main([File | Rest]) ->
@@ -32,9 +32,8 @@ run(T, Opts) ->
             normal_completion -> ok;
             _ -> io:format(standard_error, "completion: ~p~n", [C])
         end,
-        Store = element(2, A2),
-        Live = erts_debug:size(A2),
-        Cells = arc_rt_arena_ffi:count(element(2, Store)),
+        Live = erts_debug:size_shared(A2),
+        Cells = arc_rt_arena_ffi:count(element(2, A2)),
         Self ! {done, (T1 - T0) / 1000, Live, Cells}
     end, Opts),
     erlang:trace(Pid, true, [garbage_collection, {tracer, self()}]),

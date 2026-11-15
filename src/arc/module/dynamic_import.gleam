@@ -317,7 +317,7 @@ fn call_host_hook(
   st: Agent,
   hook_args: List(JsVal),
 ) -> #(Result(JsVal, JsVal), Agent) {
-  case st.import_hook {
+  case st.store.meta.import_hook {
     None -> {
       let #(err, st) =
         rt_val.new_error(

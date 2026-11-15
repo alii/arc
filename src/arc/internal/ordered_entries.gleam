@@ -18,27 +18,12 @@ pub fn new() -> OrderedEntries(k, v) {
   OrderedEntries(entries: dict.new(), order: dict.new(), next_seq: 0)
 }
 
+@external(erlang, "arc_ordered_entries_ffi", "insert")
 pub fn insert(
   table: OrderedEntries(k, v),
   key: k,
   val: v,
-) -> OrderedEntries(k, v) {
-  let OrderedEntries(entries:, order:, next_seq:) = table
-  case dict.get(entries, key) {
-    Ok(#(seq, _)) ->
-      OrderedEntries(
-        entries: dict.insert(entries, key, #(seq, val)),
-        order:,
-        next_seq:,
-      )
-    Error(Nil) ->
-      OrderedEntries(
-        entries: dict.insert(entries, key, #(next_seq, val)),
-        order: dict.insert(order, next_seq, key),
-        next_seq: next_seq + 1,
-      )
-  }
-}
+) -> OrderedEntries(k, v)
 
 pub fn delete(
   table: OrderedEntries(k, v),

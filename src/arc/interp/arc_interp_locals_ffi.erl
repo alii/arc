@@ -1,6 +1,6 @@
 %% frame locals and registers; sloppy_this may answer miss
 -module(arc_interp_locals_ffi).
--export([frame_locals/9, sloppy_this/2, flush_registers/5, captured/2]).
+-export([frame_locals/9, sloppy_this/2, flush_registers/6, captured/2]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -122,6 +122,9 @@ frame_locals({E1, E2, E3}, {owned_lexical_slots, _}, This, FnObj, Home, NT, [A, 
 frame_locals(Env, {owned_lexical_slots, _}, This, FnObj, Home, NT, Args, Arity, LC) ->
     N = tuple_size(Env),
     list_to_tuple(onto(Env, N, [This, FnObj, Home, NT | slots(Args, Arity, LC - 4 - N)]));
+frame_locals(Env, {trimmed_lexical_slots, _, true}, This, _, _, _, Args, Arity, LC) ->
+    N = tuple_size(Env),
+    list_to_tuple(onto(Env, N, [This | slots(Args, Arity, LC - 1 - N)]));
 %% arrows own no this slots
 frame_locals({}, _, _, _, _, _, _, 0, 0) ->
     {};
@@ -271,17 +274,18 @@ sloppy_this(null, Global) -> Global;
 sloppy_this(js_tdz, _Global) -> js_tdz;
 sloppy_this(_, _) -> miss.
 
-flush_registers(L, A, B, R0, R1) ->
-    put_reg(put_reg(L, A, R0), B, R1).
+flush_registers(L, no_regs, _, _, _, _) -> L;
+flush_registers(L, {regs, A, B, C, D}, R0, R1, R2, R3) ->
+    put_reg(put_reg(put_reg(put_reg(L, A, R0), B, R1), C, R2), D, R3).
 
 %% a register that was only read still holds what its slot does; floats are
 %% always written, since not every vm tells 0.0 from -0.0 with =:=
-put_reg(L, S, _) when S < 0 -> L;
-put_reg(L, S, V) when is_float(V) -> setelement(S + 1, L, V);
+put_reg(L, 0, _) -> L;
+put_reg(L, S, V) when is_float(V) -> setelement(S, L, V);
 put_reg(L, S, V) ->
-    case element(S + 1, L) =:= V of
+    case element(S, L) =:= V of
         true -> L;
-        false -> setelement(S + 1, L, V)
+        false -> setelement(S, L, V)
     end.
 
 %% a closure's captures are the leading run of its frame's locals

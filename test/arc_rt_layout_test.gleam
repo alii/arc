@@ -6,10 +6,12 @@ import arc/bytecode/key.{
 }
 import arc/bytecode/names
 import arc/bytecode/opcode
+import arc/compiler
 import arc/internal/ordered_entries
 import arc/internal/tree_array
 import arc/internal/unsafe
 import arc/interp/kernel
+import arc/parser
 import arc/rt/arena
 import arc/rt/bytecode.{type EnvTuple, type FnFlags, type FuncTemplate, FnFlags}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
@@ -29,6 +31,7 @@ import arc/rt/types.{
   plain_object,
 }
 import arc/rt/val as rt_val
+import erlang_kernels
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
 import gleam/list
@@ -115,8 +118,14 @@ fn birth_plain(birth: types.FnBirth, key: PropertyKey) -> Bool
 fn shaped_next(
   shapes: dict.Dict(Int, types.ShapeDesc),
   sid: Int,
-  key: BitArray,
+  step: types.ShapeStep,
 ) -> Dynamic
+
+@external(erlang, "arc_rt_layout_root_ffi", "thread_records")
+fn thread_records() -> List(#(String, Dynamic))
+
+@external(erlang, "arc_rt_layout_root_ffi", "gleam_record")
+fn gleam_record(header: String) -> Dynamic
 
 fn template(label: String) -> FuncTemplate {
   unsafe.coerce(label)
@@ -163,16 +172,21 @@ fn no_flags() -> FnFlags {
 }
 
 pub fn agent_test() {
-  let st = seeded()
+  let st = types.Agent(..seeded(), next_id: 13, gc_at: 14, prop_seq: 16)
   assert tag_of(st) == tag("AGENT_TAG")
   assert size_of(st) == idx("AGENT_SIZE")
   assert at(st, "AGENT_STORE") == dyn(st.store)
   assert at(st, "AGENT_REALM") == dyn(st.realm)
-  assert at(st, "AGENT_HOST_FNS") == dyn(st.host_fns)
-  assert at(st, "AGENT_REALMS") == dyn(st.realms)
+  assert at(st, "AGENT_CELLS") == dyn(st.cells)
+  assert at(st, "AGENT_NEXT_ID") == dyn(13)
+  assert at(st, "AGENT_GC_AT") == dyn(14)
+  assert at(st, "AGENT_PROP_SEQ") == dyn(16)
+  assert at(st, "AGENT_HOOKS") == dyn(st.hooks)
+  assert at(st, "AGENT_GLOBALS") == dyn(st.globals)
+  assert dyn(arena.get(3, arena.free(3, st.cells))) == tag("STORE_FREE_CELL")
   assert tag_of(at(st, "AGENT_STORE")) == tag("STORE_TAG")
   assert tag_of(at(st, "AGENT_REALM")) == tag("REALM_TAG")
-  assert dict.get(st.realms, st.realm.id) == Ok(st.realm)
+  assert dict.get(st.store.meta.realms, st.realm.id) == Ok(st.realm)
 }
 
 pub fn store_test() {
@@ -186,17 +200,13 @@ pub fn store_test() {
   let store =
     Store(
       ..base,
-      cells: arena.set(3, SBox(types.mk_string("d")), base.cells),
-      next_id: 13,
       pinned_roots: set.from_list([3]),
-      alloc_since_gc: 14,
-      prop_seq: 16,
       shapes: dict.from_list([#(7, desc)]),
       next_shape: 15,
       ics: dict.from_list([
         #(1, types.IcRead(named("k"), dict.from_list([#(7, 0)]))),
       ]),
-      plain_write_protos: dict.from_list([#(17, Nil)]),
+      plain_write_protos: dict.from_list([#(17, plain_memo(Nil))]),
       meta: types.StoreMeta(
         ..rt_store.new().meta,
         plain_index_protos: dict.from_list([#(18, Nil)]),
@@ -204,11 +214,7 @@ pub fn store_test() {
     )
   assert tag_of(store) == tag("STORE_TAG")
   assert size_of(store) == idx("STORE_SIZE")
-  assert at(store, "STORE_CELLS") == dyn(store.cells)
-  assert at(store, "STORE_NEXT_ID") == dyn(13)
   assert at(store, "STORE_PINNED_ROOTS") == dyn(store.pinned_roots)
-  assert at(store, "STORE_ALLOC_SINCE_GC") == dyn(14)
-  assert at(store, "STORE_PROP_SEQ") == dyn(16)
   assert at(store, "STORE_SHAPES") == dyn(store.shapes)
   assert at(store, "STORE_NEXT_SHAPE") == dyn(15)
   assert at(store, "STORE_ICS") == dyn(store.ics)
@@ -218,7 +224,64 @@ pub fn store_test() {
   assert at(store.meta, "STOREMETA_PLAIN_INDEX_PROTOS")
     == dyn(store.meta.plain_index_protos)
   assert at(store, "STORE_GLOBAL_EPOCH") == dyn(store.global_epoch)
-  assert dyn(arena.get(3, arena.free(3, store.cells))) == tag("STORE_FREE_CELL")
+  assert at(store, "STORE_OPS") == dyn(store.ops)
+}
+
+pub fn thread_records_test() {
+  assert idx("MAX_CALL_DEPTH") == limits.max_call_depth
+  use #(header, declared) <- list.each(thread_records())
+  assert declared == gleam_record(header)
+}
+
+pub fn func_template_test() {
+  let assert Ok(#(body, scopes)) = parser.parse_script("function f() {}")
+  let assert Ok(script) = compiler.compile_script(body, scopes)
+  let script = bytecode.FuncTemplate(..script, name: Some("script"))
+  assert tag_of(script) == tag("FUNCTEMPLATE_TAG")
+  assert size_of(script) == idx("FUNCTEMPLATE_SIZE")
+  assert at(script, "FUNCTEMPLATE_NAME") == dyn(script.name)
+  assert at(script, "FUNCTEMPLATE_BYTECODE") == dyn(script.bytecode)
+  assert at(script, "FUNCTEMPLATE_FUNCTIONS") == dyn(script.functions)
+  assert at(script, "FUNCTEMPLATE_LEXICAL") == dyn(script.lexical)
+  assert bytecode.shared(script) == script
+}
+
+pub fn realm_shared_test() {
+  let realm = seeded().realm
+  let shared = realm.shared
+  assert at(realm, "REALM_LEXICAL_GLOBALS") == dyn(realm.lexical_globals)
+  assert at(realm, "REALM_SHARED") == dyn(shared)
+  assert at(shared, "REALMSHARED_OBJECT_PROTO")
+    == dyn(Some(realm.object.prototype))
+  assert at(shared, "REALMSHARED_ARRAY_PROTO")
+    == dyn(Some(realm.array.prototype))
+  assert at(shared, "REALMSHARED_FUNCTION_PROTO")
+    == dyn(Some(realm.function.prototype))
+  assert at(shared, "REALMSHARED_ASYNC_PROTO") == dyn(shared.async_proto)
+  assert at(shared, "REALMSHARED_CONSTRUCTOR_BIRTH")
+    == dyn(shared.constructor_birth)
+}
+
+pub fn born_shapes_test() {
+  let st = seeded()
+  let #(h, st) = rt_store.new_iter_result(st, mk_int(1), types.mk_bool(True))
+  let assert SShapedObject(shape_id:, offsets:, ..) = rt_store.cell_get(st, h)
+  assert shape_id == idx("ITER_RESULT_SHAPE")
+  let assert Ok(desc) = dict.get(st.store.shapes, shape_id)
+  assert desc.offsets == offsets
+  assert desc.slot_count == 2
+  let assert Ok(empty) = dict.get(st.store.shapes, idx("PLAIN_EMPTY_SHAPE"))
+  assert empty.slot_count == 0
+}
+
+pub fn kind_tags_test() {
+  assert tag_of(types.PromiseObj(Handle(1))) == tag("PROMISEOBJ_TAG")
+  assert tag_of(types.ArrayBufferObj(unsafe.coerce(Nil)))
+    == tag("ARRAYBUFFEROBJ_TAG")
+  let entries = ordered_entries.insert(ordered_entries.new(), "k", 1)
+  assert at(entries, "ORDERED_ENTRIES")
+    == dyn(dict.from_list([#("k", #(0, 1))]))
+  assert at(entries, "ORDERED_NEXT_SEQ") == dyn(1)
 }
 
 pub fn realm_test() {
@@ -402,6 +465,7 @@ pub fn keys_and_elements_test() {
       #("PROTO_KEY", "__proto__"),
       #("TO_JSON_KEY", "toJSON"),
       #("DONE_KEY", "done"),
+      #("VALUE_KEY", "value"),
       #("ITERATOR_KEY", "iterator"),
       #("NEXT_KEY", "next"),
       #("KEYS_KEY", "keys"),
@@ -474,7 +538,7 @@ pub fn kernel_macros_test() {
   assert birth_plain(BirthPending(None), named("prototype"))
   assert !birth_plain(BirthPending(Some(Handle(1))), named("prototype"))
   assert birth_plain(BirthPending(Some(Handle(1))), named("x"))
-  let k = <<"k">>
+  let k = rt_obj.shape_step(named("k"))
   let to =
     ShapeDesc(
       slot_count: 1,
@@ -485,13 +549,16 @@ pub fn kernel_macros_test() {
     ShapeDesc(
       slot_count: 0,
       offsets: dict.new(),
-      transitions: dict.from_list([#(k, 9)]),
+      transitions: dict.from_list([#(k, #(9, to.offsets))]),
     )
   let shapes = dict.from_list([#(7, from), #(9, to)])
   assert shaped_next(shapes, 7, k) == dyn(#(9, to.offsets))
-  assert shaped_next(shapes, 7, <<"z">>) == dyn(Miss)
+  assert shaped_next(shapes, 7, rt_obj.shape_step(named("z"))) == dyn(Miss)
   assert shaped_next(shapes, 3, k) == dyn(Miss)
 }
+
+@external(erlang, "gleam_stdlib", "identity")
+fn plain_memo(memo: Nil) -> types.WriteMemo
 
 fn offsets_of(names: List(String)) -> types.ShapeOffsets {
   dict.from_list(
@@ -534,7 +601,9 @@ pub fn shape_desc_test() {
     ShapeDesc(
       slot_count: 2,
       offsets: offsets_of(["a", "b"]),
-      transitions: dict.from_list([#(<<"c":utf8>>, 9)]),
+      transitions: dict.from_list([
+        #(rt_obj.shape_step(named("c")), #(9, offsets_of(["a", "b", "c"]))),
+      ]),
     )
   assert tag_of(desc) == tag("SHAPE_TAG")
   assert size_of(desc) == idx("SHAPE_SIZE")
@@ -913,32 +982,32 @@ pub fn binop_kind_terms_test() {
   let six = mk_int(6)
   let three = mk_int(3)
   let answers = [
-    #(binop.AddOp, dyn(mk_int(9))),
-    #(binop.PureOp(binop.Arith(binop.Sub)), dyn(mk_int(3))),
-    #(binop.PureOp(binop.Arith(binop.Mul)), dyn(mk_int(18))),
-    #(binop.PureOp(binop.Arith(binop.Div)), dyn(mk_int(2))),
-    #(binop.PureOp(binop.Arith(binop.Mod)), dyn(mk_int(0))),
-    #(binop.PureOp(binop.Bitwise(binop.BitAnd)), dyn(mk_int(2))),
-    #(binop.PureOp(binop.Bitwise(binop.BitOr)), dyn(mk_int(7))),
-    #(binop.PureOp(binop.Bitwise(binop.BitXor)), dyn(mk_int(5))),
-    #(binop.PureOp(binop.Bitwise(binop.ShiftLeft)), dyn(mk_int(48))),
-    #(binop.PureOp(binop.Bitwise(binop.ShiftRight)), dyn(mk_int(0))),
-    #(binop.PureOp(binop.Bitwise(binop.ShiftRightUnsigned)), dyn(mk_int(0))),
-    #(binop.PureOp(binop.Equality(binop.LooseEq)), dyn(False)),
-    #(binop.PureOp(binop.Equality(binop.LooseNotEq)), dyn(True)),
-    #(binop.PureOp(binop.Equality(binop.StrictEq)), dyn(False)),
-    #(binop.PureOp(binop.Equality(binop.StrictNotEq)), dyn(True)),
-    #(binop.PureOp(binop.Compare(binop.Less)), dyn(False)),
-    #(binop.PureOp(binop.Compare(binop.LessEq)), dyn(False)),
-    #(binop.PureOp(binop.Compare(binop.Greater)), dyn(True)),
-    #(binop.PureOp(binop.Compare(binop.GreaterEq)), dyn(True)),
-    #(binop.PureOp(binop.Arith(binop.Exp)), dyn(kernel.Miss)),
-    #(binop.InOp, dyn(kernel.Miss)),
-    #(binop.InstanceOfOp, dyn(kernel.Miss)),
+    #(binop.Add, dyn(mk_int(9))),
+    #(binop.Sub, dyn(mk_int(3))),
+    #(binop.Mul, dyn(mk_int(18))),
+    #(binop.Div, dyn(mk_int(2))),
+    #(binop.Mod, dyn(mk_int(0))),
+    #(binop.BitAnd, dyn(mk_int(2))),
+    #(binop.BitOr, dyn(mk_int(7))),
+    #(binop.BitXor, dyn(mk_int(5))),
+    #(binop.ShiftLeft, dyn(mk_int(48))),
+    #(binop.ShiftRight, dyn(mk_int(0))),
+    #(binop.ShiftRightUnsigned, dyn(mk_int(0))),
+    #(binop.LooseEq, dyn(False)),
+    #(binop.LooseNotEq, dyn(True)),
+    #(binop.StrictEq, dyn(False)),
+    #(binop.StrictNotEq, dyn(True)),
+    #(binop.Less, dyn(False)),
+    #(binop.LessEq, dyn(False)),
+    #(binop.Greater, dyn(True)),
+    #(binop.GreaterEq, dyn(True)),
+    #(binop.Exp, dyn(kernel.Miss)),
+    #(binop.In, dyn(kernel.Miss)),
+    #(binop.InstanceOf, dyn(kernel.Miss)),
   ]
   list.each(answers, fn(row) {
     let #(kind, expected) = row
-    assert dyn(kernel.classified_binop(kind, six, three)) == expected
+    assert dyn(erlang_kernels.binop(kind, six, three)) == expected
   })
 }
 

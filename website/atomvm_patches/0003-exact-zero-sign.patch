@@ -1,0 +1,25 @@
+diff --git a/src/libAtomVM/term.c b/src/libAtomVM/term.c
+index 9f54c06..4066390 100644
+--- a/src/libAtomVM/term.c
++++ b/src/libAtomVM/term.c
+@@ -32,6 +32,7 @@
+ 
+ #include <ctype.h>
+ #include <inttypes.h>
++#include <math.h>
+ #include <stdarg.h>
+ #include <stddef.h>
+ #include <stdint.h>
+@@ -1032,6 +1033,12 @@ TermCompareResult term_compare(term t, term other, TermCompareOpts opts, GlobalC
+                     case TERM_TYPE_INDEX_FLOAT: {
+                         avm_float_t t_float = term_to_float(t);
+                         avm_float_t other_float = term_to_float(other);
++                        // arc/playground patch: as in OTP 27, 0.0 =/= -0.0
++                        if ((opts & TermCompareExact) && t_float == other_float
++                            && !signbit(t_float) != !signbit(other_float)) {
++                            result = signbit(t_float) ? TermLessThan : TermGreaterThan;
++                            goto unequal;
++                        }
+                         if (t_float == other_float) {
+                             CMP_POP_AND_CONTINUE();
+                             break;

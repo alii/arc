@@ -458,7 +458,10 @@ pub fn alloc_array(
     st,
     SObject(
       kind: ArrayObj(length: len),
-      proto: Some(array_proto),
+      proto: case st.realm.shared.array_proto {
+        Some(usual) as shared if usual == array_proto -> shared
+        _ -> Some(array_proto)
+      },
       props: prop_map.new(),
       symbol_props: [],
       elements:,

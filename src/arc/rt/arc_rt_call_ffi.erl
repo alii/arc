@@ -6,8 +6,7 @@
 -include("arc_rt_layout.hrl").
 
 direct_callee(St, {?HANDLE_TAG, Id}, This) ->
-    Store = element(?AGENT_STORE, St),
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
+    case arc_rt_arena_ffi:get(Id, element(?AGENT_CELLS, St)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Cell) of
                 ?COMPILEDFN(Code, ?NONE, Flags, _, DirectEntry) when ?IS_PLAIN_FN(Flags) ->

@@ -17,24 +17,15 @@ pub fn new_bytecode_function(
   env: EnvTuple,
   unit_id: Int,
 ) -> #(Handle, Agent) {
-  let flags =
-    bytecode.flags(
-      is_constructor: template.is_constructor,
-      is_class_constructor: template.is_class_constructor,
-      is_derived_constructor: template.is_derived_constructor,
-      is_arrow: template.is_arrow,
-      is_generator: template.is_generator,
-      is_async: template.is_async,
-      is_strict: template.is_strict,
-    )
+  let flags = flags_of(template)
   let realm = st.realm
   case flags.is_generator, flags.is_class_constructor {
     False, False -> {
-      let shared = realm.fn_shared
+      let shared = realm.shared
       let #(proto, birth) = case flags.is_constructor, flags.is_async {
-        True, _ -> #(shared.proto, shared.constructor_birth)
+        True, _ -> #(shared.function_proto, shared.constructor_birth)
         False, True -> #(shared.async_proto, BirthPending(None))
-        False, False -> #(shared.proto, BirthPending(None))
+        False, False -> #(shared.function_proto, BirthPending(None))
       }
       let kind =
         BytecodeFn(
@@ -61,6 +52,19 @@ pub fn new_bytecode_function(
     }
     _, _ -> new_with_eager_prototype(st, template, env, unit_id, flags)
   }
+}
+
+// called by name from arc_interp_thread_ffi
+pub fn flags_of(template: FuncTemplate) -> FnFlags {
+  bytecode.flags(
+    is_constructor: template.is_constructor,
+    is_class_constructor: template.is_class_constructor,
+    is_derived_constructor: template.is_derived_constructor,
+    is_arrow: template.is_arrow,
+    is_generator: template.is_generator,
+    is_async: template.is_async,
+    is_strict: template.is_strict,
+  )
 }
 
 fn new_with_eager_prototype(

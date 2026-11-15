@@ -3,6 +3,8 @@ import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
 import arc/bytecode/opcode.{type Op, type Pc, type TryKind}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/wire.{type JsVal}
+import gleam/int
+import gleam/list
 import gleam/option.{type Option}
 
 pub type VarEnvKind {
@@ -251,7 +253,7 @@ pub fn flags(
 }
 
 pub fn line_at(template: FuncTemplate, pc: Int) -> Int {
-  tuple_array.element(pc + 1, template.lines)
+  tuple_array.element(pc, template.lines)
 }
 
 pub type FuncTemplate {
@@ -262,7 +264,6 @@ pub type FuncTemplate {
     length: Int,
     local_count: Int,
     bytecode: TupleArray(Op),
-    constants: TupleArray(JsVal),
     // source line per pc, for error.stack
     lines: TupleArray(Int),
     functions: TupleArray(FuncTemplate),
@@ -283,7 +284,35 @@ pub type FuncTemplate {
     // how many of the first captures sit together in a tuple of their own,
     // which is then the first thing captured; 0 when none do
     nested_captures: Int,
+    // the ops as closures; empty until the function first runs
+    code: TupleArray(Code),
+    // what the function's threaded form is remembered under; 0 for nothing
+    id: Int,
   )
+}
+
+/// the same template in less memory, for the process that will keep it
+@external(erlang, "arc_rt_bytecode_ffi", "shared")
+pub fn shared(template: FuncTemplate) -> FuncTemplate
+
+// one op and all that follows it, see arc_interp_thread_ffi
+pub type Code
+
+pub fn is_threaded(template: FuncTemplate) -> Bool {
+  tuple_array.size(template.code) > 0
+}
+
+/// whether this stands in for a function that compiles on its first call
+pub fn is_stub(template: FuncTemplate) -> Bool {
+  case tuple_array.element(1, template.bytecode) {
+    opcode.CompileSelf -> True
+    _ -> False
+  }
+}
+
+/// the template as plain data again
+pub fn unthreaded(template: FuncTemplate) -> FuncTemplate {
+  FuncTemplate(..template, code: tuple_array.from_list([]))
 }
 
 // an erlang tuple of captured values, starting with a run of callee locals
@@ -299,6 +328,21 @@ pub fn env_for(template: FuncTemplate, values: List(JsVal)) -> EnvTuple {
 
 @external(erlang, "arc_rt_env_ffi", "nest")
 fn nest_env(values: List(JsVal), nested: Int) -> EnvTuple
+
+/// the slots a child captures from `parent`, which it names as they were
+/// before the parent's frame was trimmed
+pub fn capture_slots(parent: FuncTemplate, slots: List(Int)) -> List(Int) {
+  case parent.lexical {
+    lexical.TrimmedLexicalSlots(..) -> {
+      let flat =
+        lexical.map_slots(parent.lexical, fn(base) {
+          base + int.max(parent.nested_captures - 1, 0)
+        })
+      list.map(slots, lexical.trimmed_slot(flat, _))
+    }
+    _ -> slots
+  }
+}
 
 pub type TryFrame {
   TryFrame(catch_target: Int, stack_depth: Int, kind: TryKind(Pc))
@@ -323,9 +367,7 @@ pub type SuspendedFrame {
     locals: TupleArray(JsVal),
     stack: List(JsVal),
     try_stack: List(TryFrame),
-    this: JsVal,
-    home_object: JsVal,
-    eval_env: Option(Int),
+    eval_env: Option(JsVal),
     parked: ParkedAt,
     call_args: List(JsVal),
     realm: Int,
@@ -333,19 +375,14 @@ pub type SuspendedFrame {
   )
 }
 
-// loop-hot slots the interpreter keeps in loop arguments
+// positions of the hot locals threaded code passes along as arguments
 pub type Regs {
   NoRegs
-  Regs(a: Int, b: Int)
+  Regs(a: Int, b: Int, c: Int, d: Int)
 }
 
-// Regs.b when only one slot was picked
-pub const no_register = -1
-
-// negative op slot operands name a register instead of a local
-pub const reg_a_slot = -1
-
-pub const reg_b_slot = -2
+// in Regs, past the slots that were picked
+pub const no_register = 0
 
 // a negative retpc makes Ret return the value under it
 pub const return_retpc = -1
@@ -363,10 +400,9 @@ pub fn birth_name_and_length(
   template: FuncTemplate,
   env: EnvTuple,
 ) -> #(String, Int) {
-  let recorded = case tuple_array.element(1, template.bytecode) {
-    opcode.CompileSelf ->
-      lazy.unpack(env_record(env_size(env), env)) |> option.from_result
-    _ -> option.None
+  let recorded = case is_stub(template) {
+    True -> lazy.unpack(env_record(env_size(env), env)) |> option.from_result
+    False -> option.None
   }
   case template.name, recorded {
     // named since, at run time

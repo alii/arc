@@ -7,13 +7,13 @@ import arc/rt/typed_array_bytes.{
   U8, clamp_uint8, get_float, get_int, set_float, set_int, zeroed,
 }
 import arc/rt/types.{
-  type Agent, type BigIntKind, type BufferStorage, type Handle, type JsElements,
-  type JsNum, type JsVal, type NumberKind, type Property, type SabOwner,
-  type TypedArrayKind, AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj,
-  BigKind, Bytes, Chunked, DataProperty, Detached, Immutable, JFloat, JInt, JNan,
-  JNegInf, JPosInf, KBig, KHandle, KNum, LocalBlock, NumKind, Ordinary,
-  OwnerBlock, SObject, SShapedObject, Shared, classify, mk_bigint, mk_int,
-  mk_number,
+  type Agent, type BigIntKind, type BufferBlock, type BufferStorage, type Handle,
+  type JsElements, type JsNum, type JsVal, type NumberKind, type Property,
+  type SabOwner, type TypedArrayKind, AccessorProperty, ArgumentsObj,
+  ArrayBufferObj, ArrayObj, BigKind, Bytes, Chunked, DataProperty, Detached,
+  Immutable, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KHandle, KNum,
+  LocalBlock, NumKind, Ordinary, OwnerBlock, SObject, SShapedObject, Shared,
+  classify, mk_bigint, mk_int, mk_number,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -34,46 +34,48 @@ fn write(owner: SabOwner, byte_offset: Int, chunk: BitArray) -> Nil
 
 // a buffer over this many bytes turns into pieces the first time a write of
 // at most small_write_max bytes lands in it
-const chunking_min = 4096
+const chunking_min = 64
 
 const small_write_max = 1024
 
 @external(erlang, "arc_rt_buffer_ffi", "split")
-fn split(bytes: BitArray) -> TreeArray(BitArray)
+fn split(bytes: BitArray) -> TreeArray(BufferBlock)
 
 // joins the pieces into one binary again, which copies the whole buffer
 @external(erlang, "arc_rt_buffer_ffi", "join")
-pub fn join(pieces: TreeArray(BitArray)) -> BitArray
+pub fn join(pieces: TreeArray(BufferBlock)) -> BitArray
 
 // the bytes at a range and where they start in the binary handed back
 @external(erlang, "arc_rt_buffer_ffi", "locate")
 fn locate(
-  pieces: TreeArray(BitArray),
+  pieces: TreeArray(BufferBlock),
   byte_offset: Int,
   count: Int,
 ) -> #(BitArray, Int)
 
 @external(erlang, "arc_rt_buffer_ffi", "read_region")
 fn read_pieces(
-  pieces: TreeArray(BitArray),
+  pieces: TreeArray(BufferBlock),
   byte_offset: Int,
   count: Int,
 ) -> BitArray
 
 @external(erlang, "arc_rt_buffer_ffi", "write_region")
 fn write_pieces(
-  pieces: TreeArray(BitArray),
+  pieces: TreeArray(BufferBlock),
+  byte_length: Int,
   byte_offset: Int,
   region: BitArray,
-) -> TreeArray(BitArray)
+) -> TreeArray(BufferBlock)
 
 @external(erlang, "arc_rt_buffer_ffi", "update")
 fn update(
-  pieces: TreeArray(BitArray),
+  pieces: TreeArray(BufferBlock),
+  byte_length: Int,
   byte_offset: Int,
   count: Int,
   write: fn(BitArray, Int) -> BitArray,
-) -> TreeArray(BitArray)
+) -> TreeArray(BufferBlock)
 
 pub fn storage_is_shared(storage: BufferStorage) -> Bool {
   case storage {
@@ -229,11 +231,17 @@ pub fn storage_store_region(
       Bytes(bytes: new_bits, max_byte_length:)
     Chunked(pieces:, byte_length:, max_byte_length:) ->
       // a same-size image only differs in the region, so the pieces stay
-      case bit_array.byte_size(new_bits) == byte_length {
+      case
+        bit_array.byte_size(new_bits) == byte_length
+        && !is_most_of(count, byte_length)
+      {
         True -> {
           let assert Ok(region) = bit_array.slice(new_bits, byte_offset, count)
             as "storage_store_region: write range outside the new buffer image"
-          Chunked(..storage, pieces: write_pieces(pieces, byte_offset, region))
+          Chunked(
+            ..storage,
+            pieces: write_pieces(pieces, byte_length, byte_offset, region),
+          )
         }
         False -> Bytes(bytes: new_bits, max_byte_length:)
       }
@@ -650,6 +658,11 @@ fn write_typed_element(
   }
 }
 
+// a write this big is quicker done to the whole buffer than piece by piece
+fn is_most_of(count: Int, byte_length: Int) -> Bool {
+  count > small_write_max && count * 4 > byte_length
+}
+
 // none when detached
 fn element_written(
   storage: BufferStorage,
@@ -664,14 +677,25 @@ fn element_written(
         False -> Some(Bytes(bytes: write(bytes, off), max_byte_length:))
         True ->
           Some(Chunked(
-            pieces: update(split(bytes), off, size, write),
+            pieces: update(split(bytes), byte_length, off, size, write),
             byte_length:,
             max_byte_length:,
           ))
       }
     }
-    Chunked(pieces:, ..) ->
-      Some(Chunked(..storage, pieces: update(pieces, off, size, write)))
+    Chunked(pieces:, byte_length:, max_byte_length:) ->
+      case is_most_of(size, byte_length) {
+        True if size == byte_length ->
+          Some(Bytes(bytes: write(zeroed(size), off), max_byte_length:))
+        True -> Some(Bytes(bytes: write(join(pieces), off), max_byte_length:))
+        False ->
+          Some(
+            Chunked(
+              ..storage,
+              pieces: update(pieces, byte_length, off, size, write),
+            ),
+          )
+      }
     _ -> {
       use data <- option.map(storage_bits(storage))
       storage_store_region(storage, write(data, off), off, size)

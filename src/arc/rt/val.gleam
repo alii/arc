@@ -557,9 +557,10 @@ pub fn shift_right_half_even(a: Int, s: Int) -> Int {
 }
 
 fn bit_length_loop(n: Int, acc: Int) -> Int {
-  case n == 0 {
-    True -> acc
-    False -> bit_length_loop(int.bitwise_shift_right(n, 1), acc + 1)
+  case n {
+    0 -> acc
+    _ if n >= 65_536 -> bit_length_loop(int.bitwise_shift_right(n, 16), acc + 16)
+    _ -> bit_length_loop(int.bitwise_shift_right(n, 1), acc + 1)
   }
 }
 

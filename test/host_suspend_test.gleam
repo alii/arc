@@ -62,6 +62,7 @@ pub fn resume_settles_on_the_next_drain_test() {
   assert seen(st) == mk_string("nothing")
   let st = rt_gc.collect(st, [])
   assert rt_gc.is_live(st, handle(promise))
+  let st = rt_gc.hold_roots(st, [promise]).1
   let #(outcome, st) =
     host.with_context(st, brand(), fn(ctx) {
       let #(outcome, ctx) = host.resume(ctx, ticket, Ok(mk_int(42)))
@@ -75,6 +76,7 @@ pub fn resume_settles_on_the_next_drain_test() {
 
 pub fn error_outcome_rejects_test() {
   let #(#(promise, ticket), st) = suspended(rejecting: True)
+  let st = rt_gc.hold_roots(st, [promise]).1
   let #(outcome, st) =
     host.with_context(st, brand(), fn(ctx) {
       host.resume(ctx, ticket, Error(mk_string("no")))
@@ -86,6 +88,7 @@ pub fn error_outcome_rejects_test() {
 
 pub fn thenable_outcome_is_assimilated_test() {
   let #(#(promise, ticket), st) = suspended(rejecting: False)
+  let st = rt_gc.hold_roots(st, [promise]).1
   let #(outcome, st) =
     host.with_context(st, brand(), fn(ctx) {
       let promise_ctor = global(ctx.agent, "Promise").0
@@ -100,6 +103,7 @@ pub fn thenable_outcome_is_assimilated_test() {
 
 pub fn double_resume_is_a_no_op_test() {
   let #(#(promise, ticket), st) = suspended(rejecting: False)
+  let st = rt_gc.hold_roots(st, [promise]).1
   let #(outcomes, st) =
     host.with_context(st, brand(), fn(ctx) {
       let #(first, ctx) = host.resume(ctx, ticket, Ok(mk_int(1)))

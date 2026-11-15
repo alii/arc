@@ -1,46 +1,39 @@
-// pure ops only; add, in, instanceof need the heap
-pub type PureBinOp {
-  Arith(ArithOp)
-  Bitwise(BitwiseOp)
-  Compare(CompareOp)
-  Equality(EqualityOp)
-}
-
-pub type ArithOp {
+// flat, so the loop tells them apart with one test
+pub type BinOp {
+  Add
   Sub
   Mul
   Div
   Mod
   Exp
-}
-
-pub type BitwiseOp {
   BitAnd
   BitOr
   BitXor
   ShiftLeft
   ShiftRight
   ShiftRightUnsigned
-}
-
-pub type CompareOp {
   Less
   LessEq
   Greater
   GreaterEq
-}
-
-pub type EqualityOp {
   LooseEq
   LooseNotEq
   StrictEq
   StrictNotEq
+  In
+  InstanceOf
 }
 
-// classified once at emit time, not per execution
-pub type ClassifiedBinOp {
-  PureOp(op: PureBinOp)
-  AddOp
-  InOp
-  InstanceOfOp
+pub fn is_comparison(op: BinOp) -> Bool {
+  case op {
+    Less
+    | LessEq
+    | Greater
+    | GreaterEq
+    | LooseEq
+    | LooseNotEq
+    | StrictEq
+    | StrictNotEq -> True
+    _ -> False
+  }
 }

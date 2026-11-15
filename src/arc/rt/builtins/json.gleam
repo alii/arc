@@ -91,6 +91,31 @@ fn json_parse(
   let reviver = helpers.arg_at(args, 1)
   // iscallable has no side effects, so it can run before the parse
   let revive = rt_val.is_callable(st, reviver)
+  let plain = case revive {
+    True -> ParseMiss
+    False -> plain_parse(st, bytes)
+  }
+  case plain {
+    Parsed(value:, st:) -> #(value, st)
+    ParseMiss -> parse_general(st, bytes, reviver, revive, caller_realm)
+  }
+}
+
+type PlainParse {
+  Parsed(value: JsVal, st: Agent)
+  ParseMiss
+}
+
+@external(erlang, "arc_rt_json_ffi", "plain_parse")
+fn plain_parse(st: Agent, bytes: BitArray) -> PlainParse
+
+fn parse_general(
+  st: Agent,
+  bytes: BitArray,
+  reviver: JsVal,
+  revive: Bool,
+  caller_realm: Int,
+) -> #(JsVal, Agent) {
   case parse_text(bytes, revive), revive {
     Error(e), _ -> rt_val.throw_syntax_error(st, json_error.message(e, bytes))
     Ok(val), False -> materialize_plain(st, val)
@@ -376,7 +401,7 @@ fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
       let #(h, st) =
         rt_store.cell_new(
           st,
-          plain_object(Ordinary, Some(st.realm.object.prototype), props),
+          plain_object(Ordinary, st.realm.shared.object_proto, props),
         )
       #(ObjectRecord(value: mk_object(h), entries:), st)
     }
@@ -396,14 +421,14 @@ fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
     }
     JsonObject(entries) -> {
       let #(entries, st) = materialize_plain_entries(st, entries, [])
-      let object_proto = st.realm.object.prototype
+      let object_proto = st.realm.shared.object_proto
       let #(h, st) = {
         use seq <- rt_store.cell_new_with(st, list.length(entries))
         let props = case plain_prop_dict(entries, seq) {
           PlainProps(props:, ..) -> props
           PropsMiss -> plain_props(entries, prop_map.new(), seq)
         }
-        plain_object(Ordinary, Some(object_proto), props)
+        plain_object(Ordinary, object_proto, props)
       }
       #(mk_object(h), st)
     }

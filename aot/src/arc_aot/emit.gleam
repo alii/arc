@@ -159,7 +159,9 @@ fn root_lexical_prologue(
         }
         #(wrap, e)
       })
-    lexical.CapturedLexicalSlots(..) | lexical.NoLexicalSlots -> #(id, e)
+    lexical.CapturedLexicalSlots(..)
+    | lexical.TrimmedLexicalSlots(..)
+    | lexical.NoLexicalSlots -> #(id, e)
   }
 }
 

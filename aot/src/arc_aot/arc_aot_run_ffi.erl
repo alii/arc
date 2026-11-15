@@ -1,7 +1,9 @@
 -module(arc_aot_run_ffi).
 -export([apply_js_main/2, unload/1]).
 
-apply_js_main(St, Mod) ->
+apply_js_main(St, Mod) -> arc_rt_store_ffi:with_room(fun() -> run_js_main(St, Mod) end).
+
+run_js_main(St, Mod) ->
     Frame = {undefined, undefined, undefined, undefined},
     try
         {Outcome, St2} =

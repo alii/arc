@@ -14,8 +14,8 @@ import arc/rt/types.{
   ErrorCaptureStackTrace, ErrorConstructor, ErrorIsError, ErrorN, ErrorObj,
   ErrorPrototypeToString, ErrorStackGetter, ErrorStackSetter, FrameInfo, JFloat,
   JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, ParsedDesc,
-  SObject, StringKey, SuppressedErrorConstructor, classify, mk_bool, mk_number,
-  mk_object, mk_string, mk_undefined,
+  SObject, StringKey, SuppressedErrorConstructor, Unlisted, classify, mk_bool,
+  mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -273,7 +273,7 @@ fn proto_from_new_target(
 // finds the error prototype in realm of the same kind as home
 fn same_error_proto(st: Agent, home: Handle, realm: Realm) -> Handle {
   let wanted = error_protos(realm)
-  [st.realm, ..dict.values(st.realms)]
+  [st.realm, ..dict.values(st.store.meta.realms)]
   |> list.find_map(fn(r) {
     list.key_find(list.zip(error_protos(r), wanted), home)
   })
@@ -358,15 +358,36 @@ fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
 const default_stack_limit = 10
 
 fn build_stack_trace(st: Agent, header: String) -> String {
-  let frames = list.take(st.frames, stack_trace_limit(st))
-  case list.map(frames, format_frame) {
+  case format_frames(st.frames, stack_trace_limit(st)) {
     [] -> header
     lines -> header <> "\n" <> string.join(lines, "\n")
   }
 }
 
-fn format_frame(frame: FrameInfo) -> String {
-  let FrameInfo(name:, script:, line:) = frame
+fn format_frames(frames: List(FrameInfo), limit: Int) -> List(String) {
+  case frames {
+    _ if limit <= 0 -> []
+    [] -> []
+    [FrameInfo(name:, script:, line:), ..rest] -> [
+      format_frame(name, script, line),
+      ..format_frames(rest, limit - 1)
+    ]
+    [Unlisted(innermost:, line:, behind:), ..rest] ->
+      format_frames(listed(rest, innermost, line, behind, limit), limit)
+  }
+}
+
+// at least the wanted number of frames, or all there are
+@external(erlang, "arc@interp@frames", "pending_frames")
+fn listed(
+  below: List(FrameInfo),
+  innermost: types.RunningFrame,
+  line: Int,
+  behind: Int,
+  wanted: Int,
+) -> List(FrameInfo)
+
+fn format_frame(name: String, script: String, line: Int) -> String {
   let loc = case line {
     0 -> script
     _ -> script <> ":" <> int.to_string(line)

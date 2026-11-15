@@ -10,8 +10,7 @@ import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, Agent, HostFnEntry, mk_object,
-  mk_undefined,
+  type Agent, type Handle, type JsVal, HostFnEntry, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -30,7 +29,10 @@ pub fn install(
     HostFnEntry(call: fn(st, args, _this, _nt) {
       import_module(st, args, referrer, resolve, load)
     })
-  Agent(..st, import_hook: option.Some(hook))
+  rt_store.with_meta(
+    st,
+    types.StoreMeta(..st.store.meta, import_hook: option.Some(hook)),
+  )
 }
 
 fn type_error(st: Agent, msg: String) -> #(Result(JsVal, JsVal), Agent) {

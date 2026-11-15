@@ -8,8 +8,7 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, JFloat, JInt, KHandle, KNum, KStr, Store,
-  classify,
+  type Agent, type JsVal, JFloat, JInt, KHandle, KNum, KStr, classify,
 }
 import gleam/int
 import gleam/list
@@ -297,7 +296,7 @@ pub fn async_bodies_see_their_arguments_test() {
 
 fn eval_small_heap(source: String) -> String {
   let st = rt_gc.collect(agent(), [])
-  let st = Agent(..st, store: Store(..st.store, gc_threshold: 64))
+  let st = rt_gc.set_threshold(st, 64)
   case run_on(st, source) {
     #(NormalCompletion(v), st) ->
       case classify(v) {

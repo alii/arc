@@ -580,7 +580,7 @@ pub fn object_prototype(realm: Realm) -> Handle {
 
 pub fn realm_by_id(st: Agent, id: Int) -> Realm {
   use <- bool.guard(id == st.realm.id, st.realm)
-  case dict.get(st.realms, id) {
+  case dict.get(st.store.meta.realms, id) {
     Ok(r) -> r
     Error(Nil) ->
       panic as { "rt/call.realm_by_id: no realm with id " <> int.to_string(id) }
@@ -641,7 +641,7 @@ fn realm_of_function_proto(st: Agent, proto: Option(Handle)) -> Int {
     Some(p) -> {
       use <- bool.guard(is_function_proto_of(st, current, p), current.id)
       let found =
-        list.find(dict.values(st.realms), fn(r) {
+        list.find(dict.values(st.store.meta.realms), fn(r) {
           r.id != current.id && is_function_proto_of(st, r, p)
         })
       case found {
@@ -733,7 +733,7 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
     st,
     SObject(
       kind: ArrayObj(length: len),
-      proto: Some(st.realm.array.prototype),
+      proto: st.realm.shared.array_proto,
       props: prop_map.new(),
       symbol_props: [],
       elements:,

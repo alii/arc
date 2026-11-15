@@ -1,16 +1,17 @@
 import arc/bytecode/error_kind.{TypeError}
 import arc/bytecode/key.{named}
 import arc/bytecode/opcode.{
-  AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
+  AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, YieldStar,
 }
 import arc/internal/tuple_array
 import arc/interp/call
 import arc/interp/frames
 import arc/interp/guard
-import arc/interp/interpreter.{Completed, Suspended}
+import arc/interp/interpreter
 import arc/interp/park
 import arc/interp/state.{
-  type State, type StepExit, InternalError, State, SuspensionLeak,
+  type Outcome, type State, type StepExit, type VmError, Completed, Frame,
+  InternalError, Outermost, State, Suspended, SuspensionLeak,
 }
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
@@ -42,10 +43,8 @@ fn to_executed(outcome: #(Result(JsVal, JsVal), State)) -> Executed {
   Finished(res, state)
 }
 
-const drive = call.Drive(start_coroutine:)
-
 pub fn executed(state: State) -> Executed {
-  case interpreter.execute(state, drive) {
+  case interpreter.execute(state) {
     Ok(#(Completed(NormalCompletion(v)), state)) -> Finished(Ok(v), state)
     Ok(#(Completed(ThrowCompletion(e)), state)) -> Finished(Error(e), state)
     Ok(#(Suspended(kind, v), state)) -> Parked(kind, v, state)
@@ -62,7 +61,15 @@ pub fn complete(state: State, site: String) -> #(Result(JsVal, JsVal), State) {
 }
 
 pub fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
-  case interpreter.execute(state, drive) {
+  call_result(state.agent, interpreter.execute(state))
+}
+
+// called by name from threaded code
+pub fn call_result(
+  agent: Agent,
+  outcome: Result(#(Outcome, State), VmError),
+) -> #(Result(JsVal, JsVal), Agent) {
+  case outcome {
     Ok(#(Completed(NormalCompletion(v)), state)) -> #(Ok(v), state.agent)
     Ok(#(Completed(ThrowCompletion(e)), state)) -> #(Error(e), state.agent)
     Ok(#(Suspended(kind, _), state)) -> {
@@ -71,8 +78,8 @@ pub fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
       #(res, state.agent)
     }
     Error(err) -> {
-      let #(res, state) = state.internal_fault(state, err)
-      #(res, state.agent)
+      let #(e, agent) = state.internal_error(agent, err)
+      #(Error(e), agent)
     }
   }
 }
@@ -110,7 +117,8 @@ pub fn start_coroutine_root(
   }
 }
 
-fn start_coroutine(
+// called by name from call.gleam, which this module imports
+pub fn start_coroutine(
   caller: State,
   c: call.CoroutineCall,
 ) -> Result(State, StepExit) {
@@ -119,8 +127,6 @@ fn start_coroutine(
     template:,
     unit_id:,
     locals:,
-    this:,
-    home_object:,
     args:,
     rest_stack:,
   ) = c
@@ -130,20 +136,20 @@ fn start_coroutine(
   let body =
     State(
       agent: frames.push_frame_info(agent, template),
-      pc: 0,
+      pc: 1,
       stack: [],
       locals:,
-      func: template,
-      unit_id:,
-      call_stack: [],
-      outer_depth: agent.call_depth,
-      depth: agent.call_depth,
-      try_stack: [],
-      this:,
-      new_target: mk_undefined(),
-      home_object:,
-      call_args: args,
-      eval_env: None,
+      frame: Frame(
+        func: template,
+        unit_id:,
+        return_to: Outermost,
+        outer_depth: agent.call_depth,
+        depth: agent.call_depth,
+        try_stack: [],
+        call_args: args,
+        eval_env: None,
+        realm: agent.realm.id,
+      ),
     )
   let callee = mk_object(fn_h)
   let resume = fn(agent: Agent, value: JsVal) {
@@ -262,7 +268,7 @@ type DelegateSite {
 }
 
 fn delegate_site(state: State) -> Option(DelegateSite) {
-  case tuple_array.get_unchecked(state.pc, state.func.bytecode), state.stack {
+  case tuple_array.element(state.pc, state.frame.func.bytecode), state.stack {
     YieldStar, [rec, ..rest] ->
       rt_lang.record_parts(state.agent, rec)
       |> option.map(SyncSite(_, rest))
@@ -482,7 +488,7 @@ fn find_return_handler(
 ) -> Option(ReturnHandler) {
   case try_stack {
     [] -> None
-    [TryFrame(kind: Finally(fin_label: Pc(fin_pc)), stack_depth:, ..), ..rest] ->
+    [TryFrame(kind: Finally(fin_label: fin_pc), stack_depth:, ..), ..rest] ->
       Some(FinallyHandler(fin_pc, stack_depth, rest))
     [TryFrame(kind: IterCloseGuard, stack_depth:, ..), ..rest] ->
       Some(IterCloseHandler(stack_depth, rest))
@@ -492,12 +498,17 @@ fn find_return_handler(
 
 // §27.5.3.4 return: run finallys, close iterators outwards
 fn return_into(state: State, value: JsVal) -> Executed {
-  case find_return_handler(state.try_stack) {
+  case find_return_handler(state.frame.try_stack) {
     None -> Finished(Ok(value), state)
     Some(IterCloseHandler(stack_depth, rest)) ->
       case state.truncate_stack(state.stack, stack_depth) {
         [iter, ..base] -> {
-          let state = State(..state, try_stack: rest, stack: base)
+          let state =
+            State(
+              ..state,
+              frame: Frame(..state.frame, try_stack: rest),
+              stack: base,
+            )
           case interpreter.closable_record(state, iter) {
             Ok(#(iter, state)) ->
               case iter == mk_undefined() {
@@ -507,14 +518,22 @@ fn return_into(state: State, value: JsVal) -> Executed {
             Error(exit) -> exit_executed(exit, "return_into")
           }
         }
-        [] -> return_into(State(..state, try_stack: rest, stack: []), value)
+        [] ->
+          return_into(
+            State(
+              ..state,
+              frame: Frame(..state.frame, try_stack: rest),
+              stack: [],
+            ),
+            value,
+          )
       }
     Some(FinallyHandler(fin_pc, stack_depth, rest)) -> {
       let base = state.truncate_stack(state.stack, stack_depth)
       let fin =
         State(
           ..state,
-          try_stack: rest,
+          frame: Frame(..state.frame, try_stack: rest),
           stack: [mk_int(bytecode.return_retpc), value, ..base],
           pc: fin_pc,
         )
@@ -533,7 +552,7 @@ fn close_for_return(state: State, record: JsVal, value: JsVal) -> Executed {
   }
 }
 
-// a step exit met while completing a return outside the loop
+// a step exit met while completing a return outside threaded code
 fn exit_executed(exit: StepExit, site: String) -> Executed {
   case exit {
     state.Threw(thrown, state) -> throw_into(state, thrown)

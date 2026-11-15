@@ -156,15 +156,6 @@ fn set_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_bool(ordered_entries.has(read_set_store(st, set), key)), st)
 }
 
-/// has on a real Set, which cannot throw
-pub fn plain_has(st: Agent, this: JsVal, key: JsVal) -> Option(JsVal) {
-  case entries_of(st, this) {
-    Some(entries) ->
-      Some(mk_bool(ordered_entries.has(entries, js_to_map_key(key))))
-    None -> None
-  }
-}
-
 /// the size getter on a real Set
 pub fn plain_size(st: Agent, this: JsVal) -> Option(JsVal) {
   use entries <- option.map(entries_of(st, this))

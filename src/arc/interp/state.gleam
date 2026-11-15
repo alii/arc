@@ -2,7 +2,9 @@ import arc/bytecode/error_kind.{
   type ErrorKind, RangeError, ReferenceError, TypeError,
 }
 import arc/internal/tuple_array.{type TupleArray}
-import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
+import arc/interp/kernel
+import arc/rt/bytecode.{type Code, type FuncTemplate, type TryFrame}
+import arc/rt/call.{type Completion}
 import arc/rt/gc as rt_gc
 import arc/rt/types.{type Agent, type Handle, type JsVal, Handle}
 import arc/rt/val as rt_val
@@ -15,48 +17,85 @@ pub type State {
     pc: Int,
     stack: List(JsVal),
     locals: TupleArray(JsVal),
-    func: FuncTemplate,
-    unit_id: Int,
-    call_stack: List(SavedFrame),
-    outer_depth: Int,
-    // agent.call_depth may lag this inside the loop
-    depth: Int,
-    try_stack: List(TryFrame),
-    this: JsVal,
-    new_target: JsVal,
-    home_object: JsVal,
-    call_args: List(JsVal),
-    eval_env: Option(Handle),
+    frame: Frame,
   )
 }
 
-// restore pc/stack/locals from here, not from caller
-pub type SavedFrame {
+// what stays put while a call runs, so stepping copies little
+pub type Frame {
+  Frame(
+    func: FuncTemplate,
+    unit_id: Int,
+    return_to: ReturnTo,
+    outer_depth: Int,
+    // agent.call_depth may lag this inside threaded code
+    depth: Int,
+    try_stack: List(TryFrame),
+    call_args: List(JsVal),
+    eval_env: Option(Handle),
+    // the id of the realm the frame runs in
+    realm: Int,
+  )
+}
+
+pub type ReturnTo {
+  // the run ends with this frame
+  Outermost
+  // the same, for threaded code a builtin called, which wants just the value
+  Direct
   SavedFrame(
-    caller: State,
+    caller: Frame,
     pc: Int,
     stack: List(JsVal),
     locals: TupleArray(JsVal),
     constructor_this: Option(JsVal),
   )
-  // r0/r1 are the register-cached locals, written back on restore
-  SavedRegFrame(
-    caller: State,
+  // threaded code to go on with, in a function that has no registers
+  SavedThread(
+    caller: Frame,
     pc: Int,
     stack: List(JsVal),
     locals: TupleArray(JsVal),
     constructor_this: Option(JsVal),
+    next: Code,
+    code: TupleArray(Code),
+  )
+  // the same with the locals held in registers, which `locals` has stale
+  SavedRegs(
+    caller: Frame,
+    pc: Int,
+    stack: List(JsVal),
+    locals: TupleArray(JsVal),
+    constructor_this: Option(JsVal),
+    next: Code,
+    code: TupleArray(Code),
     r0: JsVal,
     r1: JsVal,
+    r2: JsVal,
+    r3: JsVal,
   )
-  // an op paused on user code; cont finishes it, locals hold the registers
+  // an op paused on user code; cont finishes it
   SavedCont(
-    caller: State,
+    caller: Frame,
     pc: Int,
     stack: List(JsVal),
     locals: TupleArray(JsVal),
     constructor_this: Option(JsVal),
     cont: fn(JsVal, State) -> Result(State, StepExit),
+    // filled in by the threaded code the op was run from
+    resume: Option(Resumption),
+  )
+}
+
+// where threaded code goes on after an op, and the registers it held
+pub type Resumption {
+  Resumption(
+    next: Code,
+    takes_top: Bool,
+    r0: JsVal,
+    r1: JsVal,
+    r2: JsVal,
+    r3: JsVal,
   )
 }
 
@@ -66,91 +105,99 @@ pub fn with_agent(state: State, agent: Agent) -> State {
 
 // exhaustive destructures on purpose: classify new fields as roots or not
 pub fn frame_roots(state: State) -> List(Handle) {
-  let State(
-    agent: _,
-    pc: _,
-    stack:,
-    locals:,
-    func: _,
-    unit_id: _,
-    call_stack:,
-    outer_depth: _,
-    depth: _,
-    try_stack: _,
-    this:,
-    new_target:,
-    home_object:,
-    call_args:,
-    eval_env:,
-  ) = state
-  let acc =
-    push_frame_roots(
-      [],
-      stack,
-      locals,
-      this,
-      new_target,
-      home_object,
-      call_args,
-      eval_env,
-    )
-  list.fold(call_stack, acc, push_saved_frame_roots)
-  |> list.map(Handle)
+  let State(agent: _, pc: _, stack:, locals:, frame:) = state
+  let acc = push_frame_roots([], frame, stack, locals)
+  push_caller_roots(acc, frame.return_to) |> list.map(Handle)
 }
 
 fn push_frame_roots(
   acc: List(Int),
+  frame: Frame,
   stack: List(JsVal),
   locals: TupleArray(JsVal),
-  this: JsVal,
-  new_target: JsVal,
-  home_object: JsVal,
-  call_args: List(JsVal),
-  eval_env: Option(Handle),
 ) -> List(Int) {
+  let Frame(
+    func: _,
+    unit_id: _,
+    return_to: _,
+    outer_depth: _,
+    depth: _,
+    try_stack: _,
+    call_args:,
+    eval_env:,
+    realm: _,
+  ) = frame
   acc
   |> rt_gc.push_refs(stack, _)
   |> rt_gc.push_refs(locals, _)
-  |> rt_gc.push_refs(this, _)
-  |> rt_gc.push_refs(new_target, _)
-  |> rt_gc.push_refs(home_object, _)
   |> rt_gc.push_refs(call_args, _)
   |> push_optional_handle(eval_env)
 }
 
-// caller.call_stack is the fold's own tail, not walked again
-fn push_saved_frame_roots(acc: List(Int), frame: SavedFrame) -> List(Int) {
-  case frame {
+fn push_caller_roots(acc: List(Int), saved: ReturnTo) -> List(Int) {
+  case saved {
+    Outermost | Direct -> acc
     SavedFrame(caller:, pc: _, stack:, locals:, constructor_this:) ->
-      push_caller_roots(acc, caller, stack, locals, constructor_this)
-    SavedRegFrame(caller:, pc: _, stack:, locals:, constructor_this:, r0:, r1:) ->
-      push_caller_roots(acc, caller, stack, locals, constructor_this)
-      |> rt_gc.push_refs(r0, _)
-      |> rt_gc.push_refs(r1, _)
-    SavedCont(caller:, pc: _, stack:, locals:, constructor_this:, cont:) ->
-      push_caller_roots(acc, caller, stack, locals, constructor_this)
+      push_frame_roots(acc, caller, stack, locals)
+      |> push_optional_val(constructor_this)
+      |> push_caller_roots(caller.return_to)
+    SavedThread(
+      caller:,
+      pc: _,
+      stack:,
+      locals:,
+      constructor_this:,
+      next: _,
+      code: _,
+    ) ->
+      push_frame_roots(acc, caller, stack, locals)
+      |> push_optional_val(constructor_this)
+      |> push_caller_roots(caller.return_to)
+    SavedRegs(
+      caller:,
+      pc: _,
+      stack:,
+      locals:,
+      constructor_this:,
+      next: _,
+      code: _,
+      r0:,
+      r1:,
+      r2:,
+      r3:,
+    ) ->
+      // what locals has where a register is may be long dead
+      kernel.flush_registers(locals, caller.func.regs, r0, r1, r2, r3)
+      |> push_frame_roots(acc, caller, stack, _)
+      |> push_optional_val(constructor_this)
+      |> push_caller_roots(caller.return_to)
+    SavedCont(
+      caller:,
+      pc: _,
+      stack:,
+      locals:,
+      constructor_this:,
+      cont:,
+      resume:,
+    ) ->
+      resumed_locals(locals, caller, resume)
+      |> push_frame_roots(acc, caller, stack, _)
+      |> push_optional_val(constructor_this)
       |> rt_gc.push_refs(cont, _)
+      |> push_caller_roots(caller.return_to)
   }
 }
 
-fn push_caller_roots(
-  acc: List(Int),
-  caller: State,
-  stack: List(JsVal),
+fn resumed_locals(
   locals: TupleArray(JsVal),
-  constructor_this: Option(JsVal),
-) -> List(Int) {
-  push_frame_roots(
-    acc,
-    stack,
-    locals,
-    caller.this,
-    caller.new_target,
-    caller.home_object,
-    caller.call_args,
-    caller.eval_env,
-  )
-  |> push_optional_val(constructor_this)
+  caller: Frame,
+  resume: Option(Resumption),
+) -> TupleArray(JsVal) {
+  case resume {
+    Some(Resumption(next: _, takes_top: _, r0:, r1:, r2:, r3:)) ->
+      kernel.flush_registers(locals, caller.func.regs, r0, r1, r2, r3)
+    None -> locals
+  }
 }
 
 fn push_optional_val(acc: List(Int), ov: Option(JsVal)) -> List(Int) {
@@ -165,6 +212,11 @@ fn push_optional_handle(acc: List(Int), oh: Option(Handle)) -> List(Int) {
     Some(h) -> [h.id, ..acc]
     None -> acc
   }
+}
+
+pub type Outcome {
+  Completed(Completion(JsVal))
+  Suspended(SuspendKind, JsVal)
 }
 
 pub type SuspendKind {
@@ -273,7 +325,14 @@ pub fn internal_fault(
   state: State,
   err: VmError,
 ) -> #(Result(JsVal, JsVal), State) {
-  let #(e, state) =
-    new_error(state, TypeError, "internal error: " <> vm_error_message(err))
-  #(Error(e), state)
+  let #(e, agent) = internal_error(state.agent, err)
+  #(Error(e), State(..state, agent:))
+}
+
+pub fn internal_error(agent: Agent, err: VmError) -> #(JsVal, Agent) {
+  rt_val.new_error(
+    agent,
+    TypeError,
+    "internal error: " <> vm_error_message(err),
+  )
 }

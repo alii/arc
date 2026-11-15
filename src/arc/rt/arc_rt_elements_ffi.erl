@@ -3,10 +3,29 @@
 -export([own_element/3, arg_list/2]).
 
 -include("arc_rt_layout.hrl").
+-include("arc_rt_arena.hrl").
 -compile({inline, [own_read/2, elem_at/2]}).
 
-own_element(St, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+-define(HIT(Expr),
+        case Expr of
+            ?ELEMS_HOLE -> miss;
+            V -> {hit, V}
+        end).
+
+own_element(St, {?HANDLE_TAG, Id}, Idx)
+  when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX, tuple_size(St) =:= ?AGENT_SIZE ->
+    case arena_get(Id, element(?AGENT_CELLS, St)) of
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _,
+         {?ELEMS_DENSE, {?VEC_TAG, Size, Shift, Root, HotIx, _}} = Els, _}
+          when Props =:= #{}, Idx < Size, Idx bsr 4 =/= HotIx ->
+            case Shift of
+                4 -> ?HIT(?IN_NODE(Idx, 0, ?IN_NODE(Idx, 4, Root)));
+                8 -> ?HIT(?IN_NODE(Idx, 0, ?IN_NODE(Idx, 4, ?IN_NODE(Idx, 8, Root))));
+                12 ->
+                    ?HIT(?IN_NODE(Idx, 0, ?IN_NODE(Idx, 4, ?IN_NODE(Idx, 8,
+                                                                    ?IN_NODE(Idx, 12, Root)))));
+                _ -> own_read(Els, Idx)
+            end;
         {?SOBJECT_TAG, Kind, _, Props, _, Els, _}
           when element(1, Kind) =:= ?ARRAYOBJ_TAG;
                element(1, Kind) =:= ?ARGUMENTSOBJ_TAG ->
@@ -36,13 +55,12 @@ elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
 %% §7.3.19 createlistfromarraylike for plain arrays and arguments, else miss
 arg_list(St, {?HANDLE_TAG, Id}) ->
-    Store = element(?AGENT_STORE, St),
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
+    case arc_rt_arena_ffi:get(Id, element(?AGENT_CELLS, St)) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}
           when map_size(Props) =:= 0 ->
             dense_prefix(Els, Len);
         {?SOBJECT_TAG, {?ARGUMENTSOBJ_TAG, _, _}, _,
-         #{?KEY_ID(?LENGTH_KEY) := {<<"length">>, LenProp}, ?KEY_ID(?CALLEE_KEY) := {<<"callee">>, _}} = Props, _, Els, _}
+         #{?KEY_ID(?LENGTH_KEY) := {_, LenProp}, ?KEY_ID(?CALLEE_KEY) := {_, _}} = Props, _, Els, _}
           when map_size(Props) =:= 2,
                element(1, LenProp) =:= ?DATAPROPERTY_TAG,
                is_integer(element(?DATAPROPERTY_VALUE, LenProp)) ->

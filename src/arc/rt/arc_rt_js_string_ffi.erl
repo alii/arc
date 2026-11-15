@@ -35,6 +35,9 @@ ascii(<<>>) -> true;
 ascii(_) -> false.
 
 %% records a crumb every stride codepoints, j * stride =< len
+build_crumbs(<<W1:56, W2:56, W3:56, W4:56, W5:32, Rest/binary>>, Off, N, Acc)
+    when (W1 bor W2 bor W3 bor W4 bor W5) band ?ASCII_HI_MASK =:= 0 ->
+    build_crumbs(Rest, Off + ?CRUMB_STRIDE, N + ?CRUMB_STRIDE, [Off | Acc]);
 build_crumbs(Bin, Off, N, Acc) ->
     Acc1 = [Off | Acc],
     case advance(Bin, ?CRUMB_STRIDE, Off) of
@@ -137,12 +140,13 @@ substring(S, Start, N) ->
         false -> tag(Part)
     end.
 
-concat(A, B) when is_binary(A), is_binary(B) -> <<A/binary, B/binary>>;
+concat(A, B) when is_binary(A), is_binary(B) -> ?JOINED(A, B);
 concat(A, B) ->
     BA = text(A),
     LA = length(A),
     Len = LA + length(B),
-    New = <<BA/binary, (text(B))/binary>>,
+    BB = text(B),
+    New = ?JOINED(BA, BB),
     Crumbs = case Len > ?MAX_CRUMBED_LEN of
         true -> none;
         false -> extend(A, LA, New)
@@ -170,9 +174,9 @@ index_of(Hay, Needle, From) ->
     case NB of
         <<>> -> {?SOME, From};
         _ ->
-            case binary:match(HB, NB, [{scope, {Start, byte_size(HB) - Start}}]) of
+            case arc_rt_utf8_ffi:find(HB, NB, Start) of
                 nomatch -> ?NONE;
-                {Pos, _} -> {?SOME, codepoint_index(Hay, Pos)}
+                Pos -> {?SOME, codepoint_index(Hay, Pos)}
             end
     end.
 

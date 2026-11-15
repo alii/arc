@@ -2,10 +2,11 @@ import arc/host_hooks.{type HostHooks}
 import arc/rt/arena
 import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/regexp as b_regexp
+import arc/rt/bytecode
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type Job, type Realm, type ShapeDesc,
-  type Store, type UnitText, Agent, CompiledFn, Handle, HostJob, NativeFn,
+  type UnitText, Agent, BytecodeFn, CompiledFn, Handle, HostJob, NativeFn,
   ReactionJob, RegExpConstructor, RegExpN, RegExpObj, ResolveThenableJob,
   ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox,
   SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject, Store,
@@ -17,7 +18,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 23
+pub const abi_version = 24
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(handle: Handle)
@@ -35,7 +36,7 @@ type StoreImage {
     cells: Dict(Int, Cell),
     next_id: Int,
     pinned_roots: Set(Int),
-    alloc_since_gc: Int,
+    gc_at: Int,
     gc_threshold: Int,
     prop_seq: Int,
     next_private_id: Int,
@@ -45,6 +46,7 @@ type StoreImage {
     shapes: Dict(Int, ShapeDesc),
     next_shape: Int,
     next_unit_id: Int,
+    next_template_id: Int,
     unit_texts: Dict(Int, UnitText),
   )
 }
@@ -68,28 +70,19 @@ fn decode(
 
 pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
   let Agent(
-    store:,
-    realm:,
-    template_objects:,
-    frames: _,
-    hooks: _,
-    host_fns: _,
-    realms:,
-    import_hook: _,
-    waiters:,
-    call_depth: _,
-    tz_zones: _,
-  ) = st
-  use Nil <- result.try(case waiters {
-    [] -> Ok(Nil)
-    [_, ..] -> Error(SnapshotContainsWaiter)
-  })
-  let Store(
     cells:,
     next_id:,
-    alloc_since_gc:,
-    gc_threshold:,
+    gc_at:,
     prop_seq:,
+    call_depth: _,
+    frames: _,
+    realm:,
+    store:,
+    hooks: _,
+    globals: _,
+  ) = st
+  let Store(
+    gc_threshold:,
     shapes:,
     next_shape:,
     ics: _,
@@ -106,20 +99,37 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       unhandled_rejections:,
       old_gen: _,
       young_start: _,
-      old_weak_ids: _,
       major_live: _,
       minors_since_major: _,
       plain_index_protos: _,
       async_context_mapping: _,
       lazy_code: _,
+      threaded: _,
+      threaded_before: _,
+      thread_keys: _,
+      draft_runs: _,
+      next_template_id:,
       unit_texts:,
       kept: _,
+      template_objects:,
+      host_fns: _,
+      realms:,
+      import_hook: _,
+      waiters:,
+      tz_zones: _,
+      checked_subject: _,
     ),
   ) = store
+  use Nil <- result.try(case waiters {
+    [] -> Ok(Nil)
+    [_, ..] -> Error(SnapshotContainsWaiter)
+  })
   let microtasks = types.job_queue_to_list(microtasks)
   let cells =
     arena.fold(
-      fn(id, cell, acc) { dict.insert(acc, id, drop_regexp_matcher(cell)) },
+      fn(id, cell, acc) {
+        dict.insert(acc, id, drop_regexp_matcher(cell) |> drop_threaded_code)
+      },
       dict.new(),
       cells,
     )
@@ -130,7 +140,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       cells:,
       next_id:,
       pinned_roots:,
-      alloc_since_gc:,
+      gc_at:,
       gc_threshold:,
       prop_seq:,
       next_private_id:,
@@ -140,6 +150,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       shapes:,
       next_shape:,
       next_unit_id:,
+      next_template_id:,
       unit_texts:,
     )
   let realms = RealmImage(current: realm, realms:, template_objects:)
@@ -151,29 +162,16 @@ pub fn deserialize(
   hooks: HostHooks,
 ) -> Result(Agent, DeserializeError) {
   use #(store, realms) <- result.map(decode(abi_version, data))
-  let RealmImage(current: realm, realms:, template_objects:) = realms
-  Agent(
-    store: restore(store),
-    realm:,
-    template_objects:,
-    frames: [],
-    hooks:,
-    host_fns: dict.new(),
-    realms:,
-    import_hook: None,
-    waiters: [],
-    call_depth: 0,
-    tz_zones: dict.new(),
-  )
-  |> rt_builtins.seed_ops
+  restore(store, realms, hooks) |> rt_builtins.seed_ops
 }
 
-fn restore(image: StoreImage) -> Store {
+fn restore(image: StoreImage, realms: RealmImage, hooks: HostHooks) -> Agent {
+  let RealmImage(current: realm, realms:, template_objects:) = realms
   let StoreImage(
     cells:,
     next_id:,
     pinned_roots:,
-    alloc_since_gc:,
+    gc_at:,
     gc_threshold:,
     prop_seq:,
     next_private_id:,
@@ -183,34 +181,47 @@ fn restore(image: StoreImage) -> Store {
     shapes:,
     next_shape:,
     next_unit_id:,
+    next_template_id:,
     unit_texts:,
   ) = image
   let fresh = rt_store.new()
-  Store(
-    ..fresh,
+  let store =
+    Store(
+      ..fresh,
+      gc_threshold:,
+      shapes:,
+      next_shape:,
+      microtasks: list.fold(
+        microtasks,
+        types.job_queue_new(),
+        types.job_queue_push,
+      ),
+      pinned_roots:,
+      meta: types.StoreMeta(
+        ..fresh.meta,
+        next_private_id:,
+        next_symbol_id:,
+        next_unit_id:,
+        next_template_id:,
+        unhandled_rejections:,
+        unit_texts:,
+        template_objects:,
+        realms:,
+      ),
+    )
+  Agent(
     cells: dict.fold(cells, arena.new(), fn(acc, id, cell) {
       arena.set(id, cell, acc)
     }),
     next_id:,
-    alloc_since_gc:,
-    gc_threshold:,
+    gc_at:,
     prop_seq:,
-    shapes:,
-    next_shape:,
-    microtasks: list.fold(
-      microtasks,
-      types.job_queue_new(),
-      types.job_queue_push,
-    ),
-    pinned_roots:,
-    meta: types.StoreMeta(
-      ..fresh.meta,
-      next_private_id:,
-      next_symbol_id:,
-      next_unit_id:,
-      unhandled_rejections:,
-      unit_texts:,
-    ),
+    call_depth: 0,
+    frames: [],
+    realm:,
+    store:,
+    hooks:,
+    globals: dict.new(),
   )
 }
 
@@ -259,6 +270,37 @@ fn drop_regexp_matcher(cell: Cell) -> Cell {
         ),
       )
     _ -> cell
+  }
+}
+
+// closures don't outlive the module they were made in
+fn drop_threaded_code(cell: Cell) -> Cell {
+  case cell {
+    SObject(kind: BytecodeFn(template:, ..) as kind, ..) ->
+      SObject(
+        ..cell,
+        kind: BytecodeFn(..kind, template: bytecode.unthreaded(template)),
+      )
+    SGenerator(resume:, ..) ->
+      SGenerator(..cell, resume: unthreaded_resume(resume))
+    SAsyncGen(resume:, ..) ->
+      SAsyncGen(..cell, resume: unthreaded_resume(resume))
+    SAsyncContext(resume:, ..) ->
+      SAsyncContext(..cell, resume: unthreaded_resume(resume))
+    _ -> cell
+  }
+}
+
+fn unthreaded_resume(resume: types.Resume) -> types.Resume {
+  case resume {
+    ResumeFrame(frame:) ->
+      ResumeFrame(
+        bytecode.SuspendedFrame(
+          ..frame,
+          template: bytecode.unthreaded(frame.template),
+        ),
+      )
+    ResumeCompiled(..) -> resume
   }
 }
 

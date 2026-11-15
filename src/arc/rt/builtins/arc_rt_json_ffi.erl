@@ -2,11 +2,14 @@
 %% plain_stringify may return json_miss
 -module(arc_rt_json_ffi).
 -export([parse_value/2, plain_prop_dict/2, plain_enumerable_keys/1, quote_tree/1,
-         plain_stringify/3]).
+         plain_stringify/3, plain_parse/2]).
 
 -include("../arc_rt_layout.hrl").
 
 -define(DIGIT(C), (C >= $0 andalso C =< $9)).
+-define(IS_FUNCTION_KIND(Kind),
+        element(1, Kind) =:= ?BYTECODEFN_TAG; element(1, Kind) =:= ?NATIVEFN_TAG;
+        element(1, Kind) =:= ?COMPILEDFN_TAG; element(1, Kind) =:= ?BOUNDFN_TAG).
 
 %% §10.1.11 order over a props map: indices ascending, names by seq
 plain_enumerable_keys(Props) ->
@@ -41,18 +44,14 @@ quote_tree(Bin) ->
 -define(SAFE(C), (C =/= $" andalso C =/= $\\ andalso C >= 16#20)).
 
 clean(Bin, P) ->
-    case Bin of
-        <<_:P/binary, A, B, C, D, E, F, G, H, _/binary>>
-          when ?SAFE(A), ?SAFE(B), ?SAFE(C), ?SAFE(D), ?SAFE(E), ?SAFE(F),
-               ?SAFE(G), ?SAFE(H) ->
-            clean(Bin, P + 8);
-        <<_:P/binary, A, B, C, D, _/binary>>
-          when ?SAFE(A), ?SAFE(B), ?SAFE(C), ?SAFE(D) ->
-            clean(Bin, P + 4);
-        <<_:P/binary, A, _/binary>> when ?SAFE(A) -> clean(Bin, P + 1);
-        <<_:P/binary>> -> true;
-        _ -> P
-    end.
+    <<_:P/binary, Rest/binary>> = Bin,
+    clean_from(Rest, P).
+
+clean_from(<<A, B, C, D, Rest/binary>>, P) when ?SAFE(A), ?SAFE(B), ?SAFE(C), ?SAFE(D) ->
+    clean_from(Rest, P + 4);
+clean_from(<<A, Rest/binary>>, P) when ?SAFE(A) -> clean_from(Rest, P + 1);
+clean_from(<<>>, _) -> true;
+clean_from(_, P) -> P.
 
 %% p sits on a byte that needs escaping
 quote_esc(Bin, P) ->
@@ -367,10 +366,174 @@ object(Bin, P, Src, Acc) ->
             object(Bin, ws(Bin, P4), Src, [{Key, V} | Acc])
     end.
 
+%% §25.5.1 with no reviver, straight to cells in one pass over the text. text
+%% with anything wrong in it returns parse_miss, for parse_value/2 to say what.
+%% Stack holds the arrays and objects still open, and Seen the lists of keys
+%% met once so far
+plain_parse(St, Bin) ->
+    try p_value(Bin, Bin, 0, [], St, #{})
+    catch throw:{json, _} -> parse_miss
+    end.
+
+-define(WS(C), (C =:= $\s orelse C =:= $\n orelse C =:= $\t orelse C =:= $\r)).
+-define(ASCII(C), (C >= 16#20 andalso C < 16#80 andalso C =/= $" andalso C =/= $\\)).
+
+p_value(<<$", R/binary>>, Bin, P, Stack, St, Seen) ->
+    p_string(R, Bin, P + 1, 0, Stack, St, Seen);
+p_value(<<C, R/binary>>, Bin, P, Stack, St, Seen) when C >= $1, C =< $9 ->
+    p_int(R, Bin, P, 1, C - $0, Stack, St, Seen);
+p_value(<<${, R/binary>>, Bin, P, Stack, St, Seen) -> p_first_key(R, Bin, P + 1, Stack, St, Seen);
+p_value(<<$[, R/binary>>, Bin, P, Stack, St, Seen) -> p_first_item(R, Bin, P + 1, Stack, St, Seen);
+p_value(<<"true", R/binary>>, Bin, P, Stack, St, Seen) ->
+    p_next(R, Bin, P + 4, Stack, St, Seen, true);
+p_value(<<"false", R/binary>>, Bin, P, Stack, St, Seen) ->
+    p_next(R, Bin, P + 5, Stack, St, Seen, false);
+p_value(<<"null", R/binary>>, Bin, P, Stack, St, Seen) ->
+    p_next(R, Bin, P + 4, Stack, St, Seen, null);
+p_value(<<C, R/binary>>, Bin, P, Stack, St, Seen) when ?WS(C) ->
+    p_value(R, Bin, P + 1, Stack, St, Seen);
+p_value(<<C, _/binary>>, Bin, P, Stack, St, Seen) when C =:= $-; C =:= $0 ->
+    p_number(Bin, P, Stack, St, Seen);
+p_value(_, _, _, _, _, _) -> parse_miss.
+
+p_int(<<C, R/binary>>, Bin, P, Len, N, Stack, St, Seen) when ?DIGIT(C), Len < 15 ->
+    p_int(R, Bin, P, Len + 1, N * 10 + (C - $0), Stack, St, Seen);
+p_int(<<C, _/binary>>, Bin, P, _, _, Stack, St, Seen)
+  when ?DIGIT(C); C =:= $.; C =:= $e; C =:= $E ->
+    p_number(Bin, P, Stack, St, Seen);
+p_int(R, Bin, P, Len, N, Stack, St, Seen) -> p_next(R, Bin, P + Len, Stack, St, Seen, N).
+
+p_number(Bin, P, Stack, St, Seen) ->
+    {{json_number, Num, _}, P1} = number(Bin, P, false),
+    <<_:P1/binary, R/binary>> = Bin,
+    p_next(R, Bin, P1, Stack, St, Seen, arc_rt_val_ffi:mk_number(Num)).
+
+p_string(<<A, B, C, D, R/binary>>, Bin, P, Len, Stack, St, Seen)
+  when ?ASCII(A), ?ASCII(B), ?ASCII(C), ?ASCII(D) ->
+    p_string(R, Bin, P, Len + 4, Stack, St, Seen);
+p_string(<<$", R/binary>>, Bin, P, Len, Stack, St, Seen) ->
+    p_next(R, Bin, P + Len + 1, Stack, St, Seen, binary_part(Bin, P, Len));
+p_string(<<C, R/binary>>, Bin, P, Len, Stack, St, Seen) when ?ASCII(C) ->
+    p_string(R, Bin, P, Len + 1, Stack, St, Seen);
+p_string(_, Bin, P, Len, Stack, St, Seen) ->
+    {Text, P1} = str(Bin, P, P + Len),
+    <<_:P1/binary, R/binary>> = Bin,
+    Str = case Stack of
+        [key | _] -> Text;
+        _ -> arc_rt_js_string_ffi:from_text(Text)
+    end,
+    p_next(R, Bin, P1, Stack, St, Seen, Str).
+
+p_first_item(<<$], R/binary>>, Bin, P, Stack, St, Seen) ->
+    p_made(R, Bin, P + 1, Stack, St, Seen, array_cell(St, []));
+p_first_item(<<C, R/binary>>, Bin, P, Stack, St, Seen) when ?WS(C) ->
+    p_first_item(R, Bin, P + 1, Stack, St, Seen);
+p_first_item(R, Bin, P, Stack, St, Seen) -> p_value(R, Bin, P, [item, [] | Stack], St, Seen).
+
+p_first_key(<<$}, R/binary>>, Bin, P, Stack, St, Seen) ->
+    Cell = {?SSHAPEDOBJECT_TAG, ?PLAIN_EMPTY_SHAPE, object_proto(St), {}, #{}},
+    p_made(R, Bin, P + 1, Stack, St, Seen, Cell);
+p_first_key(<<C, R/binary>>, Bin, P, Stack, St, Seen) when ?WS(C) ->
+    p_first_key(R, Bin, P + 1, Stack, St, Seen);
+p_first_key(R, Bin, P, Stack, St, Seen) -> p_key(R, Bin, P, [[], [] | Stack], St, Seen).
+
+p_key(<<$", R/binary>>, Bin, P, Stack, St, Seen) ->
+    p_string(R, Bin, P + 1, 0, [key | Stack], St, Seen);
+p_key(<<C, R/binary>>, Bin, P, Stack, St, Seen) when ?WS(C) ->
+    p_key(R, Bin, P + 1, Stack, St, Seen);
+p_key(_, _, _, _, _, _) -> parse_miss.
+
+%% V has just been read; what may follow depends on what it is in
+p_next(<<C, R/binary>>, Bin, P, Stack, St, Seen, V) ->
+    case Stack of
+        _ when ?WS(C) -> p_next(R, Bin, P + 1, Stack, St, Seen, V);
+        [item, Items | Below] when C =:= $, ->
+            p_value(R, Bin, P + 1, [item, [V | Items] | Below], St, Seen);
+        [item, Items | Below] when C =:= $] ->
+            p_made(R, Bin, P + 1, Below, St, Seen, array_cell(St, lists:reverse(Items, [V])));
+        [key, Keys | Below] when C =:= $: ->
+            p_value(R, Bin, P + 1, [member, [V | Keys] | Below], St, Seen);
+        [member, Keys, Values | Below] when C =:= $, ->
+            p_key(R, Bin, P + 1, [Keys, [V | Values] | Below], St, Seen);
+        [member, Keys, Values | Below] when C =:= $} ->
+            case object_cell(St, Seen, Keys, [V | Values]) of
+                {Cell, St1, Seen1} -> p_made(R, Bin, P + 1, Below, St1, Seen1, Cell);
+                miss -> parse_miss
+            end;
+        _ -> parse_miss
+    end;
+p_next(<<>>, _, _, [], St, _, V) -> {parsed, V, St};
+p_next(_, _, _, _, _, _, _) -> parse_miss.
+
+p_made(<<R/binary>>, Bin, P, Stack, St, Seen, Cell) when tuple_size(St) =:= ?AGENT_SIZE ->
+    Id = element(?AGENT_NEXT_ID, St),
+    St1 = ?ALLOC_CELL(St, element(?AGENT_CELLS, St), Id, Cell),
+    St2 = case Cell of
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when Len > 64 ->
+            arc_rt_store_ffi:weighed(St1, Len);
+        _ -> St1
+    end,
+    p_next(R, Bin, P, Stack, St2, Seen, {?HANDLE_TAG, Id}).
+
+object_proto(St) -> ?REALM_SHARES(?REALMSHARED_OBJECT_PROTO, element(?AGENT_REALM, St)).
+
+array_cell(St, Items) ->
+    Els = case Items of
+        [] -> ?ELEMS_NONE;
+        _ -> {?ELEMS_DENSE, arc_tree_array_ffi:from_list(Items)}
+    end,
+    {?SOBJECT_TAG, {?ARRAYOBJ_TAG, length(Items)},
+     ?REALM_SHARES(?REALMSHARED_ARRAY_PROTO, element(?AGENT_REALM, St)), #{}, [], Els, true}.
+
+-define(SHAPES_TO_SPARE, 4096).
+
+%% Keys and Values come last first. a shape is there for good, so keys get one
+%% only when they turn up a second time, as a record's do, and only while there
+%% are few enough shapes that text nobody vouches for cannot fill memory with them
+object_cell(St, Seen, Keys, Values) ->
+    Step = iolist_to_binary(joined(Keys, [])),
+    case ?SHAPED_NEXT(?STORED(?STORE_SHAPES, St), 0, Step) of
+        {Shape, Offs} -> {shaped_cell(St, Shape, Offs, Values), St, Seen};
+        miss when is_map_key(Step, Seen), ?STORED(?STORE_NEXT_SHAPE, St) < ?SHAPES_TO_SPARE ->
+            case shape_keys(Keys, [], #{?KEY_ID(?PROTO_KEY) => nil}) of
+                miss -> dict_cell(St, Seen, Keys, Values);
+                Named ->
+                    {Shape, Offs, St1} = 'arc@rt@obj':literal_shape(St, Named),
+                    {shaped_cell(St1, Shape, Offs, Values), St1, Seen}
+            end;
+        miss -> dict_cell(St, Seen#{Step => nil}, Keys, Values)
+    end.
+
+%% as rt/obj.literal_shape files a list of keys
+joined([Key | Keys], Acc) -> joined(Keys, [255, Key | Acc]);
+joined([], Acc) -> Acc.
+
+%% names with ids of their own. the shape outlives the text, so it gets copies
+shape_keys([<<C, _/binary>> | _], _, _) when ?DIGIT(C) -> miss;
+shape_keys([Text | Texts], Acc, Ids) when map_size(Ids) =< 32 ->
+    case arc_bytecode_key_ffi:named(binary:copy(Text)) of
+        K when is_map_key(?KEY_ID(K), Ids) -> miss;
+        K -> shape_keys(Texts, [K | Acc], Ids#{?KEY_ID(K) => nil})
+    end;
+shape_keys([], Acc, _) -> Acc;
+shape_keys(_, _, _) -> miss.
+
+shaped_cell(St, Shape, Offs, Values) ->
+    {?SSHAPEDOBJECT_TAG, Shape, object_proto(St), list_to_tuple(lists:reverse(Values)), Offs}.
+
+dict_cell(St, Seen, Keys, Values) when tuple_size(St) =:= ?AGENT_SIZE ->
+    Entries = lists:reverse(lists:zip(Keys, Values)),
+    case plain_prop_dict(Entries, element(?AGENT_PROP_SEQ, St)) of
+        {plain_props, Props, Seq} ->
+            {{?SOBJECT_TAG, ?ORDINARY, object_proto(St), Props, [], ?ELEMS_NONE, true},
+             setelement(?AGENT_PROP_SEQ, St, Seq), Seen};
+        props_miss -> miss
+    end.
+
 %% §25.5.2 for plain data with no replacer. anything observable returns json_miss
 plain_stringify(St, V, Gap) ->
     Realm = element(?AGENT_REALM, St),
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Cells = element(?AGENT_CELLS, St),
     {?HANDLE_TAG, OP} = element(?BUILTINPAIR_PROTOTYPE, element(?REALM_OBJECT, Realm)),
     {?HANDLE_TAG, AP} = element(?BUILTINPAIR_PROTOTYPE, element(?REALM_ARRAY, Realm)),
     TJ = ?KEY_ID(?TO_JSON_KEY),
@@ -382,6 +545,12 @@ plain_stringify(St, V, Gap) ->
     end,
     case Clean(OP) andalso Clean(AP) of
         false -> json_miss;
+        true when Gap =:= <<>> ->
+            try tight(V, {Cells, OP, AP, Gap}, [], <<>>, #{}) of
+                skip -> json_miss;
+                {Text, _} -> {json_done, Text}
+            catch throw:json_miss -> json_miss
+            end;
         true ->
             try enc(V, {Cells, OP, AP, Gap}, <<>>, []) of
                 skip -> json_miss;
@@ -389,6 +558,93 @@ plain_stringify(St, V, Gap) ->
             catch throw:json_miss -> json_miss
             end
     end.
+
+%% enc/4 with no gap, appending to Acc. Heads holds what each shape met so far
+%% writes before its values
+tight(S, _, _, Acc, Heads) when is_binary(S) -> {quoted(S, Acc), Heads};
+tight(N, _, _, Acc, Heads) when is_integer(N) ->
+    {<<Acc/binary, (integer_to_binary(N))/binary>>, Heads};
+tight({?HANDLE_TAG, Id} = V, {Cells, OP, AP, _} = Cx, Seen, Acc, Heads) ->
+    case arc_rt_arena_ffi:get(Id, Cells) of
+        {?SSHAPEDOBJECT_TAG, Shape, {?SOME, {?HANDLE_TAG, OP}}, Slots, Offs}
+          when not is_map_key(?KEY_ID(?TO_JSON_KEY), Offs) ->
+            {Names, Heads1} = case Heads of
+                #{Shape := Known} -> {Known, Heads};
+                _ ->
+                    Made = [<<(quoted(?KEY_TEXT(K), <<>>))/binary, $:>>
+                            || {K, _} <- lists:keysort(2, maps:values(Offs))],
+                    {Made, Heads#{Shape => Made}}
+            end,
+            members(Names, tuple_to_list(Slots), Cx, entered(Id, Seen), Acc, Heads1, ${);
+        {?SOBJECT_TAG, ?ORDINARY, {?SOME, {?HANDLE_TAG, OP}}, Props, _, ?ELEMS_NONE, _}
+          when not is_map_key(?KEY_ID(?TO_JSON_KEY), Props) ->
+            {Keys, Values} = lists:unzip(plain_pairs(Props)),
+            Names = [<<(quoted(K, <<>>))/binary, $:>> || K <- Keys],
+            members(Names, Values, Cx, entered(Id, Seen), Acc, Heads, ${);
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, {?SOME, {?HANDLE_TAG, AP}}, Props, _, Els, _}
+          when map_size(Props) =:= 0 ->
+            items(elems(Els, Len), Cx, entered(Id, Seen), Acc, Heads, $[);
+        _ -> appended(enc(V, Cx, <<>>, Seen), Acc, Heads)
+    end;
+tight(V, Cx, Seen, Acc, Heads) -> appended(enc(V, Cx, <<>>, Seen), Acc, Heads).
+
+appended(skip, _, _) -> skip;
+appended(Text, Acc, Heads) when is_binary(Text) -> {<<Acc/binary, Text/binary>>, Heads};
+appended(Io, Acc, Heads) -> {<<Acc/binary, (iolist_to_binary(Io))/binary>>, Heads}.
+
+entered(Id, Seen) ->
+    case lists:member(Id, Seen) of
+        true -> throw(json_miss);
+        false -> [Id | Seen]
+    end.
+
+quoted(S, Acc) ->
+    case clean(S, 0) of
+        true -> <<Acc/binary, $", S/binary, $">>;
+        P -> <<Acc/binary, $", S:P/binary, (iolist_to_binary(quote_esc(S, P)))/binary>>
+    end.
+
+%% Before is the bracket until something has been written, then the comma
+members([Name | Names], [V | Values], Cx, Seen, Acc, Heads, Before) ->
+    case is_skipped(V, Cx) of
+        true -> members(Names, Values, Cx, Seen, Acc, Heads, Before);
+        false ->
+            {Acc1, Heads1} = tight(V, Cx, Seen, <<Acc/binary, Before, Name/binary>>, Heads),
+            members(Names, Values, Cx, Seen, Acc1, Heads1, $,)
+    end;
+members([], [], _, _, Acc, Heads, $,) -> {<<Acc/binary, $}>>, Heads};
+members([], [], _, _, Acc, Heads, _) -> {<<Acc/binary, "{}">>, Heads}.
+
+items([V | Values], Cx, Seen, Acc, Heads, Before) ->
+    case is_skipped(V, Cx) of
+        true -> items(Values, Cx, Seen, <<Acc/binary, Before, "null">>, Heads, $,);
+        false ->
+            {Acc1, Heads1} = tight(V, Cx, Seen, <<Acc/binary, Before>>, Heads),
+            items(Values, Cx, Seen, Acc1, Heads1, $,)
+    end;
+items([], _, _, Acc, Heads, $,) -> {<<Acc/binary, $]>>, Heads};
+items([], _, _, Acc, Heads, _) -> {<<Acc/binary, "[]">>, Heads}.
+
+is_skipped(undefined, _) -> true;
+is_skipped({js_sym, _}, _) -> true;
+is_skipped({?HANDLE_TAG, Id}, {Cells, _, _, _}) ->
+    case arc_rt_arena_ffi:get(Id, Cells) of
+        {?SOBJECT_TAG, Kind, _, _, _, _, _} = Cell when ?IS_FUNCTION_KIND(Kind) ->
+            without_to_json(Cells, Cell, ?MAX_PROTO_HOPS);
+        _ -> false
+    end;
+is_skipped(_, _) -> false.
+
+%% a function is left out only after its toJSON has been looked for
+without_to_json(Cells, {?SOBJECT_TAG, Kind, Proto, Props, _, _, _}, Fuel)
+  when Fuel > 0, not is_map_key(?KEY_ID(?TO_JSON_KEY), Props),
+       (is_atom(Kind) orelse element(1, Kind) =/= ?PROXYOBJ_TAG) ->
+    case Proto of
+        {?SOME, {?HANDLE_TAG, Id}} ->
+            without_to_json(Cells, arc_rt_arena_ffi:get(Id, Cells), Fuel - 1);
+        ?NONE -> true
+    end;
+without_to_json(_, _, _) -> throw(json_miss).
 
 enc(N, _, _, _) when is_integer(N) -> integer_to_binary(N);
 enc(F, _, _, _) when is_float(F) -> arc_rt_val_ffi:js_format_float(F);
@@ -418,10 +674,8 @@ enc({?HANDLE_TAG, Id}, {Cells, OP, AP, _} = Cx, Ind, Seen) ->
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, {?SOME, {?HANDLE_TAG, AP}}, Props, _, Els, _}
           when map_size(Props) =:= 0 ->
             enc_array(elems(Els, Len), Cx, Ind, [Id | Seen]);
-        {?SOBJECT_TAG, Kind, _, _, _, _, _} when element(1, Kind) =:= ?BYTECODEFN_TAG;
-                                                 element(1, Kind) =:= ?NATIVEFN_TAG;
-                                                 element(1, Kind) =:= ?COMPILEDFN_TAG;
-                                                 element(1, Kind) =:= ?BOUNDFN_TAG ->
+        {?SOBJECT_TAG, Kind, _, _, _, _, _} = Cell when ?IS_FUNCTION_KIND(Kind) ->
+            true = without_to_json(Cells, Cell, ?MAX_PROTO_HOPS),
             skip;
         _ -> throw(json_miss)
     end;

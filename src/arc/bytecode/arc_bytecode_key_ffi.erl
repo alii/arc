@@ -8,9 +8,13 @@ named(Bin) -> {named, hash(Bin) * 2, Bin}.
 private(Bin) -> {private, hash(Bin) * 2 + 1, Bin}.
 
 -define(MASK, 16#1FFFFFFF).
+%% four bytes from @ up, which takes in a-z, A-Z and _
+-define(LETTERS(W), W band 16#C0C0C0C0 =:= 16#40404040).
 
 %% up to seven bytes fit in the number whole, after a leading 1 that keeps their
-%% count, so no two such texts share a number. The low bit says which kind it is.
+%% count, so no two such texts share a number. So do eight or nine letters, at six
+%% bits each, their leading 1 where no count of bytes puts it. The low bit says
+%% which kind it is.
 %% Longer texts run through two 29-bit lanes, three bytes a step. Each step
 %% multiplies by an odd constant and folds the top bits back down, because a
 %% multiply only carries upwards. Every product stays under 2^59, so nothing here
@@ -19,6 +23,10 @@ hash(Bin) when byte_size(Bin) =< 7 ->
     Bits = bit_size(Bin),
     <<N:Bits>> = Bin,
     (((1 bsl Bits) bor N) bsl 1) bor 1;
+hash(<<A:32, B:32>>) when ?LETTERS(A), ?LETTERS(B) ->
+    (((1 bsl 49) bor (packed(A) bsl 24) bor packed(B)) bsl 1) bor 1;
+hash(<<A:32, B:32, C>>) when ?LETTERS(A), ?LETTERS(B), C band 16#C0 =:= 16#40 ->
+    (((1 bsl 54) bor (packed(A) bsl 30) bor (packed(B) bsl 6) bor (C band 16#3F)) bsl 1) bor 1;
 hash(Bin) -> hash(Bin, 16#11C9DC5 + byte_size(Bin), 16#1747B28C).
 
 hash(<<W:24, Rest/binary>>, A, B) -> hash(Rest, mix_a(A bxor W), mix_b(B bxor W));
@@ -26,7 +34,11 @@ hash(<<W:16>>, A, B) -> done(mix_a(A bxor W), mix_b(B bxor W));
 hash(<<W:8>>, A, B) -> done(mix_a(A bxor W), mix_b(B bxor W));
 hash(<<>>, A, B) -> done(A, B).
 
--compile({inline, [mix_a/1, mix_b/1, done/2]}).
+-compile({inline, [packed/1, mix_a/1, mix_b/1, done/2]}).
+packed(W) ->
+    Pairs = ((W band 16#3F003F00) bsr 2) bor (W band 16#003F003F),
+    ((Pairs band 16#0FFF0000) bsr 4) bor (Pairs band 16#0FFF).
+
 mix_a(X) ->
     H = (X * 16#1B873593) band ?MASK,
     H bxor (H bsr 15).

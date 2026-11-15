@@ -4,7 +4,7 @@ import arc/module/loader
 import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, KHandle, Store, classify, mk_int, mk_undefined,
+  type Agent, type JsVal, KHandle, classify, mk_int, mk_undefined,
 }
 import gleam/set
 import gleam/string
@@ -17,7 +17,7 @@ fn small_engine() -> Engine(Nil) {
   let #(Nil, eng) =
     engine.with_context(eng, fn(ctx) {
       let st = rt_gc.collect(ctx.agent, [])
-      let st = Agent(..st, store: Store(..st.store, gc_threshold: threshold))
+      let st = rt_gc.set_threshold(st, threshold)
       #(Nil, Context(..ctx, agent: st))
     })
   eng

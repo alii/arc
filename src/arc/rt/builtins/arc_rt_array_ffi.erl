@@ -10,7 +10,7 @@ elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
 index_range_plain(St, Props, Proto, Start, Count) ->
     (not props_have_index(Props, Start, Count))
-        andalso chain_index_range_plain(element(?STORE_CELLS, element(?AGENT_STORE, St)),
+        andalso chain_index_range_plain(element(?AGENT_CELLS, St),
                            Proto, Start, Count).
 
 chain_index_range_plain(_, ?NONE, _, _) -> true;
@@ -66,7 +66,7 @@ probe_sparse(M, Idx, End) ->
 
 %% a whole array with no properties of its own; a hole means take the long way
 scan_whole_array(St, {?HANDLE_TAG, Id}, Search, Eq) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+    case arc_rt_arena_ffi:get(Id, element(?AGENT_CELLS, St)) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length}, _, Props, _, Els, _}
           when map_size(Props) =:= 0 ->
             scan_forward(Els, Search, 0, Length, Eq);
@@ -122,15 +122,14 @@ eq(same_value_zero, A, B) -> arc_rt_val_ffi:same_value_zero(A, B).
 
 %% only for a plain extensible array with no own props and a free proto chain
 push(St, {?HANDLE_TAG, Id}, Args) ->
-    Store = element(?AGENT_STORE, St),
-    Cells = element(?STORE_CELLS, Store),
+    Cells = element(?AGENT_CELLS, St),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, Proto, Props, Sym, Els, true}
           when Props =:= #{} ->
             N = length(Args),
             NewLen = Len + N,
             case NewLen =< ?MAX_DENSE_INDEX
-                 andalso chain_free(Store, Cells, Proto, Len, N) of
+                 andalso chain_free(St, Cells, Proto, Len, N) of
                 false -> push_miss;
                 Free ->
                     case append(Els, Len, Args) of
@@ -138,20 +137,18 @@ push(St, {?HANDLE_TAG, Id}, Args) ->
                         NewEls ->
                             Cell = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, NewLen}, Proto, Props,
                                     Sym, NewEls, true},
-                            {pushed, NewLen,
-                             setelement(?AGENT_STORE, St,
-                                        setelement(?STORE_CELLS,
-                                                   arc_rt_obj_ffi:remembering(Free, Store),
-                                                   arc_rt_arena_ffi:set(Id, Cell, Cells)))}
+                            St1 = setelement(?AGENT_CELLS, arc_rt_obj_ffi:remembering(Free, St),
+                                             arc_rt_arena_ffi:set(Id, Cell, Cells)),
+                            {pushed, NewLen, ?GROWN(St1, Len, NewLen)}
                     end
             end;
         _ -> push_miss
     end;
 push(_, _, _) -> push_miss.
 
-%% true | false | {true, Store1}
-chain_free(Store, Cells, Proto, Start, Count) ->
-    case arc_rt_obj_ffi:index_chain_plain(Store, Cells, Proto) of
+%% true | false | {true, St1}
+chain_free(St, Cells, Proto, Start, Count) ->
+    case arc_rt_obj_ffi:index_chain_plain(St, Cells, Proto) of
         false -> chain_index_range_plain(Cells, Proto, Start, Count);
         Plain -> Plain
     end.
@@ -171,8 +168,7 @@ set_each([V | Vs], I, A) -> set_each(Vs, I + 1, arc_tree_array_ffi:set(I, V, A))
 set_each([], _, A) -> A.
 
 pop(St, {?HANDLE_TAG, Id}) ->
-    Store = element(?AGENT_STORE, St),
-    Cells = element(?STORE_CELLS, Store),
+    Cells = element(?AGENT_CELLS, St),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, Proto, Props, Sym, {?ELEMS_DENSE, A}, true}
           when Props =:= #{}, Len > 0 ->
@@ -185,9 +181,8 @@ pop(St, {?HANDLE_TAG, Id}) ->
                     Cell = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Last}, Proto, Props, Sym,
                             {?ELEMS_DENSE, arc_tree_array_ffi:resize(A, Last)}, true},
                     {popped, V,
-                     setelement(?AGENT_STORE, St,
-                                setelement(?STORE_CELLS, Store,
-                                           arc_rt_arena_ffi:set(Id, Cell, Cells)))}
+                     setelement(?AGENT_CELLS, St,
+                                           arc_rt_arena_ffi:set(Id, Cell, Cells))}
             end;
         _ -> pop_miss
     end;

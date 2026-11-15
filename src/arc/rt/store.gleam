@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{RangeError}
+import arc/host_hooks.{type HostHooks}
 import arc/rt/arena
 import arc/rt/limits
 import arc/rt/types.{
@@ -7,23 +8,51 @@ import arc/rt/types.{
   SBox, Store, StoreMeta,
 }
 import gleam/dict
+import gleam/option.{None}
 import gleam/set
+
+// young generation size in cells between minor gcs
+const gc_threshold = 2048
+
+/// an agent with an empty heap and no realm yet
+pub fn new_agent(hooks: HostHooks) -> Agent {
+  Agent(
+    cells: arena.new(),
+    next_id: 0,
+    gc_at: gc_threshold,
+    // past the constant birth seqs
+    prop_seq: 3,
+    call_depth: 0,
+    frames: [],
+    realm: types.unset_realm(),
+    store: new(),
+    hooks:,
+    globals: dict.new(),
+  )
+}
+
+@external(erlang, "arc_rt_store_ffi", "iter_result_offsets")
+fn iter_result_offsets() -> types.ShapeOffsets
+
+// §7.4.16 createiteratorresultobject
+@external(erlang, "arc_rt_store_ffi", "new_iter_result")
+pub fn new_iter_result(st: Agent, value: JsVal, done: JsVal) -> #(Handle, Agent)
+
+/// gives the process a heap worth running code in, for as long as `run` takes
+@external(erlang, "arc_rt_store_ffi", "with_room")
+pub fn with_room(run: fn() -> a) -> a
 
 pub fn new() -> Store {
   Store(
-    cells: arena.new(),
-    next_id: 0,
-    alloc_since_gc: 0,
-    // young generation size in cells between minor gcs
-    gc_threshold: 4096,
-    // past the constant birth seqs
-    prop_seq: 3,
-    // 0 is where `new` receivers start, 1 where `{}` starts
+    gc_threshold:,
+    // 0 is where `new` receivers start, 1 where `{}` starts, and 2 is an
+    // iterator result's
     shapes: dict.from_list([
       #(0, types.ShapeDesc(0, dict.new(), dict.new())),
       #(1, types.ShapeDesc(0, dict.new(), dict.new())),
+      #(2, types.ShapeDesc(2, iter_result_offsets(), dict.new())),
     ]),
-    next_shape: 2,
+    next_shape: 3,
     ics: dict.new(),
     plain_write_protos: dict.new(),
     global_epoch: 0,
@@ -38,14 +67,31 @@ pub fn new() -> Store {
       unhandled_rejections: [],
       old_gen: arena.new(),
       young_start: 0,
-      old_weak_ids: [],
       major_live: 0,
       minors_since_major: 0,
       plain_index_protos: dict.new(),
       async_context_mapping: types.mk_undefined(),
       lazy_code: dict.new(),
+      threaded: dict.new(),
+      threaded_before: dict.new(),
+      thread_keys: dict.new(),
+      draft_runs: dict.new(),
+      next_template_id: 1,
       unit_texts: dict.new(),
-      kept: types.Kept(below: 0, cells: arena.new(), weak_ids: [], count: 0),
+      kept: types.Kept(
+        below: 0,
+        cells: arena.new(),
+        weak_ids: [],
+        count: 0,
+        pins: 0,
+      ),
+      template_objects: dict.new(),
+      host_fns: dict.new(),
+      realms: dict.new(),
+      import_hook: None,
+      waiters: [],
+      tz_zones: dict.new(),
+      checked_subject: "",
     ),
   )
 }
@@ -69,80 +115,39 @@ fn unseeded() -> a {
   panic as "JsOps unseeded — init_realm fills"
 }
 
-pub fn cell_new(st: Agent, cell: Cell) -> #(Handle, Agent) {
-  let store = st.store
-  let id = store.next_id
-  let store =
-    Store(
-      ..store,
-      cells: arena.set(id, cell, store.cells),
-      next_id: id + 1,
-      alloc_since_gc: store.alloc_since_gc + 1,
-    )
-  #(Handle(id), Agent(..st, store: store))
-}
+@external(erlang, "arc_rt_store_ffi", "cell_new")
+pub fn cell_new(st: Agent, cell: Cell) -> #(Handle, Agent)
 
 pub fn cell_new_with(
   st: Agent,
   seqs: Int,
   build: fn(Int) -> Cell,
 ) -> #(Handle, Agent) {
-  let store = st.store
-  let id = store.next_id
-  let store =
-    Store(
-      ..store,
-      cells: arena.set(id, build(store.prop_seq), store.cells),
-      next_id: id + 1,
-      alloc_since_gc: store.alloc_since_gc + 1,
-      prop_seq: store.prop_seq + seqs,
-    )
-  #(Handle(id), Agent(..st, store: store))
+  let id = st.next_id
+  let cells = arena.set(id, build(st.prop_seq), st.cells)
+  #(
+    Handle(id),
+    Agent(..st, cells:, next_id: id + 1, prop_seq: st.prop_seq + seqs),
+  )
 }
 
 pub fn cell_new_pair(
   st: Agent,
   build: fn(Handle, Handle) -> #(Cell, Cell),
 ) -> #(Handle, Handle, Agent) {
-  let store = st.store
-  let id = store.next_id
+  let id = st.next_id
   let a = Handle(id)
   let b = Handle(id + 1)
   let #(cell_a, cell_b) = build(a, b)
-  let store =
-    Store(
-      ..store,
-      cells: arena.set(id + 1, cell_b, arena.set(id, cell_a, store.cells)),
-      next_id: id + 2,
-      alloc_since_gc: store.alloc_since_gc + 2,
-    )
-  #(a, b, Agent(..st, store: store))
+  let cells = arena.set(id + 1, cell_b, arena.set(id, cell_a, st.cells))
+  #(a, b, Agent(..st, cells:, next_id: id + 2))
 }
 
 @external(erlang, "arc_rt_store_ffi", "cell_get")
 pub fn cell_get(st: Agent, h: Handle) -> Cell
 
-pub fn cell_set(st: Agent, h: Handle, cell: Cell) -> Agent {
-  let store = st.store
-  let Handle(id) = h
-  let cells = arena.set(id, cell, store.cells)
-  let global_epoch = case cell {
-    types.SObject(kind: types.GlobalObj, ..) -> store.global_epoch + 1
-    _ -> store.global_epoch
-  }
-  let plain_write_protos = case dict.has_key(store.plain_write_protos, id) {
-    True -> dict.new()
-    False -> store.plain_write_protos
-  }
-  let meta = case dict.has_key(store.meta.plain_index_protos, id) {
-    True -> StoreMeta(..store.meta, plain_index_protos: dict.new())
-    False -> store.meta
-  }
-  Agent(
-    ..st,
-    store: Store(..store, cells:, plain_write_protos:, global_epoch:, meta:),
-  )
-}
+@external(erlang, "arc_rt_store_ffi", "cell_set")
+pub fn cell_set(st: Agent, h: Handle, cell: Cell) -> Agent
 
 // boxes must be sbox so gc traces them
 pub fn box_new(st: Agent, value: JsVal) -> #(Handle, Agent) {
@@ -160,9 +165,7 @@ pub fn cell_update(st: Agent, h: Handle, f: fn(Cell) -> Cell) -> Agent {
 }
 
 pub fn cell_free(st: Agent, h: Handle) -> Agent {
-  let store = st.store
-  let Handle(id) = h
-  Agent(..st, store: Store(..store, cells: arena.free(id, store.cells)))
+  Agent(..st, cells: arena.free(h.id, st.cells))
 }
 
 pub fn pin_root(st: Agent, h: Handle) -> Agent {
@@ -175,11 +178,7 @@ pub fn pin_root(st: Agent, h: Handle) -> Agent {
 }
 
 pub fn next_prop_seq(st: Agent) -> #(Int, Agent) {
-  let store = st.store
-  #(
-    store.prop_seq,
-    Agent(..st, store: Store(..store, prop_seq: store.prop_seq + 1)),
-  )
+  #(st.prop_seq, Agent(..st, prop_seq: st.prop_seq + 1))
 }
 
 // spelled out rather than built with types.*_property, so each property takes one call
@@ -251,7 +250,7 @@ pub fn next_unit_id(st: Agent) -> #(Int, Agent) {
   )
 }
 
-fn with_meta(st: Agent, meta: StoreMeta) -> Agent {
+pub fn with_meta(st: Agent, meta: StoreMeta) -> Agent {
   Agent(..st, store: Store(..st.store, meta:))
 }
 

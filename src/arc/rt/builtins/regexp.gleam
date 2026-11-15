@@ -808,16 +808,70 @@ fn regexp_compile(pattern: String, flags: String) -> types.CompiledRegExp
 @external(erlang, "arc_regexp_ffi", "is_compiled")
 fn is_compiled(compiled: types.CompiledRegExp) -> Bool
 
+pub type ExecResult =
+  Result(
+    #(#(Int, Int), List(#(Int, Int)), Int, List(#(String, Int))),
+    ExecFailure,
+  )
+
 @external(erlang, "arc_regexp_ffi", "regexp_exec_compiled")
-pub fn regexp_exec_compiled(
+fn regexp_exec_compiled(
+  compiled: types.CompiledRegExp,
+  s: String,
+  offset: Int,
+  sticky: Bool,
+) -> ExecResult
+
+@external(erlang, "arc_regexp_ffi", "regexp_exec_short")
+fn regexp_exec_short(
+  compiled: types.CompiledRegExp,
+  s: String,
+  offset: Int,
+  sticky: Bool,
+) -> Option(ExecResult)
+
+@external(erlang, "arc_regexp_ffi", "can_trust")
+fn can_trust(s: String) -> Bool
+
+@external(erlang, "arc_regexp_ffi", "trusting")
+fn trusting(compiled: types.CompiledRegExp) -> types.CompiledRegExp
+
+/// one run of a matcher, from a byte offset. a long subject is checked once
+/// here and not on every run
+pub fn run_matcher(
+  st: Agent,
   compiled: types.CompiledRegExp,
   s: String,
   offset: Int,
   sticky sticky: Bool,
-) -> Result(
-  #(#(Int, Int), List(#(Int, Int)), Int, List(#(String, Int))),
-  ExecFailure,
-)
+) -> #(ExecResult, Agent) {
+  case regexp_exec_short(compiled, s, offset, sticky) {
+    Some(result) -> #(result, st)
+    None -> {
+      let #(compiled, st) = trusting_checked(st, compiled, s)
+      #(regexp_exec_compiled(compiled, s, offset, sticky), st)
+    }
+  }
+}
+
+fn trusting_checked(
+  st: Agent,
+  compiled: types.CompiledRegExp,
+  s: String,
+) -> #(types.CompiledRegExp, Agent) {
+  use <- bool.guard(string.byte_size(s) < 96, #(compiled, st))
+  let meta = st.store.meta
+  use <- bool.lazy_guard(s == meta.checked_subject, fn() {
+    #(trusting(compiled), st)
+  })
+  case can_trust(s) {
+    True -> #(
+      trusting(compiled),
+      rt_store.with_meta(st, types.StoreMeta(..meta, checked_subject: s)),
+    )
+    False -> #(compiled, st)
+  }
+}
 
 pub fn set_last_index(st: Agent, h: Handle, v: JsVal) -> Agent {
   rt_obj.set_named(st, mk_object(h), names.last_index, v, strict: True)
@@ -920,7 +974,8 @@ pub fn builtin_exec_ranges(
     True -> last_index
     False -> 0
   }
-  case regexp_exec_compiled(compiled, s, last_index, sticky) {
+  let #(result, st) = run_matcher(st, compiled, s, last_index, sticky)
+  case result {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> {
       let st = case global || sticky {
         True -> set_last_index(st, h, mk_int(0))
@@ -1003,12 +1058,14 @@ fn compile_cached(
   }
 }
 
+const groups_key = names.groups
+
 fn build_exec_result(
   st: Agent,
   s: String,
   whole: #(Int, Int),
   groups: List(#(Int, Int)),
-  names: List(#(String, Int)),
+  group_names: List(#(String, Int)),
   has_indices has_indices: Bool,
 ) -> #(JsVal, Agent) {
   let #(match_start, match_len) = whole
@@ -1016,20 +1073,20 @@ fn build_exec_result(
     mk_string(bytes.unsafe_slice(s, match_start, match_len)),
     ..list.map(groups, capture_to_value(s, _))
   ]
-  let #(groups_val, st) = groups_object(st, s, groups, names)
+  let #(groups_val, st) = groups_object(st, s, groups, group_names)
   let #(indices_val, st) = case has_indices {
     False -> #(mk_undefined(), st)
-    True -> make_indices(st, whole, groups, names)
+    True -> make_indices(st, whole, groups, group_names)
   }
   let extra = case classify(indices_val) {
     KUndef -> []
-    _ -> [#("indices", indices_val)]
+    _ -> [#(named("indices"), indices_val)]
   }
   let #(arr_h, st) =
     alloc_array_with_props(st, match_values, [
-      #("index", mk_int(match_start)),
-      #("input", mk_string(s)),
-      #("groups", groups_val),
+      #(names.index, mk_int(match_start)),
+      #(names.input, mk_string(s)),
+      #(names.groups, groups_val),
       ..extra
     ])
   #(mk_object(arr_h), st)
@@ -1098,7 +1155,7 @@ fn make_indices(
     }
   }
   let #(arr_h, st) =
-    alloc_array_with_props(st, pair_values, [#("groups", groups_val)])
+    alloc_array_with_props(st, pair_values, [#(groups_key, groups_val)])
   #(mk_object(arr_h), st)
 }
 
@@ -1148,18 +1205,18 @@ pub fn capture_to_value(s: String, cap: #(Int, Int)) -> JsVal {
 fn alloc_array_with_props(
   st: Agent,
   values: List(JsVal),
-  entries: List(#(String, JsVal)),
+  entries: List(#(key.PropertyKey, JsVal)),
 ) -> #(Handle, Agent) {
-  let array_proto = st.realm.array.prototype
+  let array_proto = st.realm.shared.array_proto
   use seq <- rt_store.cell_new_with(st, list.length(entries))
   let props =
     list.index_map(entries, fn(entry, i) {
       let #(name, value) = entry
-      #(named(name), types.plain_property(value, seq + i))
+      #(name, types.plain_property(value, seq + i))
     })
   SObject(
     kind: ArrayObj(list.length(values)),
-    proto: Some(array_proto),
+    proto: array_proto,
     props: prop_map.from_list(props),
     symbol_props: [],
     elements: elements.from_list(values),

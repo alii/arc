@@ -15,7 +15,7 @@ import arc/rt/prop_map
 import arc/rt/store as rt_store
 import arc/rt/typed_array_bytes
 import arc/rt/types.{
-  type Agent, type Handle, type HostTerm, type JsVal, type Property, Agent,
+  type Agent, type Handle, type HostTerm, type JsVal, type Property,
   ArrayBufferObj, Bytes, DataViewObj, HostFnEntry, HostJob, HostObj, JFloat,
   JInt, KBool, KNum, KStr, NoElements, PromiseObj, SObject, StringKey,
   TypedArrayObj, classify, mk_object, mk_undefined,
@@ -558,14 +558,23 @@ fn register(
   brand: Brand(host),
   impl: HostFn(host),
 ) -> #(Int, Agent) {
-  let id = dict.size(st.host_fns)
+  let id = dict.size(st.store.meta.host_fns)
   let entry =
     HostFnEntry(call: fn(st, args, this, new_target) {
       let #(result, Context(agent: st, ..)) =
         impl(Context(agent: st, new_target:, brand:), args, this)
       #(result, st)
     })
-  #(id, Agent(..st, host_fns: dict.insert(st.host_fns, id, entry)))
+  #(
+    id,
+    rt_store.with_meta(
+      st,
+      types.StoreMeta(
+        ..st.store.meta,
+        host_fns: dict.insert(st.store.meta.host_fns, id, entry),
+      ),
+    ),
+  )
 }
 
 fn alloc_host_methods(

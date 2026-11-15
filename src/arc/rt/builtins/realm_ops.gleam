@@ -67,11 +67,7 @@ pub fn alloc_iter_result(
   value: JsVal,
   done done: Bool,
 ) -> #(JsVal, Agent) {
-  let #(h, st) =
-    common.alloc_plain_object(st, st.realm.object.prototype, [
-      #("value", value),
-      #("done", mk_bool(done)),
-    ])
+  let #(h, st) = rt_store.new_iter_result(st, value, mk_bool(done))
   #(mk_object(h), st)
 }
 

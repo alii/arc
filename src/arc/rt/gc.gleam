@@ -1,15 +1,14 @@
 import arc/internal/ordered_entries
 import arc/internal/tree_array
 import arc/rt/arena.{type Arena}
-import arc/rt/bytecode.{
-  type FuncTemplate, type SuspendedFrame, FuncTemplate, SuspendedFrame,
-}
+import arc/rt/bytecode.{type SuspendedFrame, SuspendedFrame}
 import arc/rt/prop_map.{type PropMap}
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type AsyncGenRequest, type Cell, type Handle, type IcEntry,
-  type JsElements, type JsVal, type ObjKind, type PromiseReaction,
-  type PromiseState, type Property, type ReactionHandler, type Resume,
-  type Store, type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator,
+  type Job, type JobQueue, type JsElements, type JsVal, type Kept, type ObjKind,
+  type PromiseReaction, type PromiseState, type Property, type ReactionHandler,
+  type Resume, type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator,
   ArrayObj, AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
   BooleanObj, BoundFn, BytecodeFn, CompiledFn, DataViewObj, DateObj, Dense,
   DisposableStackObj, ErrorObj, FinalizationRegistryObj, GeneratorObj, Handle,
@@ -22,9 +21,10 @@ import arc/rt/types.{
   SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, Store,
   StringIterator, StringObj, SymbolObj, TemporalObj, ThrowerPassThrough,
   TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
-  WrapForValidIteratorObj, classify, job_queue_to_list,
+  WrapForValidIteratorObj, classify, job_queue_aged, job_queue_fresh,
+  job_queue_to_list,
 }
-import gleam/dict.{type Dict}
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -47,14 +47,14 @@ fn push_symbol_props_refs(
   acc: List(Int),
 ) -> List(Int)
 
-// exhaustive destructure: a new store field must be rooted here
 pub fn agent_roots(st: Agent) -> List(Int) {
+  roots_with(st, job_queue_to_list)
+}
+
+// exhaustive destructure: a new store field must be rooted here
+fn roots_with(st: Agent, jobs: fn(JobQueue) -> List(Job)) -> List(Int) {
   let Store(
-    cells: _,
-    next_id: _,
-    alloc_since_gc: _,
     gc_threshold: _,
-    prop_seq: _,
     shapes: _,
     next_shape: _,
     // ics are validated on use, so weak
@@ -72,24 +72,36 @@ pub fn agent_roots(st: Agent) -> List(Int) {
       unhandled_rejections:,
       old_gen: _,
       young_start: _,
-      old_weak_ids: _,
       major_live: _,
       minors_since_major: _,
       plain_index_protos: _,
       async_context_mapping:,
       lazy_code: _,
+      threaded: _,
+      threaded_before: _,
+      thread_keys: _,
+      draft_runs: _,
+      next_template_id: _,
       unit_texts: _,
       kept: _,
+      // pinned when made
+      template_objects: _,
+      host_fns:,
+      realms:,
+      import_hook:,
+      waiters:,
+      tz_zones: _,
+      checked_subject: _,
     ),
   ) = st.store
   let acc = push_refs(async_context_mapping, set.to_list(pinned_roots))
   let acc = list.append(unhandled_rejections, acc)
-  let acc = push_refs(job_queue_to_list(microtasks), acc)
-  let acc = push_refs(dict.values(st.host_fns), acc)
-  let acc = push_refs(st.import_hook, acc)
-  let acc = push_refs(st.waiters, acc)
+  let acc = push_refs(jobs(microtasks), acc)
+  let acc = push_refs(dict.values(host_fns), acc)
+  let acc = push_refs(import_hook, acc)
+  let acc = push_refs(waiters, acc)
   // registry copy of the current realm may be stale
-  let realms = dict.insert(st.realms, st.realm.id, st.realm)
+  let realms = dict.insert(realms, st.realm.id, st.realm)
   dict.fold(realms, acc, fn(acc, _id, realm) {
     prop_map.fold(realm.lexical_globals, acc, fn(acc, _name, binding) {
       push_refs(types.lexical_global_value(binding), acc)
@@ -97,8 +109,9 @@ pub fn agent_roots(st: Agent) -> List(Int) {
   })
 }
 
-// exhaustive, no wildcard: a new variant must be traced
-fn push_cell_refs(cell: Cell, acc: List(Int)) -> List(Int) {
+// exhaustive, no wildcard: a new variant must be traced; called by name from
+// arc_rt_gc_ffi
+pub fn push_cell_refs(cell: Cell, acc: List(Int)) -> List(Int) {
   case cell {
     SObject(kind:, proto:, props:, symbol_props:, elements:, extensible: _) ->
       push_objkind_refs(kind, push_optional_handle(proto, acc))
@@ -134,56 +147,22 @@ fn push_suspended_frame_refs(
   acc: List(Int),
 ) -> List(Int) {
   let SuspendedFrame(
-    template:,
+    // compiled code holds primitives only
+    template: _,
     pc: _,
     locals:,
     stack:,
     try_stack: _,
-    this:,
-    home_object:,
     eval_env:,
     parked: _,
     call_args:,
     realm: _,
     unit_id: _,
   ) = frame
-  let acc = push_template_refs(template, acc)
   let acc = push_refs(locals, acc)
   let acc = list.fold(stack, acc, fn(a, v) { push_refs(v, a) })
-  let acc = push_refs(this, acc)
-  let acc = push_refs(home_object, acc)
   let acc = list.fold(call_args, acc, fn(a, v) { push_refs(v, a) })
-  case eval_env {
-    Some(id) -> [id, ..acc]
-    None -> acc
-  }
-}
-
-fn push_template_refs(template: FuncTemplate, acc: List(Int)) -> List(Int) {
-  let FuncTemplate(
-    name: _,
-    arity: _,
-    length: _,
-    local_count: _,
-    bytecode: _,
-    constants:,
-    lines: _,
-    functions: _,
-    env_descriptors: _,
-    is_strict: _,
-    is_arrow: _,
-    is_derived_constructor: _,
-    is_generator: _,
-    is_async: _,
-    is_constructor: _,
-    is_class_constructor: _,
-    local_names: _,
-    lexical: _,
-    code_kind: _,
-    regs: _,
-    nested_captures: _,
-  ) = template
-  push_refs(constants, acc)
+  push_refs(eval_env, acc)
 }
 
 fn push_request_refs(acc: List(Int), req: AsyncGenRequest) -> List(Int) {
@@ -226,7 +205,7 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       push_refs(direct_entry, acc)
     }
     BytecodeFn(
-      template:,
+      template: _,
       env:,
       home_object:,
       flags: _,
@@ -238,7 +217,6 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       let acc = push_optional_handle(home_object, acc)
       let acc = push_optional_handle(fields_init, acc)
       let acc = push_birth_refs(birth, acc)
-      let acc = push_template_refs(template, acc)
       push_refs(env, acc)
     }
     NativeFn(token:, name: _, length: _, constructible: _) ->
@@ -350,15 +328,23 @@ fn push_birth_refs(birth: types.FnBirth, acc: List(Int)) -> List(Int) {
 
 // turn boundary only, call_depth 0; called by name from arc_aot_run_ffi
 pub fn maybe_collect(st: Agent) -> Agent {
-  case st.call_depth == 0 && due(st.store) {
+  case st.call_depth == 0 && is_due(st) {
     True -> collect_some(st, [])
     False -> st
   }
 }
 
-// minor gcs are cheap, so the young generation has a fixed size
-fn due(store: Store) -> Bool {
-  store.alloc_since_gc >= store.gc_threshold
+pub fn is_due(st: Agent) -> Bool {
+  st.next_id >= st.gc_at
+}
+
+/// how many cells may be made between collections
+pub fn set_threshold(st: Agent, gc_threshold: Int) -> Agent {
+  Agent(
+    ..st,
+    gc_at: st.gc_at - st.store.gc_threshold + gc_threshold,
+    store: Store(..st.store, gc_threshold:),
+  )
 }
 
 pub fn hold_roots(st: Agent, held: List(JsVal)) -> #(List(Int), Agent) {
@@ -378,7 +364,7 @@ pub fn release_roots(st: Agent, ids: List(Int)) -> Agent {
 }
 
 // majors keep the old full-gc schedule, minors run in between
-pub const minors_per_major: Int = 16
+pub const minors_per_major: Int = 32
 
 pub fn collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
   let store = st.store
@@ -386,7 +372,8 @@ pub fn collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
   let floor = meta.major_live / 2
   case
     meta.young_start > 0
-    && meta.live_count - meta.major_live < int.max(store.gc_threshold, floor)
+    && meta.live_count - meta.major_live
+    < int.max(2 * store.gc_threshold, floor)
     && meta.minors_since_major * store.gc_threshold
     < int.max(minors_per_major * store.gc_threshold, floor)
   {
@@ -399,7 +386,7 @@ pub fn collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
 pub fn collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   case st.store.meta.kept.below {
     0 -> collect_all(st, extra_roots)
-    _ -> collect_above_kept(st, extra_roots)
+    _ -> collect_above_kept(st, extra_roots, st.store.meta.kept)
   }
 }
 
@@ -407,112 +394,137 @@ pub fn collect(st: Agent, extra_roots: List(Handle)) -> Agent {
 /// walk only what was made since.
 pub fn keep_all(st: Agent) -> Agent {
   let st = collect_all(st, [])
-  let store = st.store
-  let meta = store.meta
+  let meta = st.store.meta
+  let push_weak = fn(id, cell, acc) {
+    case is_weak_cell(cell) {
+      True -> [id, ..acc]
+      False -> acc
+    }
+  }
   let kept =
     Kept(
-      below: store.next_id,
-      cells: store.cells,
-      weak_ids: meta.old_weak_ids,
+      below: st.next_id,
+      cells: st.cells,
+      weak_ids: arena.fold(push_weak, [], st.cells),
       count: meta.live_count,
+      pins: set.size(st.store.pinned_roots),
     )
-  Agent(..st, store: Store(..store, meta: types.StoreMeta(..meta, kept:)))
+  rt_store.with_meta(st, types.StoreMeta(..meta, kept:))
+}
+
+fn collect_all(st: Agent, extra_roots: List(Handle)) -> Agent {
+  let nothing = Kept(below: 0, cells: st.cells, weak_ids: [], count: 0, pins: 0)
+  collect_above_kept(st, extra_roots, nothing)
 }
 
 // no renumbering, dead ids dropped, next_id falls past highest survivor
-fn collect_all(st: Agent, extra_roots: List(Handle)) -> Agent {
-  let store = st.store
-  let roots = list.fold(extra_roots, agent_roots(st), fn(a, h) { [h.id, ..a] })
-  let live = mark_reachable(store.cells, roots, dict.new())
-  let Swept(cells:, next_id:, weak_ids: weak) = sweep(store.cells, live)
-  let live_count = dict.size(live)
-  Agent(
-    ..st,
-    store: Store(
-      ..store,
-      cells:,
-      next_id:,
-      alloc_since_gc: 0,
-      ics: dict.filter(store.ics, fn(_, entry) { is_read_ic(entry) }),
-      plain_write_protos: dict.new(),
-      meta: types.StoreMeta(
-        ..store.meta,
-        live_count:,
-        old_gen: cells,
-        young_start: next_id,
-        old_weak_ids: weak,
-        major_live: live_count,
-        minors_since_major: 0,
-        plain_index_protos: dict.new(),
-      ),
-    ),
-  )
-}
-
-fn collect_above_kept(st: Agent, extra_roots: List(Handle)) -> Agent {
+fn collect_above_kept(
+  st: Agent,
+  extra_roots: List(Handle),
+  kept: Kept,
+) -> Agent {
+  let st = drop_handled_rejections(st)
   let store = st.store
   let meta = store.meta
-  let Kept(below:, cells: before, weak_ids:, count:) = meta.kept
-  let Above(cells:, weak_ids:, survivors:, next_id:) =
-    collect_above(st, extra_roots, below, before, weak_ids, fn(_) { True })
+  let Kept(below:, cells: before, weak_ids:, count:, pins: _) = kept
+  let Above(cells:, survivors:, next_id:, walked: _) =
+    collect_above(
+      st,
+      extra_roots,
+      job_queue_to_list,
+      below,
+      before,
+      weak_ids,
+      fn(_) { True },
+      Some,
+    )
   let live_count = count + survivors
   Agent(
     ..st,
+    cells:,
+    next_id:,
+    gc_at: next_id + store.gc_threshold,
     store: Store(
       ..store,
-      cells:,
-      next_id:,
-      alloc_since_gc: 0,
       ics: dict.filter(store.ics, fn(_, entry) { is_read_ic(entry) }),
       plain_write_protos: dict.new(),
+      microtasks: job_queue_aged(store.microtasks),
       meta: types.StoreMeta(
         ..meta,
         live_count:,
         old_gen: cells,
         young_start: next_id,
-        old_weak_ids: weak_ids,
         major_live: live_count,
         minors_since_major: 0,
         plain_index_protos: dict.new(),
+        threaded: dict.new(),
+        threaded_before: meta.threaded,
+        thread_keys: dict.new(),
+        draft_runs: dict.new(),
+        checked_subject: "",
       ),
     ),
   )
+}
+
+fn drop_handled_rejections(st: Agent) -> Agent {
+  let meta = st.store.meta
+  let unhandled_rejections = {
+    use id <- list.filter(meta.unhandled_rejections)
+    case arena.get_option(id, st.cells) {
+      Some(SPromiseData(is_handled:, ..)) -> !is_handled
+      _ -> False
+    }
+  }
+  rt_store.with_meta(st, types.StoreMeta(..meta, unhandled_rejections:))
 }
 
 // young ids are young_start and up; old cells reach them only if written since
 fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
   let store = st.store
   let meta = store.meta
-  let Above(cells:, weak_ids:, survivors:, next_id: _) =
+  let Above(cells:, survivors:, next_id: _, walked:) =
     collect_above(
       st,
       extra_roots,
+      // a job never changes, so an old one holds only old cells
+      job_queue_fresh,
       meta.young_start,
       meta.old_gen,
-      meta.old_weak_ids,
+      // what an old one points at is old, or was just found by its change
+      [],
       holds_weak_targets,
+      fn(_) { None },
     )
+  // the next one will likely walk as much, so as much has to be made first
+  let thresholds = int.max(1, walked / { 2 * store.gc_threshold })
   Agent(
     ..st,
+    cells:,
+    gc_at: st.next_id + thresholds * store.gc_threshold,
     store: Store(
       ..store,
-      cells:,
-      alloc_since_gc: 0,
+      microtasks: job_queue_aged(store.microtasks),
       meta: types.StoreMeta(
         ..meta,
         live_count: meta.live_count + survivors,
         old_gen: cells,
-        young_start: store.next_id,
-        old_weak_ids: weak_ids,
-        minors_since_major: meta.minors_since_major + 1,
+        young_start: st.next_id,
+        minors_since_major: meta.minors_since_major + thresholds,
+        checked_subject: "",
       ),
     ),
   )
 }
 
-// next_id is one past the highest survivor
 type Above {
-  Above(cells: Arena(Cell), weak_ids: List(Int), survivors: Int, next_id: Int)
+  Above(
+    cells: Arena(Cell),
+    survivors: Int,
+    next_id: Int,
+    // how much had to be gone through to find the roots
+    walked: Int,
+  )
 }
 
 // a gc of the ids from w up; cells below w reach them only where they differ
@@ -520,51 +532,52 @@ type Above {
 fn collect_above(
   st: Agent,
   extra_roots: List(Handle),
+  jobs: fn(JobQueue) -> List(Job),
   w: Int,
   before: Arena(Cell),
   weak: List(Int),
   prunes: fn(Cell) -> Bool,
+  // where ids are handed out from next, given one past the highest survivor
+  restart: fn(Int) -> Option(Int),
 ) -> Above {
-  let store = st.store
-  let cells = store.cells
-  let roots = list.fold(extra_roots, agent_roots(st), fn(a, h) { [h.id, ..a] })
+  let cells = st.cells
   let roots =
-    list.fold(arena.diff_below(w, before, cells), roots, fn(acc, id) {
-      case arena.get_option(id, cells), arena.get_option(id, before) {
-        Some(cell), Some(before) -> diff_refs(before, cell, acc)
-        Some(cell), None -> push_cell_refs(cell, acc)
-        None, _ -> acc
-      }
-    })
-  let #(live, weak) = mark_young(cells, roots, w, dict.new(), weak)
-  let is_live = fn(id) { id < w || marked(id, live) }
-  let kept = case dict.size(live) * 2 > store.next_id - w {
-    True -> reset_dead(cells, w, store.next_id, live)
-    False ->
-      ascending(dict.keys(live))
-      |> list.fold(arena.truncate(w, cells), fn(acc, id) {
-        arena.set(id, arena.get(id, cells), acc)
-      })
+    list.fold(extra_roots, roots_with(st, jobs), fn(a, h) { [h.id, ..a] })
+  // less the pins from before keeping, which every engine has
+  let held =
+    list.length(roots)
+    - int.min(st.store.meta.kept.pins, set.size(st.store.pinned_roots))
+  let roots = {
+    use acc, id <- list.fold(arena.diff_below(w, before, cells), roots)
+    case arena.get_option(id, cells), arena.get_option(id, before) {
+      Some(cell), Some(before) -> diff_refs(before, cell, acc)
+      Some(cell), None -> push_cell_refs(cell, acc)
+      None, _ -> acc
+    }
   }
+  let walked = held + diffed(roots)
+  let #(live, survivors, weak, past) = mark(cells, roots, w, weak)
+  let is_live = fn(id) { id < w || is_marked(id, live) }
+  let next_id = restart(past) |> option.unwrap(st.next_id)
+  let kept = arena.keep_marked(w, live, next_id, cells)
   // ids are never reused, so stale weak keys only cost memory until a major
-  let #(kept, weak) =
-    list.fold(weak, #(kept, []), fn(acc, id) {
-      let #(kept, weak) = acc
-      case arena.get_option(id, kept) {
-        Some(cell) ->
-          case prunes(cell) {
-            True -> #(arena.set(id, prune_weak_cell(cell, is_live), kept), [
-              id,
-              ..weak
-            ])
-            False -> #(kept, [id, ..weak])
-          }
-        None -> acc
-      }
-    })
-  let next_id = dict.fold(live, w, fn(top, id, _) { int.max(top, id + 1) })
-  Above(cells: kept, weak_ids: weak, survivors: dict.size(live), next_id:)
+  let kept = {
+    use kept, id <- list.fold(weak, kept)
+    case arena.get_option(id, kept) {
+      Some(cell) ->
+        case prunes(cell) {
+          True -> arena.set(id, prune_weak_cell(cell, is_live), kept)
+          False -> kept
+        }
+      None -> kept
+    }
+  }
+  Above(cells: kept, survivors:, next_id:, walked:)
 }
+
+// how much diff_refs says it went through
+@external(erlang, "arc_rt_gc_ffi", "diffed")
+fn diffed(roots: List(Int)) -> Int
 
 fn holds_weak_targets(cell: Cell) -> Bool {
   case cell {
@@ -574,53 +587,8 @@ fn holds_weak_targets(cell: Cell) -> Bool {
   }
 }
 
-fn reset_dead(
-  cells: Arena(Cell),
-  id: Int,
-  next: Int,
-  live: Dict(Int, Nil),
-) -> Arena(Cell) {
-  case id >= next {
-    True -> cells
-    False ->
-      case marked(id, live) {
-        True -> reset_dead(cells, id + 1, next, live)
-        False -> reset_dead(arena.free(id, cells), id + 1, next, live)
-      }
-  }
-}
-
-// live young ids, plus any weak containers among them added to weak
-fn mark_young(
-  cells: Arena(Cell),
-  frontier: List(Int),
-  w: Int,
-  visited: Dict(Int, Nil),
-  weak: List(Int),
-) -> #(Dict(Int, Nil), List(Int)) {
-  case frontier {
-    [] -> #(visited, weak)
-    [id, ..rest] ->
-      case id < w || marked(id, visited) {
-        True -> mark_young(cells, rest, w, visited, weak)
-        False -> {
-          let visited = mark(id, Nil, visited)
-          case arena.get_option(id, cells) {
-            None -> mark_young(cells, rest, w, visited, weak)
-            Some(cell) -> {
-              let weak = case is_weak_cell(cell) {
-                True -> [id, ..weak]
-                False -> weak
-              }
-              mark_young(cells, push_cell_refs(cell, rest), w, visited, weak)
-            }
-          }
-        }
-      }
-  }
-}
-
-fn is_weak_cell(cell: Cell) -> Bool {
+// called by name from arc_rt_gc_ffi
+pub fn is_weak_cell(cell: Cell) -> Bool {
   case cell {
     SObject(kind: WeakMapObj(..), ..)
     | SObject(kind: WeakSetObj(..), ..)
@@ -640,70 +608,18 @@ fn is_read_ic(entry: IcEntry) -> Bool {
   }
 }
 
-@external(erlang, "lists", "sort")
-fn ascending(ids: List(Int)) -> List(Int)
-
-// hot, since we probe it once per heap edge
-@external(erlang, "maps", "is_key")
-fn marked(id: Int, live: Dict(Int, Nil)) -> Bool
-
-@external(erlang, "maps", "put")
-fn mark(id: Int, nil: Nil, live: Dict(Int, Nil)) -> Dict(Int, Nil)
-
-fn mark_reachable(
+// the live ids from w up, what they weigh, the weak containers among them
+// added to weak, and one past the highest
+@external(erlang, "arc_rt_gc_ffi", "mark")
+fn mark(
   cells: Arena(Cell),
-  frontier: List(Int),
-  visited: Dict(Int, Nil),
-) -> Dict(Int, Nil) {
-  case frontier {
-    [] -> visited
-    [id, ..rest] ->
-      case marked(id, visited) {
-        True -> mark_reachable(cells, rest, visited)
-        False -> {
-          let visited = mark(id, Nil, visited)
-          case arena.get_option(id, cells) {
-            None -> mark_reachable(cells, rest, visited)
-            Some(cell) ->
-              mark_reachable(cells, push_cell_refs(cell, rest), visited)
-          }
-        }
-      }
-  }
-}
+  roots: List(Int),
+  w: Int,
+  weak: List(Int),
+) -> #(arena.Marks, Int, List(Int), Int)
 
-type Swept {
-  Swept(cells: Arena(Cell), next_id: Int, weak_ids: List(Int))
-}
-
-fn sweep(cells: Arena(Cell), live: Dict(Int, Nil)) -> Swept {
-  let is_live = fn(id) { marked(id, live) }
-  let #(kept, weak) =
-    arena.fold(
-      fn(id, cell, acc) {
-        case marked(id, live) {
-          True -> {
-            let #(kept, weak) = acc
-            case is_weak_cell(cell) {
-              True -> #([#(id, prune_weak_cell(cell, is_live)), ..kept], [
-                id,
-                ..weak
-              ])
-              False -> #([#(id, cell), ..kept], weak)
-            }
-          }
-          False -> acc
-        }
-      },
-      #([], []),
-      cells,
-    )
-  let next = case kept {
-    [] -> 0
-    [#(id, _), ..] -> id + 1
-  }
-  Swept(cells: arena.from_descending(kept), next_id: next, weak_ids: weak)
-}
+@external(erlang, "arc_rt_gc_ffi", "is_marked")
+fn is_marked(id: Int, marks: arena.Marks) -> Bool
 
 // drop weak entries and registrations whose target died
 fn prune_weak_cell(cell: Cell, is_live: fn(Int) -> Bool) -> Cell {
@@ -765,21 +681,23 @@ fn weak_live(v: JsVal, is_live: fn(Int) -> Bool) -> Option(JsVal) {
   }
 }
 
+pub fn alloc_since_gc(st: Agent) -> Int {
+  st.next_id - st.store.meta.young_start
+}
+
 pub type GcStats {
   GcStats(live_count: Int, next_id: Int, alloc_since_gc: Int)
 }
 
 pub fn stats(st: Agent) -> GcStats {
-  let store = st.store
   GcStats(
-    live_count: arena.count(store.cells),
-    next_id: store.next_id,
-    alloc_since_gc: store.alloc_since_gc,
+    live_count: arena.count(st.cells),
+    next_id: st.next_id,
+    alloc_since_gc: alloc_since_gc(st),
   )
 }
 
 pub fn is_live(st: Agent, h: Handle) -> Bool {
-  let store = st.store
   let Handle(id) = h
-  option.is_some(arena.get_option(id, store.cells))
+  option.is_some(arena.get_option(id, st.cells))
 }

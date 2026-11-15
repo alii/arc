@@ -1263,7 +1263,9 @@ fn derive_lexical_layout(
   let seeded = function_info(tree, fn_id)
   let seeded_root_owns_lexical = case seeded.lexical {
     lexical.OwnedLexicalSlots(_) -> True
-    lexical.CapturedLexicalSlots(..) | lexical.NoLexicalSlots -> False
+    lexical.TrimmedLexicalSlots(..)
+    | lexical.CapturedLexicalSlots(..)
+    | lexical.NoLexicalSlots -> False
   }
   let script_root_owns = is_root && kind == Script && seeded_root_owns_lexical
   let #(lexical_captures, available) = case is_root, own.is_arrow {
