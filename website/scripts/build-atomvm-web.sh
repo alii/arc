@@ -55,6 +55,7 @@ BUILD="$WORK/src/platforms/emscripten/build"
 rm -rf "$BUILD" && mkdir -p "$BUILD"
 (cd "$BUILD" &&
   emcmake cmake .. -DAVM_EMSCRIPTEN_ENV=web -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS="-ffile-prefix-map=$WORK=AtomVM" \
     -DCMAKE_EXE_LINKER_FLAGS="-sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sINITIAL_MEMORY=268435456" >/dev/null &&
   emmake make -j8 AtomVM 2>&1 | grep -E "error|Built target AtomVM")
 
