@@ -3977,6 +3977,7 @@ built-ins/ArrayBuffer/prototype/slice/start-exceeds-length.js
 built-ins/ArrayBuffer/prototype/slice/this-is-sharedarraybuffer.js
 built-ins/ArrayBuffer/prototype/slice/tointeger-conversion-end.js
 built-ins/ArrayBuffer/prototype/slice/tointeger-conversion-start.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/argument-coercion.js
 built-ins/ArrayBuffer/prototype/sliceToImmutable/modify-source-after-return.js
 built-ins/ArrayBuffer/prototype/sliceToImmutable/not-a-constructor.js
 built-ins/ArrayBuffer/prototype/sliceToImmutable/prop-desc.js
@@ -49026,6 +49027,7 @@ staging/sm/TypedArray/sort_comparators.js
 staging/sm/TypedArray/sort_compare_nan.js
 staging/sm/TypedArray/sort_errors.js
 staging/sm/TypedArray/sort_globals.js
+staging/sm/TypedArray/sort_large_countingsort.js
 staging/sm/TypedArray/sort_modifications.js
 staging/sm/TypedArray/sort_small.js
 staging/sm/TypedArray/sort_snans.js
